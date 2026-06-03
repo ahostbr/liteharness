@@ -1,0 +1,82 @@
+[
+  {
+    "query": "is there a skill for generating database migrations?",
+    "should_trigger": true
+  },
+  {
+    "query": "find me a skill that can help with docker compose files",
+    "should_trigger": true
+  },
+  {
+    "query": "what skills are available for working with AWS?",
+    "should_trigger": true
+  },
+  {
+    "query": "I want to install that kubernetes skill someone posted about",
+    "should_trigger": true
+  },
+  {
+    "query": "discover new skills I can add to my setup",
+    "should_trigger": true
+  },
+  {
+    "query": "is there anything in the skills ecosystem for terraform?",
+    "should_trigger": true
+  },
+  {
+    "query": "can you search for a skill that handles GraphQL schema generation?",
+    "should_trigger": true
+  },
+  {
+    "query": "browse available skills, I want to see what's out there for devops stuff",
+    "should_trigger": true
+  },
+  {
+    "query": "any skills for rust code review? I'd love to install one",
+    "should_trigger": true
+  },
+  {
+    "query": "show me what agent skills exist for working with Supabase",
+    "should_trigger": true
+  },
+  {
+    "query": "search skills.sh for a Next.js skill package",
+    "should_trigger": false
+  },
+  {
+    "query": "find-skill-sh react testing library",
+    "should_trigger": false
+  },
+  {
+    "query": "how do I use Claude Code? what are the basic commands?",
+    "should_trigger": false
+  },
+  {
+    "query": "what can you do? list your capabilities",
+    "should_trigger": false
+  },
+  {
+    "query": "help me write a custom skill from scratch for my project",
+    "should_trigger": false
+  },
+  {
+    "query": "how do I configure my claude settings?",
+    "should_trigger": false
+  },
+  {
+    "query": "search skills.sh for procedural knowledge about postgres",
+    "should_trigger": false
+  },
+  {
+    "query": "what tools do you have access to right now?",
+    "should_trigger": false
+  },
+  {
+    "query": "how do I create a new plugin for claude code?",
+    "should_trigger": false
+  },
+  {
+    "query": "explain what MCP servers are and how they work",
+    "should_trigger": false
+  }
+]

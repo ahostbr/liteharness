@@ -1,0 +1,6 @@
+#!/bin/sh
+# liteharness — privacy gate: block author machine paths / personal data
+# (author home dirs, private drive paths, personal emails, IDs, private codenames)
+# from entering this public package. Brand/attribution is NOT blocked.
+# Enabled via: git config core.hooksPath .githooks
+python scripts/check_pii.py || exit 1

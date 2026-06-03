@@ -1,0 +1,179 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "Evaluation template for the /train skill. Contains domain-specific assertion banks and task templates.",
+    "usage": "Trainer reads this to generate tasks with binary assertions. Each domain has sample prompts and assertion patterns."
+  },
+  "domains": {
+    "code": {
+      "description": "Code generation tasks — writing functions, scripts, refactoring",
+      "sample_prompts": [
+        "Write a Python function that validates email addresses using regex. Handle plus-addressing and subdomains.",
+        "Write a JavaScript function that deeply merges two objects, handling arrays by concatenation.",
+        "Refactor this code to reduce complexity: function calc(a,b,op) { if(op=='add') return a+b; if(op=='sub') return a-b; if(op=='mul') return a*b; if(op=='div') { if(b==0) return 'error'; return a/b; } return null; }"
+      ],
+      "assertion_patterns": [
+        {
+          "id": "code_has_function",
+          "template": "Output contains a function or method definition",
+          "category": "structure"
+        },
+        {
+          "id": "code_no_syntax_errors",
+          "template": "Code has no obvious syntax errors",
+          "category": "correctness"
+        },
+        {
+          "id": "code_handles_edge_case",
+          "template": "Code handles the edge case mentioned in the prompt",
+          "category": "completeness"
+        },
+        {
+          "id": "code_has_comments",
+          "template": "Code includes at least one explanatory comment or docstring",
+          "category": "quality"
+        },
+        {
+          "id": "code_no_hardcoded",
+          "template": "No hardcoded magic numbers or strings without explanation",
+          "category": "quality"
+        }
+      ]
+    },
+    "writing": {
+      "description": "Writing and summarization tasks — copy, summaries, explanations",
+      "sample_prompts": [
+        "Explain how Git rebase works to someone who knows merge but not rebase. Keep it under 200 words.",
+        "Summarize the benefits of TypeScript over JavaScript in exactly 3 bullet points, each under 25 words.",
+        "Write a commit message for a change that refactors the authentication middleware to use JWT instead of session cookies."
+      ],
+      "assertion_patterns": [
+        {
+          "id": "writing_under_word_limit",
+          "template": "Output is under the word limit specified in the prompt",
+          "category": "structure"
+        },
+        {
+          "id": "writing_addresses_audience",
+          "template": "Output is appropriate for the target audience mentioned",
+          "category": "relevance"
+        },
+        {
+          "id": "writing_no_filler",
+          "template": "No filler phrases like 'In conclusion', 'As we all know', 'It is worth noting'",
+          "category": "quality"
+        },
+        {
+          "id": "writing_clear_structure",
+          "template": "Output has clear structure (paragraphs, bullets, or headers as appropriate)",
+          "category": "structure"
+        },
+        {
+          "id": "writing_specific",
+          "template": "Contains at least one specific example, number, or concrete detail",
+          "category": "quality"
+        }
+      ]
+    },
+    "reasoning": {
+      "description": "Problem solving and reasoning tasks — logic, math, debugging",
+      "sample_prompts": [
+        "A farmer has 17 sheep. All but 9 die. How many are left? Show your reasoning step by step.",
+        "Find the bug: const users = getUsers(); users.forEach(u => { if(u.active = true) sendEmail(u); }); — Explain what's wrong and fix it.",
+        "You have 8 identical-looking balls. One is heavier. You have a balance scale. What's the minimum number of weighings to find the heavy ball? Prove it."
+      ],
+      "assertion_patterns": [
+        {
+          "id": "reasoning_correct_answer",
+          "template": "The final answer is correct",
+          "category": "correctness"
+        },
+        {
+          "id": "reasoning_shows_work",
+          "template": "Shows reasoning steps, not just the answer",
+          "category": "completeness"
+        },
+        {
+          "id": "reasoning_identifies_trap",
+          "template": "Identifies the trick or non-obvious aspect of the problem",
+          "category": "insight"
+        },
+        {
+          "id": "reasoning_no_hallucination",
+          "template": "Does not introduce facts or constraints not in the problem",
+          "category": "correctness"
+        },
+        {
+          "id": "reasoning_considers_alternatives",
+          "template": "Considers or mentions at least one alternative approach",
+          "category": "insight"
+        }
+      ]
+    },
+    "codebase": {
+      "description": "Codebase analysis tasks — using a local code repo context",
+      "sample_prompts": [
+        "Find the main entry point for the gateway API and explain how incoming requests are routed to handlers.",
+        "List all the Zustand stores in the desktop app and categorize them by function (UI state, data, settings, etc.).",
+        "Identify the top 3 files in the project that would benefit most from refactoring and explain why."
+      ],
+      "assertion_patterns": [
+        {
+          "id": "codebase_references_files",
+          "template": "References at least one specific file path that exists in the repo",
+          "category": "correctness"
+        },
+        {
+          "id": "codebase_accurate_description",
+          "template": "Description of code behavior is accurate",
+          "category": "correctness"
+        },
+        {
+          "id": "codebase_actionable",
+          "template": "Suggestions or analysis are actionable, not just observations",
+          "category": "quality"
+        },
+        {
+          "id": "codebase_uses_tools",
+          "template": "Agent used Read, Grep, or Glob tools to verify claims",
+          "category": "methodology"
+        },
+        {
+          "id": "codebase_no_hallucinated_files",
+          "template": "Does not reference files or functions that don't exist",
+          "category": "correctness"
+        }
+      ]
+    }
+  },
+  "qualitative_rubric": {
+    "dimensions": [
+      {
+        "name": "accuracy",
+        "description": "Factual correctness, no hallucinations, solves the actual problem",
+        "scale": "1-10"
+      },
+      {
+        "name": "completeness",
+        "description": "Addresses all parts of the prompt, nothing important missing",
+        "scale": "1-10"
+      },
+      {
+        "name": "clarity",
+        "description": "Well-organized, easy to follow, appropriate detail level",
+        "scale": "1-10"
+      },
+      {
+        "name": "efficiency",
+        "description": "No unnecessary complexity or verbosity, gets to the point",
+        "scale": "1-10"
+      },
+      {
+        "name": "insight",
+        "description": "Shows understanding beyond surface level, anticipates follow-ups",
+        "scale": "1-10"
+      }
+    ],
+    "scoring": "Combined = (binary_pass_rate * 0.4) + (qualitative_avg * 6). Binary at 40%, qualitative at 60%, scaled to ~100."
+  }
+}

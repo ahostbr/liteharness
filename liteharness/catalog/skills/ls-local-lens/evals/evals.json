@@ -1,0 +1,37 @@
+[
+  {
+    "query": "this file is 5000 lines, can you summarize it without bloating my context?",
+    "should_trigger": true
+  },
+  { "query": "offload this to the local model, it's too big for context", "should_trigger": true },
+  { "query": "use local-lens to process this large log file", "should_trigger": true },
+  { "query": "compress this context before sending it to me", "should_trigger": true },
+  {
+    "query": "route this through the local model instead of wasting tokens",
+    "should_trigger": true
+  },
+  { "query": "summarize this massive JSON response using LM Studio", "should_trigger": true },
+  {
+    "query": "I need you to describe this screenshot but don't waste context on it",
+    "should_trigger": true
+  },
+  {
+    "query": "this API response is huge, can you extract just the relevant parts locally?",
+    "should_trigger": true
+  },
+  {
+    "query": "send this to devstral to summarize, don't eat my context window",
+    "should_trigger": true
+  },
+  { "query": "use the local model to process this build output", "should_trigger": true },
+  { "query": "summarize what this function does in one sentence", "should_trigger": false },
+  { "query": "can you read this 50-line config file?", "should_trigger": false },
+  { "query": "what does this error message mean?", "should_trigger": false },
+  { "query": "help me write a summary for this PR", "should_trigger": false },
+  { "query": "take a screenshot of my screen", "should_trigger": false },
+  { "query": "explain this code to me", "should_trigger": false },
+  { "query": "consult other models about this approach", "should_trigger": false },
+  { "query": "run this through the polymaths for analysis", "should_trigger": false },
+  { "query": "create a diagram of this architecture", "should_trigger": false },
+  { "query": "search the codebase for all uses of this function", "should_trigger": false }
+]

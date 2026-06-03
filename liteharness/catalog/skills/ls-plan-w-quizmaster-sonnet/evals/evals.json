@@ -1,0 +1,28 @@
+[
+  { "query": "sonnet plan: rebuild the auth system", "should_trigger": true },
+  { "query": "auto-plan the voice conversation feature", "should_trigger": true },
+  { "query": "autonomous plan for migrating the database schema", "should_trigger": true },
+  { "query": "sonnet plan: add real-time collaboration to the canvas", "should_trigger": true },
+  { "query": "plan-w-quizmaster-sonnet: design the new notification API", "should_trigger": true },
+  {
+    "query": "I want an autonomous plan — I'll be away while you work it out",
+    "should_trigger": true
+  },
+  { "query": "run an auto-plan on the notification system", "should_trigger": true },
+  { "query": "do a sonnet plan for the settings page redesign", "should_trigger": true },
+  { "query": "autonomous plan: redesign the toolbar component", "should_trigger": true },
+  { "query": "spawn a sonnet plan for the file browser panel", "should_trigger": true },
+  { "query": "fix the auth bug in the login handler", "should_trigger": false },
+  { "query": "what files handle WebSocket connections?", "should_trigger": false },
+  { "query": "refactor the canvas store to use zustand properly", "should_trigger": false },
+  { "query": "explain how the PTY daemon works", "should_trigger": false },
+  { "query": "run the linter and fix any errors", "should_trigger": false },
+  { "query": "help me write a SQL migration for adding a users table", "should_trigger": false },
+  { "query": "review this PR for me", "should_trigger": false },
+  { "query": "summarize today's git commits", "should_trigger": false },
+  {
+    "query": "what's the difference between plan-w-quizmaster and plan-w-quizmaster-sonnet?",
+    "should_trigger": false
+  },
+  { "query": "can you walk me through planning the LLM engine together?", "should_trigger": false }
+]

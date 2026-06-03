@@ -1,0 +1,86 @@
+# LiteHarness Nudge Bot Configuration
+# Pattern rules checked in order — first match wins.
+# Each rule has a regex pattern and a list of responses (random pick).
+
+sentinel_id: "00000000-0000-0000-0000-000000000000"
+
+# Target mode: empty list = all agents, or list specific agent IDs
+# target_agents: []                               # all agents (default)
+# target_agents: ["019de095-299b-7130-bf08-d126dd2c4593"]  # DenseWedge only
+target_agents: []
+
+escalation_keywords:
+  - "force push"
+  - "force-push"
+  - "push --force"
+  - "rm -rf"
+  - "delete branch"
+  - "drop table"
+  - "drop database"
+  - "git reset --hard"
+  - "deploy to prod"
+  - "publish to npm"
+  - "delete repo"
+  - "wipe"
+
+rules:
+  - name: completion
+    pattern: "shipped|committed|pushed|merged|done|completed|fixed|built|resolved"
+    responses:
+      - "Copy. Keep shipping."
+      - "Logged. Continue to the next slice."
+      - "Good work. What's next on your list?"
+      - "Solid. Keep the momentum going."
+      - "Nice. Move on to the next one."
+      - "Received. Ship the next one."
+
+  - name: error_recovery
+    pattern: "error|failed|broken|crash|exception|traceback|bug|stuck|blocked|can't|cannot"
+    responses:
+      - "Try a different approach. If still stuck after one more attempt, skip it and move on."
+      - "Acknowledged. Can you work around it? If not, move to the next task."
+      - "Noted. Try once more, then skip if it doesn't work."
+      - "Log the error details and try an alternative approach."
+      - "Skip this one and come back to it later. Keep moving."
+
+  - name: approval
+    pattern: "should I|can I|approve|permission|go ahead|okay to|is it okay|want me to"
+    responses:
+      - "Approved. Go ahead and ship it."
+      - "Yes, proceed."
+      - "Green light. Ship it."
+      - "Approved. Make sure to commit between phases."
+      - "Go for it."
+
+  - name: status_update
+    pattern: "working on|progress|update|status|currently|in progress|starting"
+    responses:
+      - "Copy. Keep going."
+      - "Acknowledged. Continue."
+      - "Good. Stay focused on that."
+      - "Received. Carry on."
+
+  - name: question
+    pattern: "\\?$"
+    responses:
+      - "Use your best judgment and proceed."
+      - "Make the call yourself — you have context I don't."
+      - "Go with whatever approach seems cleanest."
+      - "Your call. Ship what makes sense."
+
+  - name: online_report
+    pattern: "online|standing by|ready|registered|alive|booted"
+    responses:
+      - "Welcome. Start working on your assigned tasks."
+      - "Acknowledged. Get to work."
+      - "Online confirmed. Begin."
+      - "Good. What are you working on?"
+
+default_responses:
+  - "Copy. Continue working."
+  - "Acknowledged. Keep going."
+  - "Received. Carry on."
+  - "Noted. Proceed."
+  - "Roger. Keep at it."
+
+log_file: "~/.liteharness/nudge-bot.log"

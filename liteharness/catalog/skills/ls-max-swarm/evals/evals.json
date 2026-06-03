@@ -1,0 +1,82 @@
+[
+  {
+    "query": "swarm this task — spin up a bunch of agents to handle it",
+    "should_trigger": true
+  },
+  {
+    "query": "spawn a coding swarm to refactor all these files in parallel",
+    "should_trigger": true
+  },
+  {
+    "query": "max-swarm this: I need agents working on each module simultaneously",
+    "should_trigger": true
+  },
+  {
+    "query": "throw a swarm at this problem — each agent takes a different file",
+    "should_trigger": true
+  },
+  {
+    "query": "can you swarm the test writing across all the service files?",
+    "should_trigger": true
+  },
+  {
+    "query": "I need a swarm of agents to migrate these 15 components to the new API",
+    "should_trigger": true
+  },
+  {
+    "query": "spin up multiple coding agents to work on this in parallel, swarm style",
+    "should_trigger": true
+  },
+  {
+    "query": "swarm it — one agent per directory, all running at once",
+    "should_trigger": true
+  },
+  {
+    "query": "launch a swarm to handle all the lint fixes across the project",
+    "should_trigger": true
+  },
+  {
+    "query": "use max-swarm to parallelize the type migration across all routers",
+    "should_trigger": true
+  },
+  {
+    "query": "decompose this into subtasks and run them with max parallelism",
+    "should_trigger": false
+  },
+  {
+    "query": "how do I configure the swarm settings?",
+    "should_trigger": false
+  },
+  {
+    "query": "explain how parallel agent spawning works",
+    "should_trigger": false
+  },
+  {
+    "query": "run this task with recursive decomposition and parallel subagents",
+    "should_trigger": false
+  },
+  {
+    "query": "what flags does the parallel system support?",
+    "should_trigger": false
+  },
+  {
+    "query": "spawn a single subagent to handle this refactor",
+    "should_trigger": false
+  },
+  {
+    "query": "can you run these tests concurrently?",
+    "should_trigger": false
+  },
+  {
+    "query": "help me plan how to split this work across the team",
+    "should_trigger": false
+  },
+  {
+    "query": "what's the model tiering for parallel mode?",
+    "should_trigger": false
+  },
+  {
+    "query": "use k-spawnteam to create a team for this task",
+    "should_trigger": false
+  }
+]

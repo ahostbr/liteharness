@@ -1,0 +1,82 @@
+[
+  {
+    "query": "get a second opinion on this architecture from another model",
+    "should_trigger": true
+  },
+  {
+    "query": "what do other models think about this approach? I want a comparison",
+    "should_trigger": true
+  },
+  {
+    "query": "consult GPT and Gemini on whether this database schema makes sense",
+    "should_trigger": true
+  },
+  {
+    "query": "I want multiple perspectives on this — ask a few different LLMs",
+    "should_trigger": true
+  },
+  {
+    "query": "run this design decision by other AI models and see if they agree",
+    "should_trigger": true
+  },
+  {
+    "query": "can you cross-check this with another model? I'm not sure you're right",
+    "should_trigger": true
+  },
+  {
+    "query": "get me a multi-model comparison on the best way to handle state management here",
+    "should_trigger": true
+  },
+  {
+    "query": "I'd like a second set of eyes from a different AI on this code review",
+    "should_trigger": true
+  },
+  {
+    "query": "poll the other models — is this the right tradeoff or am I crazy?",
+    "should_trigger": true
+  },
+  {
+    "query": "ask Claude, GPT, and Gemini to each weigh in on this refactor strategy",
+    "should_trigger": true
+  },
+  {
+    "query": "how do I call the OpenAI API from Python?",
+    "should_trigger": false
+  },
+  {
+    "query": "review this code and tell me if there are bugs",
+    "should_trigger": false
+  },
+  {
+    "query": "what's the difference between GPT-4 and GPT-4o?",
+    "should_trigger": false
+  },
+  {
+    "query": "help me write a prompt for image generation",
+    "should_trigger": false
+  },
+  {
+    "query": "what do you think about using Redis here?",
+    "should_trigger": false
+  },
+  {
+    "query": "explain how transformer attention mechanisms work",
+    "should_trigger": false
+  },
+  {
+    "query": "which LLM should I use for my chatbot product?",
+    "should_trigger": false
+  },
+  {
+    "query": "can you debug this function? it's returning null",
+    "should_trigger": false
+  },
+  {
+    "query": "write me a unit test for this authentication module",
+    "should_trigger": false
+  },
+  {
+    "query": "how much does the Anthropic API cost per token?",
+    "should_trigger": false
+  }
+]

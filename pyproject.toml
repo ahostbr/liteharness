@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "liteharness"
+version = "0.2.3"
+description = "Portable cross-CLI agent orchestration. Hook-polled inbox, conversation discovery, task tracking."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["psutil>=5.9"]
+authors = [{ name = "Ryan Devlin", email = "ryan@litesuite.dev" }]
+maintainers = [{ name = "Ryan Devlin", email = "ryan@litesuite.dev" }]
+keywords = ["ai", "agents", "orchestration", "claude", "gemini", "codex", "mcp", "multi-agent", "cli", "pty"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Distributed Computing",
+  "Topic :: Terminals",
+]
+
+[project.urls]
+Homepage = "https://litesuite.dev/liteharness"
+Documentation = "https://litesuite.dev/liteharness"
+Repository = "https://github.com/ahostbr/liteharness"
+Issues = "https://github.com/ahostbr/liteharness/issues"
+Changelog = "https://github.com/ahostbr/liteharness/blob/main/CHANGELOG.md"
+
+[project.scripts]
+liteharness = "liteharness.cli:main"
+
+[project.optional-dependencies]
+embed = ["onnxruntime>=1.18.0", "numpy>=1.26.0", "huggingface_hub>=0.23.0", "tokenizers>=0.19.0"]
+
+[tool.setuptools.packages.find]
+include = ["liteharness*"]
+
+[tool.setuptools.package-data]
+liteharness = [
+  "hooks_configs/*.json",
+  "hooks_configs/*.ts",
+  "cli_scripts/**/*.py",
+  "ps_scripts/*.ps1",
+  "catalog/PROVENANCE.json",
+  "catalog/skills/**/*",
+  "catalog/agents/**/*",
+  "catalog/commands/**/*",
+  "catalog/hooks/**/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

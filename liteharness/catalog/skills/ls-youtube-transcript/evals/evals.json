@@ -1,0 +1,82 @@
+[
+  {
+    "query": "can you grab the transcript from this youtube video https://youtube.com/watch?v=abc123",
+    "should_trigger": true
+  },
+  {
+    "query": "what did the guy say in this yt vid? https://youtu.be/xyz789",
+    "should_trigger": true
+  },
+  {
+    "query": "I need a text version of this YouTube talk, here's the link: https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "should_trigger": true
+  },
+  {
+    "query": "pull the captions from this video so I can search through them https://youtube.com/watch?v=test456",
+    "should_trigger": true
+  },
+  {
+    "query": "hey can you get me what's said in this youtube lecture? I want to quote something from it https://youtu.be/lecture1",
+    "should_trigger": true
+  },
+  {
+    "query": "extract the subtitles from this youtube interview for me",
+    "should_trigger": true
+  },
+  {
+    "query": "I watched this youtube video last week and need the full text of what was said, url is https://youtube.com/watch?v=mem999",
+    "should_trigger": true
+  },
+  {
+    "query": "get transcript https://www.youtube.com/watch?v=short",
+    "should_trigger": true
+  },
+  {
+    "query": "what are the key points from this youtube video? can you transcribe it first? https://youtu.be/kp123",
+    "should_trigger": true
+  },
+  {
+    "query": "download the words spoken in this yt video so I can make notes https://youtube.com/watch?v=notes1",
+    "should_trigger": true
+  },
+  {
+    "query": "can you watch this youtube video and tell me if it's any good?",
+    "should_trigger": false
+  },
+  {
+    "query": "I need to create a youtube video about cooking, help me with a script",
+    "should_trigger": false
+  },
+  {
+    "query": "transcribe this audio file I recorded from a meeting, it's an mp3",
+    "should_trigger": false
+  },
+  {
+    "query": "can you download this youtube video as mp4?",
+    "should_trigger": false
+  },
+  {
+    "query": "transcribe this zoom recording for me, here's the file path",
+    "should_trigger": false
+  },
+  {
+    "query": "help me add subtitles to my video before I upload it to youtube",
+    "should_trigger": false
+  },
+  {
+    "query": "what's trending on youtube right now?",
+    "should_trigger": false
+  },
+  {
+    "query": "I need to transcribe a podcast episode from spotify",
+    "should_trigger": false
+  },
+  {
+    "query": "can you summarize what's on this webpage? https://medium.com/some-article",
+    "should_trigger": false
+  },
+  {
+    "query": "convert this voice memo to text, it's a wav file on my desktop",
+    "should_trigger": false
+  }
+]

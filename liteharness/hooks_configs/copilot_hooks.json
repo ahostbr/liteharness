@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "python -m liteharness.hooks register",
+        "powershell": "python -m liteharness.hooks register",
+        "timeoutSec": 5
+      },
+      {
+        "type": "command",
+        "bash": "python -m liteharness.hooks check",
+        "powershell": "python -m liteharness.hooks check",
+        "timeoutSec": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "python -m liteharness.hooks check",
+        "powershell": "python -m liteharness.hooks check",
+        "timeoutSec": 5
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "python -m liteharness.hooks check",
+        "powershell": "python -m liteharness.hooks check",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

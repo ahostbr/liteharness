@@ -1,0 +1,22 @@
+[
+  { "query": "what's on my screen right now?", "should_trigger": true },
+  { "query": "can you see what I'm looking at?", "should_trigger": true },
+  { "query": "start watching my screen so you know what I'm working on", "should_trigger": true },
+  { "query": "I want you to be aware of what's on my display", "should_trigger": true },
+  { "query": "enable screen awareness so you can see my desktop", "should_trigger": true },
+  { "query": "start litewatch", "should_trigger": true },
+  { "query": "watch my screen while I work on this", "should_trigger": true },
+  { "query": "I need you to see what I see — turn on screen capture", "should_trigger": true },
+  { "query": "can you look at my monitor and tell me what app is open?", "should_trigger": true },
+  { "query": "give me screen context — what's happening on my desktop?", "should_trigger": true },
+  { "query": "take a screenshot of this webpage and save it", "should_trigger": false },
+  { "query": "create a screenshot-based Playwright test", "should_trigger": false },
+  { "query": "can you read this image file I have on disk?", "should_trigger": false },
+  { "query": "describe what's in this PNG file", "should_trigger": false },
+  { "query": "help me set up screen recording for my app demo", "should_trigger": false },
+  { "query": "what does this error message on line 42 mean?", "should_trigger": false },
+  { "query": "monitor the CPU usage of this process", "should_trigger": false },
+  { "query": "watch this log file for errors", "should_trigger": false },
+  { "query": "open the browser and navigate to this URL", "should_trigger": false },
+  { "query": "summarize this large file for me", "should_trigger": false }
+]

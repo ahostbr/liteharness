@@ -1,0 +1,28 @@
+[
+  { "query": "scout the codebase for how authentication works", "should_trigger": true },
+  { "query": "go find where the API routes are defined", "should_trigger": true },
+  {
+    "query": "look up the electron documentation for BrowserWindow options",
+    "should_trigger": true
+  },
+  {
+    "query": "search for how other projects handle WebSocket reconnection",
+    "should_trigger": true
+  },
+  { "query": "read and summarize the architecture docs for me", "should_trigger": true },
+  { "query": "explore this directory and tell me what's in it", "should_trigger": true },
+  { "query": "investigate how the store initialization works", "should_trigger": true },
+  { "query": "can you research what frameworks support server components", "should_trigger": true },
+  { "query": "find out how the playground system discovers HTML files", "should_trigger": true },
+  { "query": "what does the gateway API do? dig into it", "should_trigger": true },
+  { "query": "fix the bug in the sidebar component", "should_trigger": false },
+  { "query": "write a function that validates email addresses", "should_trigger": false },
+  { "query": "refactor this code to use async await", "should_trigger": false },
+  { "query": "create a new React component for the settings page", "should_trigger": false },
+  { "query": "commit these changes with a descriptive message", "should_trigger": false },
+  { "query": "run the tests and see if they pass", "should_trigger": false },
+  { "query": "deploy the app to production", "should_trigger": false },
+  { "query": "add a new route to the express server", "should_trigger": false },
+  { "query": "delete the unused files from the project", "should_trigger": false },
+  { "query": "review this pull request for code quality issues", "should_trigger": false }
+]

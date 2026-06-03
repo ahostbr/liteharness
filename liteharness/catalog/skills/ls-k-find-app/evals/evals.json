@@ -1,0 +1,82 @@
+[
+  {
+    "query": "show me an example project that does something similar to what we're building",
+    "should_trigger": true
+  },
+  {
+    "query": "find me a reference app for real-time collaboration — I want to see how others handle it",
+    "should_trigger": true
+  },
+  {
+    "query": "is there a good open source implementation I can study for websocket auth patterns?",
+    "should_trigger": true
+  },
+  {
+    "query": "I need to look at how other people built drag-and-drop kanban boards, got any examples?",
+    "should_trigger": true
+  },
+  {
+    "query": "pull up a sample project that uses tRPC with Next.js so I can see the pattern",
+    "should_trigger": true
+  },
+  {
+    "query": "what reference implementations exist for multi-tenant SaaS apps?",
+    "should_trigger": true
+  },
+  {
+    "query": "can you dig up an app I can look at that does RBAC properly in FastAPI?",
+    "should_trigger": true
+  },
+  {
+    "query": "show me how other projects structure their monorepo — find me a good one to study",
+    "should_trigger": true
+  },
+  {
+    "query": "I want to see a working example of electron auto-update, find one for me",
+    "should_trigger": true
+  },
+  {
+    "query": "find a reference codebase that handles offline-first sync well",
+    "should_trigger": true
+  },
+  {
+    "query": "search google for how to implement JWT refresh tokens",
+    "should_trigger": false
+  },
+  {
+    "query": "where's the documentation for the Stripe API?",
+    "should_trigger": false
+  },
+  {
+    "query": "what skills do I have available for code generation?",
+    "should_trigger": false
+  },
+  {
+    "query": "find the file where we define the router config",
+    "should_trigger": false
+  },
+  {
+    "query": "look up the React docs for useEffect cleanup",
+    "should_trigger": false
+  },
+  {
+    "query": "search the codebase for all uses of createContext",
+    "should_trigger": false
+  },
+  {
+    "query": "what's the best practice for error handling in Python?",
+    "should_trigger": false
+  },
+  {
+    "query": "find the skill that handles TTS voice output",
+    "should_trigger": false
+  },
+  {
+    "query": "look through our project for unused imports",
+    "should_trigger": false
+  },
+  {
+    "query": "how do I install pnpm on Windows?",
+    "should_trigger": false
+  }
+]

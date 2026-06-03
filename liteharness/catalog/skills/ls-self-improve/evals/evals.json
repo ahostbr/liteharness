@@ -1,0 +1,22 @@
+[
+  { "query": "self-improve", "should_trigger": true },
+  { "query": "improve my skills", "should_trigger": true },
+  { "query": "sharpen my skill descriptions", "should_trigger": true },
+  { "query": "optimize skill descriptions", "should_trigger": true },
+  { "query": "train all skills", "should_trigger": true },
+  { "query": "run the self-improvement loop", "should_trigger": true },
+  { "query": "make my skills better", "should_trigger": true },
+  { "query": "scan skills and train underperformers", "should_trigger": true },
+  { "query": "recompile skills with updated descriptions", "should_trigger": true },
+  { "query": "meta improve my agent skills", "should_trigger": true },
+  { "query": "create a new skill for me", "should_trigger": false },
+  { "query": "list all my skills", "should_trigger": false },
+  { "query": "what skills do I have", "should_trigger": false },
+  { "query": "train the test-subject agent", "should_trigger": false },
+  { "query": "write some Python code", "should_trigger": false },
+  { "query": "help me plan a feature", "should_trigger": false },
+  { "query": "review this pull request", "should_trigger": false },
+  { "query": "compile this skill into a CLI", "should_trigger": false },
+  { "query": "search for new skills to install", "should_trigger": false },
+  { "query": "describe what the vault skill does", "should_trigger": false }
+]

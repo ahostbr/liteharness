@@ -1,0 +1,224 @@
+"""
+LiteHarness Config — Agent identity and settings.
+"""
+
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Optional
+
+HARNESS_ROOT = Path.home() / ".liteharness"
+CONFIG_PATH = HARNESS_ROOT / "config.json"
+
+
+def get_root() -> Path:
+    return HARNESS_ROOT
+
+
+def ensure_root() -> None:
+    HARNESS_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def load() -> dict:
+    """Load config from ~/.liteharness/config.json"""
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save(config: dict) -> None:
+    """Save config to ~/.liteharness/config.json"""
+    ensure_root()
+    CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def _find_claude_session_id() -> Optional[str]:
+    """
+    Find the current Claude Code session ID by scanning conversation JSONLs.
+
+    Follows the conversation-lookup pattern:
+    1. Scan ~/.claude/projects/*/*.jsonl
+    2. Try to match CWD to project directory name (Claude encodes paths with dashes)
+    3. Within matching project, find most recently modified JSONL
+    4. Fall back to most recent JSONL globally if no CWD match
+    5. Must be active within last 5 minutes
+    """
+    claude_projects = Path.home() / ".claude" / "projects"
+    if not claude_projects.exists():
+        return None
+
+    cwd = os.getcwd()
+    # Claude encodes project paths: C:\Projects\MyApp -> C--Projects-MyApp
+    # or D:\Work\benchmark -> D--Work-benchmark
+    cwd_encoded = cwd.replace(":\\", "--").replace("\\", "-").replace("/", "-")
+
+    best_match = None  # Best match within CWD's project dir
+    best_match_mtime = 0.0
+    best_global = None  # Best match across all projects
+    best_global_mtime = 0.0
+
+    for project_dir in claude_projects.iterdir():
+        if not project_dir.is_dir():
+            continue
+        # Skip noisy dirs
+        if "litegauntlet" in project_dir.name or "AppData-Local-Temp" in project_dir.name:
+            continue
+
+        is_cwd_match = project_dir.name == cwd_encoded
+
+        for jsonl in project_dir.glob("*.jsonl"):
+            try:
+                mtime = jsonl.stat().st_mtime
+            except OSError:
+                continue
+
+            if is_cwd_match and mtime > best_match_mtime:
+                best_match_mtime = mtime
+                best_match = jsonl
+
+            if mtime > best_global_mtime:
+                best_global_mtime = mtime
+                best_global = jsonl
+
+    # Prefer CWD-scoped match, fall back to global
+    candidate = best_match or best_global
+    candidate_mtime = best_match_mtime if best_match else best_global_mtime
+
+    if candidate and (time.time() - candidate_mtime < 43200):  # Active in last 12 hours
+        return candidate.stem  # UUID filename without .jsonl
+
+    return None
+
+
+def get_agent_id() -> str:
+    """
+    Get or create this agent's identity.
+
+    Priority:
+    1. LITEHARNESS_AGENT_ID env var (explicitly set by orchestrator)
+    2. CLI-provided session IDs (CLAUDE_SESSION_ID, etc.)
+    3. Auto-detect from most recent Claude Code conversation JSONL
+    4. Fall back to config-stored ID
+    """
+    # Check for explicit override
+    explicit = os.environ.get("LITEHARNESS_AGENT_ID")
+    if explicit:
+        return explicit
+
+    # Check LiteSuite-specific agent ID
+    litesuite_id = os.environ.get("LITESUITE_AGENT_ID")
+    if litesuite_id:
+        return litesuite_id
+
+    # Check Claude Code session ID
+    claude_code_session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if claude_code_session:
+        return claude_code_session
+
+    # Check CLI-provided session IDs
+    session_id = (
+        os.environ.get("LITECODE_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or os.environ.get("GEMINI_SESSION_ID")
+        or os.environ.get("CODEX_SESSION_ID")
+    )
+    if session_id:
+        return session_id
+
+    # Auto-detect from Claude Code conversation files
+    claude_id = _find_claude_session_id()
+    if claude_id:
+        return claude_id
+
+    # Fall back to config-stored ID
+    cfg = load()
+    if "agent_id" in cfg:
+        return cfg["agent_id"]
+
+    # Generate and persist
+    agent_id = f"lh-{uuid.uuid4().hex[:12]}"
+    cfg["agent_id"] = agent_id
+    save(cfg)
+    return agent_id
+
+
+def get_model() -> str:
+    """Get the current model name from env or config."""
+    return (
+        os.environ.get("LITEHARNESS_MODEL")  # Set by hook from stdin JSON (e.g. Claude Code model.display_name)
+        or os.environ.get("LITECODE_MODEL")
+        or os.environ.get("CLAUDE_MODEL")
+        or os.environ.get("GEMINI_MODEL")
+        or os.environ.get("CODEX_MODEL")
+        or load().get("model", "unknown")
+    )
+
+
+def get_cli() -> str:
+    """Detect which CLI is running."""
+    explicit = os.environ.get("LITEHARNESS_CLI")
+    if explicit:
+        return explicit
+    if os.environ.get("LITECODE_SESSION_ID"):
+        return "litecode"
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("CLAUDE_CODE_VERSION"):
+        return "claude-code"
+    if os.environ.get("GEMINI_SESSION_ID"):
+        return "gemini-cli"
+    if os.environ.get("CODEX_SESSION_ID"):
+        return "codex-cli"
+    if os.environ.get("COPILOT_SESSION_ID"):
+        return "copilot-cli"
+    if os.environ.get("OPENCODE_SESSION_ID"):
+        return "opencode"
+    return "unknown"
+
+
+def detect_installed_clis() -> list[str]:
+    """Detect which AI coding CLIs are installed."""
+    import shutil
+
+    clis = []
+    cli_binaries = {
+        "claude-code": "claude",
+        "gemini-cli": "gemini",
+        "codex-cli": "codex",
+        "cursor": "cursor",
+        "opencode": "opencode",
+        "kilocode": "kilocode",
+        "kiro": "kiro",
+        "copilot-cli": "gh",
+        "litecode": "litecode",
+    }
+    for name, binary in cli_binaries.items():
+        if shutil.which(binary):
+            # For copilot-cli, gh must exist but that's just the base CLI
+            # Check for the copilot extension or copilot-cli binary
+            if name == "copilot-cli":
+                copilot_bin = shutil.which("copilot")
+                copilot_dir = Path.home() / ".github" / "copilot-cli"
+                if copilot_bin or copilot_dir.exists():
+                    clis.append(name)
+            else:
+                clis.append(name)
+
+    # Also check by config directory existence
+    config_dirs = {
+        "claude-code": Path.home() / ".claude",
+        "gemini-cli": Path.home() / ".gemini",
+        "cursor": Path.home() / ".cursor",
+        "codex-cli": Path.home() / ".codex",
+        "kilocode": Path.home() / ".kilocode",
+        "opencode": Path.home() / ".config" / "opencode",
+        "litecode": Path.home() / ".litecode",
+    }
+    for name, path in config_dirs.items():
+        if path.exists() and name not in clis:
+            clis.append(name)
+
+    return clis

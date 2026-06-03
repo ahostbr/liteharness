@@ -1,0 +1,22 @@
+[
+  { "query": "list all my skills", "should_trigger": true },
+  { "query": "what skills do I have available?", "should_trigger": true },
+  { "query": "show me all agents across my codebases", "should_trigger": true },
+  { "query": "what commands can I use in <your-project>?", "should_trigger": true },
+  { "query": "do I have a skill for marketing?", "should_trigger": true },
+  { "query": "search my library for testing tools", "should_trigger": true },
+  { "query": "what capabilities do I have?", "should_trigger": true },
+  { "query": "describe the polymathic-feynman agent", "should_trigger": true },
+  { "query": "catalog all my agentics", "should_trigger": true },
+  { "query": "is there a skill for video analysis?", "should_trigger": true },
+  { "query": "install a new skill from skills.sh", "should_trigger": false },
+  { "query": "create a new agent configuration", "should_trigger": false },
+  { "query": "write a marketing plan for my product", "should_trigger": false },
+  { "query": "run my playwright e2e tests", "should_trigger": false },
+  { "query": "generate an image of a sunset", "should_trigger": false },
+  { "query": "help me debug this TypeError", "should_trigger": false },
+  { "query": "train the test-subject agent", "should_trigger": false },
+  { "query": "get the transcript from this YouTube video", "should_trigger": false },
+  { "query": "consult the polymaths about this architecture", "should_trigger": false },
+  { "query": "plan out the authentication feature", "should_trigger": false }
+]

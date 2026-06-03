@@ -1,0 +1,82 @@
+[
+  {
+    "query": "make me a concert poster for my band's show this Friday night",
+    "should_trigger": true
+  },
+  {
+    "query": "design a birthday card with balloons and confetti, export as PNG",
+    "should_trigger": true
+  },
+  {
+    "query": "I need a professional looking flyer for our garage sale this weekend",
+    "should_trigger": true
+  },
+  {
+    "query": "create some graphic art with a cyberpunk city skyline, neon colors, save as pdf",
+    "should_trigger": true
+  },
+  {
+    "query": "can you make a social media banner for my twitter profile? 1500x500 pixels",
+    "should_trigger": true
+  },
+  {
+    "query": "design a menu for my restaurant, two columns, elegant font, output as png",
+    "should_trigger": true
+  },
+  {
+    "query": "I want a motivational quote poster with a mountain background",
+    "should_trigger": true
+  },
+  {
+    "query": "create an album cover art for my EP, dark moody aesthetic",
+    "should_trigger": true
+  },
+  {
+    "query": "make a save-the-date card for our wedding, floral theme, exportable as PDF",
+    "should_trigger": true
+  },
+  {
+    "query": "design a logo for my startup, clean and minimal, output as high-res PNG",
+    "should_trigger": true
+  },
+  {
+    "query": "draw me an architecture diagram showing how our microservices connect",
+    "should_trigger": false
+  },
+  {
+    "query": "create a flowchart of the user signup process with decision branches",
+    "should_trigger": false
+  },
+  {
+    "query": "design the landing page UI for our new SaaS product with React components",
+    "should_trigger": false
+  },
+  {
+    "query": "build me a dashboard with charts showing revenue over time using recharts",
+    "should_trigger": false
+  },
+  {
+    "query": "make a data visualization of our sales funnel using d3.js",
+    "should_trigger": false
+  },
+  {
+    "query": "create a wireframe for the mobile app's settings screen",
+    "should_trigger": false
+  },
+  {
+    "query": "generate a matplotlib chart of this CSV data",
+    "should_trigger": false
+  },
+  {
+    "query": "draw a UML class diagram for our payment module",
+    "should_trigger": false
+  },
+  {
+    "query": "design a React component library with buttons, inputs, and modals",
+    "should_trigger": false
+  },
+  {
+    "query": "create a mind map of our product roadmap in excalidraw",
+    "should_trigger": false
+  }
+]

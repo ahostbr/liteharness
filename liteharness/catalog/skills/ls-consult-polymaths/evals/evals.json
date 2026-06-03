@@ -1,0 +1,46 @@
+[
+  {
+    "query": "run this architecture decision by the polymaths and see what they think",
+    "should_trigger": true
+  },
+  {
+    "query": "I want expert opinions on whether this database schema is right",
+    "should_trigger": true
+  },
+  { "query": "can you get feynman and carmack to review this code?", "should_trigger": true },
+  { "query": "what would the polymaths say about this approach?", "should_trigger": true },
+  {
+    "query": "I need diverse expert perspectives on this tradeoff between Redis and PostgreSQL",
+    "should_trigger": true
+  },
+  {
+    "query": "ask the polymaths to debate whether we should use microservices or a monolith",
+    "should_trigger": true
+  },
+  {
+    "query": "this design feels off, can you get some expert thinkers to analyze it?",
+    "should_trigger": true
+  },
+  {
+    "query": "I want a multi-perspective review of this PR before I merge it",
+    "should_trigger": true
+  },
+  {
+    "query": "consult the polymaths on whether this API design will scale",
+    "should_trigger": true
+  },
+  { "query": "get me a polymath review of this authentication flow", "should_trigger": true },
+  {
+    "query": "what do other AI models think about this approach? ask GPT and Gemini",
+    "should_trigger": false
+  },
+  { "query": "consult multiple LLMs for a second opinion on this code", "should_trigger": false },
+  { "query": "review this React component for anti-patterns", "should_trigger": false },
+  { "query": "can you plan out this feature for me?", "should_trigger": false },
+  { "query": "help me debug this TypeError in my Python script", "should_trigger": false },
+  { "query": "create a flowchart showing the data pipeline", "should_trigger": false },
+  { "query": "what's the best practice for error handling in Go?", "should_trigger": false },
+  { "query": "refactor this function to be more readable", "should_trigger": false },
+  { "query": "search stack overflow for solutions to this CORS issue", "should_trigger": false },
+  { "query": "write unit tests for this service class", "should_trigger": false }
+]

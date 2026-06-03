@@ -1,0 +1,11 @@
+{
+  "interval_seconds": 5,
+  "capture_mode": "primary",
+  "model": "glm-ocr",
+  "max_summaries": 20,
+  "output_path": "screen_context.txt",
+  "api_url": "http://localhost:1234/v1/chat/completions",
+  "system_prompt": "You are a screen reader for an AI coding assistant. Describe what the user is currently doing on their computer. Focus on:\n- Active application and window title\n- File or page open (name, path if visible)\n- Key visible content (code, text, UI elements)\n- User's apparent task or activity\nBe concise. 2-4 sentences maximum. No markdown formatting.",
+  "max_tokens": 200,
+  "temperature": 0.1
+}

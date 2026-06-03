@@ -1,0 +1,82 @@
+[
+  {
+    "query": "plan this feature with quizmaster validation — I want rigorous requirements",
+    "should_trigger": true
+  },
+  {
+    "query": "plan-w-quizmaster for the new auth system, make sure we don't miss anything",
+    "should_trigger": true
+  },
+  {
+    "query": "I need a plan with quiz-style validation before we start building",
+    "should_trigger": true
+  },
+  {
+    "query": "do quizmaster planning — challenge my assumptions before we commit to this design",
+    "should_trigger": true
+  },
+  {
+    "query": "plan with quizmaster — interrogate the requirements thoroughly first",
+    "should_trigger": true
+  },
+  {
+    "query": "use quizmaster mode to validate this plan before we execute",
+    "should_trigger": true
+  },
+  {
+    "query": "I want rigorous requirements gathering with the quiz approach, then build a plan",
+    "should_trigger": true
+  },
+  {
+    "query": "plan this the hard way — quizmaster style, poke holes in everything first",
+    "should_trigger": true
+  },
+  {
+    "query": "plan-w-quizmaster the database redesign, I want to catch edge cases upfront",
+    "should_trigger": true
+  },
+  {
+    "query": "run the quizmaster planning process on this feature — stress test the requirements",
+    "should_trigger": true
+  },
+  {
+    "query": "create a plan for this feature",
+    "should_trigger": false
+  },
+  {
+    "query": "just make a simple implementation plan, nothing fancy",
+    "should_trigger": false
+  },
+  {
+    "query": "brainstorm some ideas for the notification system",
+    "should_trigger": false
+  },
+  {
+    "query": "break this task down into subtasks for the team",
+    "should_trigger": false
+  },
+  {
+    "query": "quiz me on TypeScript generics",
+    "should_trigger": false
+  },
+  {
+    "query": "validate that my code meets the requirements",
+    "should_trigger": false
+  },
+  {
+    "query": "plan this feature using k-plan and decompose for parallel execution",
+    "should_trigger": false
+  },
+  {
+    "query": "what are the requirements for the new dashboard?",
+    "should_trigger": false
+  },
+  {
+    "query": "review my implementation plan and give feedback",
+    "should_trigger": false
+  },
+  {
+    "query": "start executing the plan we already created",
+    "should_trigger": false
+  }
+]

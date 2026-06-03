@@ -1,0 +1,82 @@
+[
+  {
+    "query": "review this React component for anti-patterns, it's using useEffect everywhere",
+    "should_trigger": true
+  },
+  {
+    "query": "check my TypeScript types in this file, I think I'm using 'any' too much",
+    "should_trigger": true
+  },
+  {
+    "query": "is this React 19 code correct? I'm not sure if I'm using the new use() hook right",
+    "should_trigger": true
+  },
+  {
+    "query": "code review my tsx file, especially the state management pattern I chose",
+    "should_trigger": true
+  },
+  {
+    "query": "look at this React component and tell me if there are performance issues with my re-renders",
+    "should_trigger": true
+  },
+  {
+    "query": "I have a TypeScript React app and the types feel wrong, can you audit the type safety?",
+    "should_trigger": true
+  },
+  {
+    "query": "review this custom hook I wrote, does it follow React best practices?",
+    "should_trigger": true
+  },
+  {
+    "query": "my tsx file has some sketchy patterns, mind taking a look? especially around memo and callbacks",
+    "should_trigger": true
+  },
+  {
+    "query": "is my React context provider set up correctly? I keep getting unnecessary re-renders in child components",
+    "should_trigger": true
+  },
+  {
+    "query": "audit this TypeScript interface hierarchy in my React app, I think the generics are overly complex",
+    "should_trigger": true
+  },
+  {
+    "query": "review this Python Flask API for security vulnerabilities",
+    "should_trigger": false
+  },
+  {
+    "query": "write me a new React component for a user settings page",
+    "should_trigger": false
+  },
+  {
+    "query": "review this Go code for memory leaks and goroutine issues",
+    "should_trigger": false
+  },
+  {
+    "query": "build a React dashboard with charts and filters from scratch",
+    "should_trigger": false
+  },
+  {
+    "query": "check this SQL query for performance, it's running slow",
+    "should_trigger": false
+  },
+  {
+    "query": "review my CSS file for browser compatibility issues",
+    "should_trigger": false
+  },
+  {
+    "query": "help me refactor this Java class, it violates SOLID principles",
+    "should_trigger": false
+  },
+  {
+    "query": "generate TypeScript types from this OpenAPI schema",
+    "should_trigger": false
+  },
+  {
+    "query": "review this Rust code for unsafe blocks and lifetime issues",
+    "should_trigger": false
+  },
+  {
+    "query": "scaffold a new Next.js app with TypeScript and tailwind",
+    "should_trigger": false
+  }
+]

@@ -1,0 +1,25 @@
+[
+  { "query": "spawn a team to refactor the auth module", "should_trigger": true },
+  { "query": "spawnteam --template code-review review the API", "should_trigger": true },
+  { "query": "create a team of agents to debug this issue", "should_trigger": true },
+  { "query": "team up on building the new dashboard feature", "should_trigger": true },
+  { "query": "I need a multi-agent team for this refactor", "should_trigger": true },
+  { "query": "spawn agents for the security audit", "should_trigger": true },
+  { "query": "can you set up an agent team to review this PR", "should_trigger": true },
+  {
+    "query": "use the thinker-debate template to discuss our database choice",
+    "should_trigger": true
+  },
+  { "query": "let's get a collaborative team working on the test suite", "should_trigger": true },
+  { "query": "spin up a prd-workflow team for the new feature", "should_trigger": true },
+  { "query": "run a single agent to fix this bug", "should_trigger": false },
+  { "query": "help me write a React component", "should_trigger": false },
+  { "query": "review this code for anti-patterns", "should_trigger": false },
+  { "query": "spawn a subagent to research this topic", "should_trigger": false },
+  { "query": "parallelize these independent tasks", "should_trigger": false },
+  { "query": "swarm this across multiple files", "should_trigger": false },
+  { "query": "consult the polymaths about this architecture", "should_trigger": false },
+  { "query": "plan out the implementation for user auth", "should_trigger": false },
+  { "query": "create a new React component for the sidebar", "should_trigger": false },
+  { "query": "debug why the tests are failing", "should_trigger": false }
+]
