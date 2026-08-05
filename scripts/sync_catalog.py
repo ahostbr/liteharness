@@ -32,11 +32,19 @@ SUBTREES: tuple[tuple[str, str], ...] = (
 # Private (personal) skills — NEVER vendor into the public pip catalog. These
 # contain PII (cameras, family, identity) and are local-only on the source
 # machine. fnmatch-matched as directory basenames during copytree.
+#
+# ls-release-litesuite is here for a different reason: it is operator-internal.
+# It names every build-time secret variable and states which conditions leave
+# licence verification disabled. No secret VALUES, but it maps the enforcement
+# seams. It was absent from this list, so it vendored into the catalog and
+# shipped inside the published 0.2.2/0.2.3 wheels. Adding it here is the fix —
+# this list, not review, is what keeps a skill out of the package.
 PRIVATE_SKILLS: tuple[str, ...] = (
     "ls-discord-watch",
     "discord-watch",
     "ls-streaming-sl-obs",
     "streaming-sl-obs",
+    "ls-release-litesuite",
 )
 
 

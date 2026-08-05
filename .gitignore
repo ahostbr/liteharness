@@ -37,3 +37,7 @@ liteharness/catalog/skills/ls-discord-watch/
 liteharness/catalog/skills/discord-watch/
 liteharness/catalog/skills/ls-streaming-sl-obs/
 liteharness/catalog/skills/streaming-sl-obs/
+
+# Operator-internal release runbook — never vendor into the public catalog.
+# See PRIVATE_SKILLS in scripts/sync_catalog.py.
+liteharness/catalog/skills/ls-release-litesuite/
