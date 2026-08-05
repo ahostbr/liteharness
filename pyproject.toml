@@ -59,5 +59,14 @@ liteharness = [
   "catalog/hooks/**/*",
 ]
 
+# The catalog globs are recursive, so anything sitting in a skill directory on
+# the build machine ships. 0.2.2 and 0.2.3 both carried stray __pycache__/*.pyc
+# picked up from local runs.
+[tool.setuptools.exclude-package-data]
+liteharness = [
+  "catalog/**/__pycache__/*",
+  "catalog/**/*.pyc",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
