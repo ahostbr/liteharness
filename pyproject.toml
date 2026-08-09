@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "liteharness"
-version = "0.2.4"
+version = "0.2.5"
 description = "Portable cross-CLI agent orchestration. Hook-polled inbox, conversation discovery, task tracking."
 readme = "README.md"
 license = { text = "MIT" }
@@ -57,6 +57,20 @@ liteharness = [
   "catalog/agents/**/*",
   "catalog/commands/**/*",
   "catalog/hooks/**/*",
+]
+# 🔴 catalog/ gained an __init__.py (it had none, which is why `liteharness.catalog` was a
+# namespace package and `liteharness install` could never import from it). That makes it a
+# package in its OWN right, so `packages.find` now discovers `liteharness.catalog` and the
+# globs above — which are relative to the `liteharness` package — no longer necessarily
+# reach inside it. Declaring the data under BOTH keys means fixing the module cannot
+# silently stop the ~380 data files from shipping. Verified by listing the built wheel, not
+# by reading this config.
+"liteharness.catalog" = [
+  "PROVENANCE.json",
+  "skills/**/*",
+  "agents/**/*",
+  "commands/**/*",
+  "hooks/**/*",
 ]
 
 # The catalog globs are recursive, so anything sitting in a skill directory on
