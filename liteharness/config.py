@@ -222,3 +222,20 @@ def detect_installed_clis() -> list[str]:
             clis.append(name)
 
     return clis
+
+def get_memory_nudge() -> dict:
+    """Memory-nudge settings, merged over defaults.
+
+    Ported from the LiteSuite tree 2026-08-09. The two liteharness source trees had
+    diverged: this one carries the installer + catalog, that one carried memory-nudge and
+    nothing had reconciled them. Shipped hook configs reference
+    `python -m liteharness.hooks memory-nudge`, so every UserPromptSubmit printed
+    "Unknown action: memory-nudge" against an install of THIS package.
+
+    The UserPromptSubmit hook emits a tiny MEMORY.md index pointer every `cadence` turns.
+    """
+    defaults = {"enabled": True, "cadence": 2}
+    stored = load().get("memory_nudge")
+    if isinstance(stored, dict):
+        defaults.update(stored)
+    return defaults

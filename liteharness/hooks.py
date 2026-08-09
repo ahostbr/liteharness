@@ -1133,7 +1133,7 @@ def main() -> None:
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     if len(sys.argv) < 2:
-        print("Usage: python -m liteharness.hooks <check|register|heartbeat|watch|deregister|bridge|stop-failure|worktree-create|worktree-remove|task-created|cwd-changed>", file=sys.stderr)
+        print("Usage: python -m liteharness.hooks <check|register|heartbeat|watch|deregister|bridge|stop-failure|worktree-create|worktree-remove|task-created|cwd-changed|memory-nudge>", file=sys.stderr)
         sys.exit(1)
 
     action = sys.argv[1]
@@ -1196,6 +1196,8 @@ def main() -> None:
         sync_task_created(hook_input)
     elif action == "cwd-changed":
         update_cwd(hook_input)
+    elif action == "memory-nudge":
+        memory_nudge()
     elif action == "obs":
         event_type = sys.argv[2] if len(sys.argv) > 2 else hook_input.get("hook_event_name", "")
         if event_type:
@@ -1208,6 +1210,94 @@ def main() -> None:
         print(f"Unknown action: {action}", file=sys.stderr)
         sys.exit(1)
 
+
+
+# ── memory-nudge ──────────────────────────────────────────────────────────────
+# Ported from the LiteSuite tree 2026-08-09. The two liteharness sources had diverged and
+# nothing reconciled them: this tree owns the installer + catalog, that one owned
+# memory-nudge. Shipped hook configs call `python -m liteharness.hooks memory-nudge`, so
+# every UserPromptSubmit against an install of THIS package printed
+# "Unknown action: memory-nudge" — non-blocking, but noisy on literally every user turn.
+
+
+def _turn_count_file_for(agent_id: str) -> Path:
+    """Per-agent UserPromptSubmit turn counter for the memory-nudge cadence."""
+    safe_id = agent_id.replace("/", "_").replace("\\", "_") if agent_id else "unknown"
+    return config.HARNESS_ROOT / f".memory_nudge_turns_{safe_id}"
+
+
+def _bump_turn_counter(turn_file: Path):
+    """Increment and persist the per-agent counter; None when it cannot be persisted.
+
+    A corrupt / non-numeric stored value self-heals to 0 rather than permanently
+    suppressing the nudge. Kept OUT of memory_nudge() so that function provably performs
+    no file reads.
+    """
+    try:
+        config.ensure_root()
+        current = 0
+        if turn_file.exists():
+            try:
+                current = int(turn_file.read_text(encoding="utf-8").strip() or "0")
+            except ValueError:
+                current = 0  # self-heal: reset a corrupt counter, don't suppress
+        current += 1
+        turn_file.write_text(str(current), encoding="utf-8")
+        return current
+    except OSError:
+        return None
+
+
+def _resolve_memory_index_path() -> str:
+    """Path string to the agent's durable MEMORY.md index.
+
+    NEVER opens or reads MEMORY.md — it only NAMES the path, so the nudge stays a tiny
+    INDEX pointer rather than content-injection.
+    """
+    transcript = (os.environ.get("LITEHARNESS_TRANSCRIPT_PATH") or "").strip()
+    if transcript:
+        try:
+            return str(Path(transcript).parent / "memory" / "MEMORY.md")
+        except (OSError, ValueError):
+            pass
+    try:
+        cwd = os.getcwd()
+        cwd_encoded = cwd.replace(":\\", "--").replace("\\", "-").replace("/", "-")
+        return str(Path.home() / ".claude" / "projects" / cwd_encoded / "memory" / "MEMORY.md")
+    except OSError:
+        pass
+    return "your project's memory/MEMORY.md index"
+
+
+def memory_nudge() -> None:
+    """Every-other-turn pointer to the agent's MEMORY.md index. Gated on UserPromptSubmit
+    so PostToolUse / SessionStart / Stop never advance the cadence counter."""
+    cfg = config.get_memory_nudge()
+    if not cfg.get("enabled"):
+        return
+
+    if os.environ.get("LITEHARNESS_HOOK_EVENT") != "UserPromptSubmit":
+        return
+
+    try:
+        cadence = int(cfg.get("cadence", 2))
+    except (TypeError, ValueError):
+        cadence = 2
+    if cadence < 1:
+        cadence = 2
+
+    agent_id = config.get_agent_id()
+    current = _bump_turn_counter(_turn_count_file_for(agent_id))
+    if current is None or current % cadence != 0:
+        return
+
+    memory_path = _resolve_memory_index_path()
+    print(
+        f"[LITEHARNESS] Memory check-in: if this turn produced durable knowledge "
+        f"(a decision, root-cause, reusable pattern, or preference), persist a "
+        f"one-line entry to your index at {memory_path} — plus a topic file for "
+        f"detail. Skip if nothing durable happened."
+    )
 
 if __name__ == "__main__":
     main()
