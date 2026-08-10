@@ -1914,8 +1914,44 @@ def cmd_pty_kill(agent_id: str) -> None:
         sys.exit(1)
 
 
-def cmd_discover(count: int = 5) -> None:
-    """Discover active agents."""
+def cmd_discover(count: int = 100, include_all: bool = False) -> None:
+    """Discover live agents.
+
+    Liveness matches the desktop (harness-presence.ts) as a single source of
+    truth: an agent is live only with a fresh heartbeat AND an alive owning
+    session_pid. This excludes orphaned watchers (dead session, lingering watch
+    process) that heartbeat forever.
+
+    The old default was count=5, applied as an unconditional `agents[:5]` slice
+    whose length was then printed as the total. That header was not a count of
+    the fleet, it was the truncation constant describing itself: with 15 agents
+    registered it printed "Active agents (5)", and the ten it dropped were
+    indistinguishable from ten that did not exist. Pass include_all=True to list
+    non-live presence files too (ghosts, exited, stale) for debugging.
+    """
+    from .hooks import _pid_alive
+
+    DISCOVER_STALE_SECONDS = 600  # mirror DEFAULT_PRESENCE_STALE_MS (10 min)
+
+    def _is_live(a: dict) -> bool:
+        if a.get("exited_at"):
+            return False
+        if a.get("_age_seconds", float("inf")) > DISCOVER_STALE_SECONDS:
+            return False
+        session_pid = a.get("session_pid")
+        if not session_pid:
+            # ABSENT IS NOT DEAD. The upstream version returned False here, which
+            # is only safe once every writer records an owner. Measured against a
+            # real fleet the moment the writer landed: 11 of 15 presence files had
+            # no session_pid, including six agents that had heartbeated 6 seconds
+            # earlier -- and long-running watchers hold the OLD module in memory,
+            # so they keep writing owner-less presence until they restart. Being
+            # strict here reported 2 live out of ~9 and dropped this very session
+            # from its own roll call. Unknown owner falls back to freshness; only
+            # a recorded-and-dead pid is provably a ghost.
+            return True
+        return _pid_alive(session_pid)
+
     agents_dir = config.get_root() / "agents"
     if not agents_dir.exists():
         print("No agents directory. Run 'liteharness init' first.")
@@ -1923,19 +1959,34 @@ def cmd_discover(count: int = 5) -> None:
 
     now = time.time()
     agents = []
+    unreadable: list[str] = []
 
     for f in agents_dir.glob("*.json"):
+        if f.name.endswith(".tmp"):  # a write in flight, not an agent
+            continue
         try:
             agent = json.loads(f.read_text(encoding="utf-8"))
             last_seen = datetime.fromisoformat(agent.get("last_seen", "")).timestamp()
             agent["_age_seconds"] = now - last_seen
             agents.append(agent)
-        except (json.JSONDecodeError, OSError, ValueError):
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            # An unreadable presence file used to vanish here without a word, so a
+            # live agent simply stopped existing in the roll call. Sentinel's own
+            # file was torn by a concurrent write and it took reading the raw bytes
+            # to notice. A count that silently omits its failures is not a count.
+            unreadable.append(f"{f.name}: {type(exc).__name__}")
             continue
 
-    # Sort by most recent
+    # Sort by most recent, then apply liveness filter (unless include_all).
     agents.sort(key=lambda a: a.get("_age_seconds", float("inf")))
+    if not include_all:
+        agents = [a for a in agents if _is_live(a)]
     agents = agents[:count]
+
+    if unreadable:
+        print(f"WARNING: {len(unreadable)} presence file(s) unreadable and NOT counted below:")
+        for entry in unreadable:
+            print(f"  ! {entry}")
 
     if not agents:
         print("No active agents found.")
@@ -1970,7 +2021,8 @@ def cmd_discover(count: int = 5) -> None:
             pass
         return None
 
-    print(f"Active agents ({len(agents)}):")
+    header = "Agents" if include_all else "Active agents"
+    print(f"{header} ({len(agents)}):")
     for a in agents:
         age = int(a.get("_age_seconds", 0))
         if age < 60:
@@ -1980,8 +2032,16 @@ def cmd_discover(count: int = 5) -> None:
         else:
             age_str = f"{age // 3600}h ago"
 
-        exited_at = a.get("exited_at")
-        status = "exited" if exited_at else ("active" if age < 43200 else "stale")
+        # PID-aware status: a fresh heartbeat alone isn't "active" — a dead
+        # session_pid means the watcher is orphaned and the agent is a ghost.
+        # The old rule was `age < 43200` (12h), so a corpse read as [active]
+        # for half a day.
+        if a.get("exited_at"):
+            status = "exited"
+        elif _is_live(a):
+            status = "active"
+        else:
+            status = "ghost"
         from . import naming
         agent_name = naming.get_name(a.get('agent_id', ''))
 
@@ -1992,7 +2052,7 @@ def cmd_discover(count: int = 5) -> None:
             canvas_sid = a.get("canvas_session_id", "")
             handle_info = f" canvas:{canvas_sid[:8]}" if canvas_sid else " canvas"
         else:
-            agent_pid = a.get("pid", 0)
+            agent_pid = a.get("session_pid") or a.get("pid", 0)
             if agent_pid and pid_handle_map:
                 found_handle = _find_ancestor_handle(agent_pid)
                 if found_handle is not None:
@@ -2592,8 +2652,13 @@ def main() -> None:
             project_id=sp_project_id, tier=sp_tier, team=sp_team,
         )
     elif cmd == "discover":
-        count = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-        cmd_discover(count)
+        # `int(sys.argv[2])` consumed argv by POSITION, so the documented
+        # `discover --all` died with ValueError: invalid literal for int().
+        # Same family as the `send` truncation: a flag eaten as a positional.
+        include_all = "--all" in sys.argv
+        positional = [a for a in sys.argv[2:] if not a.startswith("-")]
+        count = int(positional[0]) if positional and positional[0].isdigit() else 100
+        cmd_discover(count, include_all=include_all)
     elif cmd == "query-patterns":
         qp_top = 5
         qp_fmt = "text"

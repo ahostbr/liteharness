@@ -198,6 +198,96 @@ KNOWN_ACTIONS: frozenset[str] = frozenset(
 )
 
 
+def _pid_alive(pid: int | None) -> bool:
+    """Return True if a PID currently maps to a running process."""
+    if not pid:
+        return False
+    try:
+        import psutil
+
+        return psutil.pid_exists(int(pid))
+    except Exception:
+        return False
+
+
+def _write_json_atomic(path, payload: dict) -> None:
+    """Write JSON so a concurrent reader never sees a half-written file.
+
+    `Path.write_text` truncates then writes, so two writers racing on one
+    presence file can leave a complete document followed by the tail of a longer
+    one. Observed on Sentinel's own file: a `register` and a watcher heartbeat
+    landed together and produced `...}session_pid": 342828\\n}`.
+
+    That is not a cosmetic corruption. cmd_discover catches JSONDecodeError and
+    `continue`s, so the agent simply stops existing in the roll call -- no error,
+    no warning, nothing to notice. Write to a sibling temp file and os.replace()
+    it, which is atomic on Windows and POSIX: a reader sees the old file or the
+    new one, never a splice of both.
+    """
+    path = Path(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _parse_positive_int(value: object) -> int | None:
+    """Coerce to a positive int, or None. Presence files are user-writable JSON."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolve_session_pid(existing: dict | None = None) -> int | None:
+    """Best-effort lookup of the owning CLI process for this presence file.
+
+    This is the WRITER half of the liveness contract that cmd_discover reads. It
+    did not exist in this tree at all: `session_pid` appeared zero times, so a
+    reader ported here on its own would have called every agent a ghost. The two
+    halves have to land together or the guard is worse than none.
+    """
+    existing = existing or {}
+    explicit = _parse_positive_int(os.environ.get("LITEHARNESS_SESSION_PID"))
+    if explicit and _pid_alive(explicit):
+        return explicit
+
+    # Only trust a previously-recorded session_pid if its process is still alive.
+    # On resume/restart the agent keeps its id but the owning claude.exe gets a new
+    # pid, so a blindly-trusted stale pid makes a live agent read as dead. A dead
+    # recorded pid falls through to a fresh ancestor walk below.
+    existing_session_pid = _parse_positive_int(existing.get("session_pid"))
+    if existing_session_pid and _pid_alive(existing_session_pid):
+        return existing_session_pid
+
+    try:
+        import psutil
+
+        proc = psutil.Process(os.getpid())
+        for ancestor in proc.parents():
+            try:
+                name = (ancestor.name() or "").lower()
+                cmdline = " ".join(ancestor.cmdline()).lower()
+            except (psutil.Error, OSError):
+                continue
+            if (
+                name in {"claude.exe", "claude", "codex.exe", "codex", "litecode.exe", "litecode"}
+                or "claude-code" in cmdline
+            ):
+                return int(ancestor.pid)
+    except Exception:
+        pass
+
+    return None
+
+
 def _read_hook_stdin() -> dict:
     """
     Read JSON from stdin if available (non-blocking).
@@ -508,7 +598,7 @@ def _scan_for_recaps() -> None:
             for line in tail_lines:
                 if ('"subtype":"away_summary"' in line or '"subtype": "away_summary"' in line):
                     data["recap_at"] = datetime.now(timezone.utc).isoformat()
-                    f.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                    _write_json_atomic(f, data)
                     break
 
         except (json.JSONDecodeError, OSError, ValueError):
@@ -643,12 +733,22 @@ def register_presence() -> None:
         "pid": os.getpid(),
         "ppid": os.getppid(),
         "cwd": os.getcwd(),
+        # `pid` is this short-lived hook process and is dead moments later, so it
+        # can never answer "is the agent alive". session_pid is the owning CLI.
         "thread_id": thread_id,
         "workspace_id": workspace_id,
         "project_id": project_id,
         "pane_id": pane_id,
         "leaf_id": leaf_id,
     }
+
+    session_pid = _resolve_session_pid(existing)
+    if session_pid:
+        presence["session_pid"] = session_pid
+    elif existing.get("session_pid"):
+        # Never downgrade a recorded owner to absent just because this particular
+        # hook process could not walk to it — absent means "ghost" to the reader.
+        presence["session_pid"] = existing["session_pid"]
 
     # Preserve agent name across re-registrations
     if existing.get("name"):
@@ -671,7 +771,7 @@ def register_presence() -> None:
     if transcript_path:
         presence["transcript_path"] = transcript_path
 
-    path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
+    _write_json_atomic(path, presence)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Spatial Bootstrap — inject canvas context for agents inside LiteSuite
@@ -998,7 +1098,7 @@ def update_cwd(hook_input: dict) -> None:
             presence = json.loads(path.read_text(encoding="utf-8"))
             presence["cwd"] = new_cwd
             presence["last_seen"] = datetime.now(timezone.utc).isoformat()
-            path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
+            _write_json_atomic(path, presence)
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -1016,7 +1116,18 @@ def update_heartbeat() -> None:
         try:
             presence = json.loads(path.read_text(encoding="utf-8"))
             presence["last_seen"] = now
-            path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
+            # Backfill for agents registered before session_pid existed. Without
+            # this, every currently-running agent keeps heartbeating forever with
+            # no recorded owner and the liveness check reads it as a ghost — the
+            # fleet would appear to empty out the moment the reader shipped.
+            # Only a live agent can backfill (the walk needs a live ancestor),
+            # which is exactly the population that should stay visible.
+            current = _parse_positive_int(presence.get("session_pid"))
+            if not (current and _pid_alive(current)):
+                resolved = _resolve_session_pid(presence)
+                if resolved:
+                    presence["session_pid"] = resolved
+            _write_json_atomic(path, presence)
         except (json.JSONDecodeError, OSError):
             pass
     else:
@@ -1029,11 +1140,16 @@ def update_heartbeat() -> None:
             "last_seen": now,
             "pid": os.getpid(),
         }
+        # A re-created file with no session_pid would read as a ghost immediately,
+        # so the recovery path has to record the owner just like register does.
+        recreated_session_pid = _resolve_session_pid()
+        if recreated_session_pid:
+            presence["session_pid"] = recreated_session_pid
         transcript_path = os.environ.get("LITEHARNESS_TRANSCRIPT_PATH")
         if transcript_path:
             presence["transcript_path"] = transcript_path
         try:
-            path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
+            _write_json_atomic(path, presence)
         except OSError:
             pass
 
