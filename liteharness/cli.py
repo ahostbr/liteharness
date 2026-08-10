@@ -2154,26 +2154,45 @@ def main() -> None:
         if len(sys.argv) < 4:
             print("Usage: liteharness send <to-agent-id> <message> [--from <your-id>] [--thread-id <id>]")
             sys.exit(1)
-        project = None
-        from_id = None
-        send_thread_id = None
-        if "--project" in sys.argv:
-            idx = sys.argv.index("--project")
-            if idx + 1 < len(sys.argv):
-                project = sys.argv[idx + 1]
-        if "--from" in sys.argv:
-            idx = sys.argv.index("--from")
-            if idx + 1 < len(sys.argv):
-                from_id = sys.argv[idx + 1]
-        if "--thread-id" in sys.argv:
-            idx = sys.argv.index("--thread-id")
-            if idx + 1 < len(sys.argv):
-                send_thread_id = sys.argv[idx + 1]
-        # Strip flags from the message body
-        msg_parts = " ".join(sys.argv[3:])
-        for flag in ("--project", "--from", "--thread-id"):
-            if flag in msg_parts:
-                msg_parts = msg_parts.split(flag)[0].strip()
+        # Consume flags by ARGV POSITION, never by string-matching the joined body.
+        # The previous form joined argv[3:] into one string and truncated it at the first
+        # flag-looking SUBSTRING. That destroyed the body two different ways, both
+        # silently, and both still printed "Sent message <id>" and exited 0:
+        #   * `send <to> --from <id> "text"` -> split("--from")[0] == "" -> EMPTY body.
+        #     Measured 2026-08-10: body_len=0 delivered, success printed.
+        #   * a body that merely CONTAINS the text "--from" (routine when sending an agent
+        #     a command line) -> everything from that point on deleted.
+        # The old scan for values had the mirror of the same fault: `"--from" in sys.argv`
+        # matched a flag appearing inside the MESSAGE and took the next word as its value.
+        flags = {"--project": None, "--from": None, "--thread-id": None}
+        msg_tokens = []
+        rest = sys.argv[3:]
+        i = 0
+        while i < len(rest):
+            token = rest[i]
+            if token in flags:
+                if i + 1 < len(rest):
+                    flags[token] = rest[i + 1]
+                    i += 2
+                else:
+                    print(f"Error: {token} given with no value.")
+                    sys.exit(1)
+                continue
+            msg_tokens.append(token)
+            i += 1
+        project = flags["--project"]
+        from_id = flags["--from"]
+        send_thread_id = flags["--thread-id"]
+        msg_parts = " ".join(msg_tokens).strip()
+        # Fail closed. A send that reports success on a body it emptied is worse than a
+        # send that refuses: the caller believes the message landed and never re-sends.
+        if not msg_parts:
+            print(
+                "Error: refusing to send an empty message body.\n"
+                "  Usage: liteharness send <to-agent-id> <message> [--from <id>] "
+                "[--thread-id <id>]"
+            )
+            sys.exit(1)
         cmd_send(sys.argv[2], msg_parts, project, from_id, send_thread_id)
     elif cmd == "list":
         cmd_list()
