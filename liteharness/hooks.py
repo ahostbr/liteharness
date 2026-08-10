@@ -1157,8 +1157,8 @@ def main() -> None:
     # was self-inflicted and fleet-wide. Validating first makes the failure loud in
     # every launch context instead of only the ones where stdin happens to EOF.
     KNOWN_ACTIONS = {
-        "check", "register", "register-quiet", "heartbeat", "watch", "deregister",
-        "bridge", "stop-failure", "worktree-create", "worktree-remove",
+        "check", "register", "register-quiet", "heartbeat", "watch", "watch-auto",
+        "deregister", "bridge", "stop-failure", "worktree-create", "worktree-remove",
         "task-created", "cwd-changed", "memory-nudge", "obs", "cleanup",
     }
     if action not in KNOWN_ACTIONS:
@@ -1169,7 +1169,7 @@ def main() -> None:
     # Read stdin JSON from hook-supporting CLIs (Codex, Copilot, Claude Code)
     # watch mode is long-running and shouldn't consume stdin
     hook_input: dict = {}
-    if action != "watch":
+    if action not in ("watch", "watch-auto"):
         hook_input = _read_hook_stdin()
         if hook_input:
             _apply_hook_context(hook_input)
@@ -1211,6 +1211,41 @@ def main() -> None:
             if idx + 1 < len(sys.argv):
                 watch_ignore = {s.strip() for s in sys.argv[idx + 1].split(",") if s.strip()}
         watch_inbox(override_agent_id=watch_agent_id, ignore_senders=watch_ignore)
+    elif action == "watch-auto":
+        # The plugin's monitor manifest (monitors/monitors.json) is STATIC — it is written
+        # once and shipped, so it cannot know the per-session agent id and cannot pass
+        # --agent-id. That is the entire reason this action exists, and it was referenced
+        # by the shipped manifest long before anything implemented it.
+        #
+        # 🔴 DO NOT "fix" this by rewriting the manifest to plain `watch`. Without an
+        # explicit id, watch_inbox falls back to _find_claude_session_id(), which picks the
+        # MOST RECENTLY MODIFIED JSONL — see its own docstring: "often the WRONG session".
+        # That trades a monitor which fails loudly for one that silently watches someone
+        # else's inbox: their messages get delivered to the wrong agent, and the right
+        # agent goes deaf while every external signal still looks healthy. The invisible
+        # direction is the expensive one. (I made exactly that edit on 2026-08-10 and an
+        # agent on a virgin box caught it before it shipped.)
+        auto_id = (
+            os.environ.get("LITEHARNESS_AGENT_ID")
+            or os.environ.get("LITESUITE_AGENT_ID")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or os.environ.get("CLAUDE_SESSION_ID")
+            or ""
+        ).strip()
+        if not auto_id:
+            print(
+                "watch-auto: no session id in the environment "
+                "(LITEHARNESS_AGENT_ID / LITESUITE_AGENT_ID / CLAUDE_CODE_SESSION_ID / "
+                "CLAUDE_SESSION_ID all unset).\n"
+                "Refusing to guess: watching the most recently modified session would "
+                "deliver another agent's messages here and leave that agent deaf.\n"
+                "Start it explicitly instead:\n"
+                "  python -m liteharness.hooks watch --agent-id <YOUR-SESSION-ID>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"[LITEHARNESS] watch-auto resolved agent id from environment: {auto_id}")
+        watch_inbox(override_agent_id=auto_id)
     elif action == "deregister":
         deregister()
     elif action == "bridge":
