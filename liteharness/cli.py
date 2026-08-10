@@ -174,7 +174,21 @@ def _merge_claude_statusline(settings_path: Path) -> str:
             else {}
         )
         existing = settings.get("statusLine")
-        if isinstance(existing, dict) and existing.get("command"):
+        # PRESENT means occupied. Full stop.
+        #
+        # This was `isinstance(existing, dict) and existing.get("command")`, which treated
+        # anything that was not a dict-with-a-truthy-command as ABSENT and overwrote it while
+        # reporting "installed". An agent on a virgin box planted values and destroyed two of
+        # them (2026-08-10, liteharness 0.2.7):
+        #     statusLine: "my-legacy-string-statusline.sh"      -> CLOBBERED
+        #     statusLine: {"type":"command","MY_CONFIG":"..."}  -> CLOBBERED
+        # The file is rewritten in place with no backup, so the user's value is unrecoverable.
+        #
+        # My own contract two paragraphs up says "Absent is the only state we write into".
+        # Present-and-a-string is not absent. Present-without-a-command is not absent. A guard
+        # whose predicate is narrower than the promise it makes is worse than no guard, because
+        # it is trusted.
+        if existing is not None:
             return "kept"
         settings["statusLine"] = dict(_DEFAULT_STATUSLINE)
         settings_path.parent.mkdir(parents=True, exist_ok=True)

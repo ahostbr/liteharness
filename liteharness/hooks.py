@@ -1225,18 +1225,36 @@ def main() -> None:
         # agent goes deaf while every external signal still looks healthy. The invisible
         # direction is the expensive one. (I made exactly that edit on 2026-08-10 and an
         # agent on a virgin box caught it before it shipped.)
-        auto_id = (
-            os.environ.get("LITEHARNESS_AGENT_ID")
-            or os.environ.get("LITESUITE_AGENT_ID")
-            or os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or os.environ.get("CLAUDE_SESSION_ID")
-            or ""
-        ).strip()
+        # Mirror config.get_agent_id()'s ENV chain exactly, minus its filesystem guess.
+        #
+        # The manifest ships to every CLI, so a Claude-only lookup made the monitor refuse
+        # 100% of the time on Codex, LiteCode and Gemini boxes — while an id sat right there
+        # in the environment — and the message said "unset" about variables those users had
+        # never heard of. Reported 2026-08-10 from a sandbox: CODEX_SESSION_ID set, refused.
+        #
+        # What is deliberately NOT inherited from get_agent_id() is its tail: the
+        # _find_claude_session_id() filesystem guess and the config-stored fallback. Those are
+        # reasonable for a short-lived hook that can be wrong once; they are not reasonable for
+        # a long-lived watcher, where guessing wrong silently drains another agent's inbox.
+        SESSION_ENV_VARS = (
+            "LITEHARNESS_AGENT_ID",
+            "LITESUITE_AGENT_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "LITECODE_SESSION_ID",
+            "CLAUDE_SESSION_ID",
+            "GEMINI_SESSION_ID",
+            "CODEX_SESSION_ID",
+        )
+        auto_id = ""
+        for var in SESSION_ENV_VARS:
+            value = (os.environ.get(var) or "").strip()
+            if value:
+                auto_id = value
+                break
         if not auto_id:
             print(
-                "watch-auto: no session id in the environment "
-                "(LITEHARNESS_AGENT_ID / LITESUITE_AGENT_ID / CLAUDE_CODE_SESSION_ID / "
-                "CLAUDE_SESSION_ID all unset).\n"
+                "watch-auto: no session id in the environment.\n"
+                f"Checked, in order: {' / '.join(SESSION_ENV_VARS)}.\n"
                 "Refusing to guess: watching the most recently modified session would "
                 "deliver another agent's messages here and leave that agent deaf.\n"
                 "Start it explicitly instead:\n"
