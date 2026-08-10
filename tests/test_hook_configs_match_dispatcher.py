@@ -29,18 +29,24 @@ CONFIG_DIR = PACKAGE_ROOT / "hooks_configs"
 
 
 def _known_actions() -> set[str]:
-    """Read KNOWN_ACTIONS out of hooks.py without importing it.
+    """Read KNOWN_ACTIONS from the module itself.
 
-    Importing would execute the module and drag in its dependencies; this check must run
-    anywhere, including on a machine where those are absent.
+    This used to scrape the set out of hooks.py with a regex, to avoid importing the module.
+    That was brittle in exactly the way this file exists to warn about: hoisting the set to
+    module scope and wrapping it in frozenset() changed the literal's shape, the regex matched
+    nothing, and the check would have started passing vacuously — a guard silently ceasing to
+    guard, which is the same disease as a config naming an action nobody implements.
+
+    Its own positive control caught that (see below), which is the only reason it surfaced as
+    a red test rather than a green no-op. Importing removes the failure mode entirely: there
+    is no longer a second representation of the set to drift from the first.
     """
-    source = (PACKAGE_ROOT / "hooks.py").read_text(encoding="utf-8")
-    block = re.search(r"KNOWN_ACTIONS\s*=\s*\{(.*?)\}", source, re.DOTALL)
-    assert block, "KNOWN_ACTIONS not found in hooks.py — this test's own anchor moved"
-    actions = set(re.findall(r'"([a-z0-9\-]+)"', block.group(1)))
-    # Positive control: if the parse silently returned nothing, every assertion below would
-    # pass vacuously and this test would be decorative.
-    assert "watch" in actions, f"parsed KNOWN_ACTIONS looks wrong: {actions}"
+    from liteharness import hooks
+
+    actions = set(hooks.KNOWN_ACTIONS)
+    # Positive control retained: an empty or bogus set would make every assertion below pass
+    # for the wrong reason.
+    assert "watch" in actions, f"KNOWN_ACTIONS looks wrong: {actions}"
     return actions
 
 

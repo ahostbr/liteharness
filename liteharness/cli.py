@@ -116,6 +116,47 @@ def _merge_claude_hooks(settings_path: Path, hook_config: dict) -> bool:
         new_hooks = hook_config.get("hooks", {})
         marker = "liteharness.hooks"
 
+        # ── Heal a settings.json poisoned by an earlier release ────────────────────────
+        #
+        # This function only ever APPENDED, so a hook installed by a bad release stayed
+        # forever and no upgrade could remove it. 0.2.7 registered `checkpoint-save` and
+        # `checkpoint-restore`, which nothing implements; every box that ran its `init` then
+        # failed two hooks on EVERY COMPACT, permanently, and installing 0.2.8 fixed the
+        # shipped config while leaving the user's file broken. Measured on a virgin sandbox
+        # 2026-08-10: after upgrading, settings.json:76 and :97 still carried both.
+        #
+        # Prune is narrow on purpose. It removes only entries whose command invokes
+        # `liteharness.hooks <action>` with an action this package does not implement — the
+        # same predicate the dispatcher uses to reject it at runtime, so anything removed
+        # here is provably incapable of doing anything but fail. Hooks belonging to other
+        # tools, and our own valid hooks, are untouched.
+        import re as _re
+
+        from . import hooks as _hooks  # local import: hooks imports config, cli imports both
+
+        pruned: list[str] = []
+        for event in list(existing_hooks.keys()):
+            kept_matchers = []
+            for matcher_obj in existing_hooks[event] or []:
+                inner = []
+                for h in matcher_obj.get("hooks", []):
+                    cmd = h.get("command", "") or ""
+                    found = _re.search(r"liteharness\.hooks\s+([a-z0-9\-]+)", cmd)
+                    if found and found.group(1) not in _hooks.KNOWN_ACTIONS:
+                        pruned.append(f"{event}:{found.group(1)}")
+                        continue
+                    inner.append(h)
+                if inner:
+                    matcher_obj["hooks"] = inner
+                    kept_matchers.append(matcher_obj)
+            if kept_matchers:
+                existing_hooks[event] = kept_matchers
+            else:
+                del existing_hooks[event]
+        if pruned:
+            print(f"    Removed {len(pruned)} hook(s) for actions this version does not "
+                  f"implement: {', '.join(pruned)}")
+
         for event, new_matchers in new_hooks.items():
             if event not in existing_hooks:
                 existing_hooks[event] = []

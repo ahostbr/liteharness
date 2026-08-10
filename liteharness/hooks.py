@@ -178,6 +178,26 @@ CHECK_INTERVAL_SECONDS = 10
 LAST_CHECK_FILE = config.HARNESS_ROOT / ".last_inbox_check"
 LAST_CLEANUP_FILE = config.HARNESS_ROOT / ".last_inbox_cleanup"
 CLEANUP_INTERVAL_SECONDS = 3600  # Run cleanup at most once per hour
+#: Every action the dispatcher in main() implements.
+#
+# MODULE SCOPE ON PURPOSE — this set is the predicate for three separate things, and they
+# must not be allowed to drift apart:
+#   1. main()'s validation, so an unknown action fails loudly instead of hanging.
+#   2. the installer's prune (cli.py), which removes hook entries invoking actions that do
+#      not exist, so a settings.json poisoned by an older release can heal itself.
+#   3. tests/test_hook_configs_match_dispatcher.py, which asserts no shipped config invokes
+#      an action absent from here.
+# Written out separately in any of those, they would diverge, and the whole class of defect
+# this guards against IS divergence between a config and the code it names.
+KNOWN_ACTIONS: frozenset[str] = frozenset(
+    {
+        "check", "register", "register-quiet", "heartbeat", "watch", "watch-auto",
+        "deregister", "bridge", "stop-failure", "worktree-create", "worktree-remove",
+        "task-created", "cwd-changed", "memory-nudge", "obs", "cleanup",
+    }
+)
+
+
 def _read_hook_stdin() -> dict:
     """
     Read JSON from stdin if available (non-blocking).
@@ -1156,11 +1176,6 @@ def main() -> None:
     # The source of that invalid action was the plugin's own monitors.json, so this
     # was self-inflicted and fleet-wide. Validating first makes the failure loud in
     # every launch context instead of only the ones where stdin happens to EOF.
-    KNOWN_ACTIONS = {
-        "check", "register", "register-quiet", "heartbeat", "watch", "watch-auto",
-        "deregister", "bridge", "stop-failure", "worktree-create", "worktree-remove",
-        "task-created", "cwd-changed", "memory-nudge", "obs", "cleanup",
-    }
     if action not in KNOWN_ACTIONS:
         print(f"Unknown action: {action}", file=sys.stderr)
         print(f"Valid actions: {' | '.join(sorted(KNOWN_ACTIONS))}", file=sys.stderr)
