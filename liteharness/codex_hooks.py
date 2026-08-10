@@ -1,4 +1,18 @@
-"""Codex-specific hook adapters that always emit valid Codex hook JSON."""
+"""Codex-specific hook adapters.
+
+Output contract, stated accurately because the previous wording ("always emit valid Codex
+hook JSON") was false on half the branches and a docstring is a separate claim that nothing
+checks:
+
+    "-check" commands                          -> emit NOTHING (deliberate no-op)
+    action raises                              -> valid JSON (systemMessage)
+    action succeeds with output                -> valid JSON (hookSpecificOutput)
+    action succeeds with empty output          -> emit NOTHING
+
+The guarantee that actually holds, and the one callers can rely on, is narrower and stronger
+than "always JSON": this module never emits MALFORMED JSON. It either writes a valid payload
+or writes nothing at all. Silence is a legitimate result here, not a failure.
+"""
 
 from __future__ import annotations
 
@@ -58,6 +72,18 @@ def _log_error(command_name: str, error: Exception) -> None:
 
 
 def _run(command_name: str, event_name: str, action_name: str) -> int:
+    # "-check" hooks are intentional no-ops — inbox delivery is handled by the standalone
+    # watcher (cli_scripts/codex/liteharness_inbox_watcher.py). Their entries have been
+    # removed from codex_hooks.json to avoid spawning a wasted subprocess on every tool
+    # call and every prompt.
+    #
+    # 🔴 That removal had only ever happened in the LiteSuite copy of this package. In THIS
+    # tree — the one `import liteharness` actually resolves to — all three were still wired
+    # (session-start-check, post-tool-use-check, user-prompt-submit-check), so every Codex
+    # agent really was paying a Python process launch per SessionStart, per tool call and per
+    # prompt to reach this early return and do nothing. Measured 2026-08-10: LiteSuite 0
+    # wired, oss 3 wired. The comment explaining the optimisation lived in the tree that does
+    # not run; the cost lived in the tree that does. Third instance of that divergence in 24h.
     if command_name.endswith("-check"):
         return 0
 

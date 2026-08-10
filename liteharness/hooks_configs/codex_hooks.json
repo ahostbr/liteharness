@@ -8,35 +8,6 @@
             "type": "command",
             "command": "python -m liteharness.codex_hooks session-start-register",
             "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "python -m liteharness.codex_hooks session-start-check",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m liteharness.codex_hooks post-tool-use-check",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m liteharness.codex_hooks user-prompt-submit-check",
-            "timeout": 5
           }
         ]
       }

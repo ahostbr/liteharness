@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -53,23 +54,48 @@ class CodexHooksTests(unittest.TestCase):
         self.assertIn("[LITEHARNESS] registered", payload["hookSpecificOutput"]["additionalContext"])
         self.assertEqual(self.applied_inputs, [self.hook_input])
 
-    def test_user_prompt_submit_check_wraps_inbox_text_as_valid_json(self) -> None:
-        codex_hooks.hooks.check_inbox = lambda: print("[LITEHARNESS] 1 message(s) received")
+    def test_check_commands_are_no_ops_and_cannot_be_influenced(self) -> None:
+        """"-check" commands do nothing, DELIBERATELY, and nothing can make them do otherwise.
 
-        exit_code, output = self._run_main("user-prompt-submit-check")
+        Replaces test_user_prompt_submit_check_wraps_inbox_text_as_valid_json, which asserted
+        behaviour that had been intentionally removed: inbox delivery moved to the standalone
+        watcher (cli_scripts/codex/liteharness_inbox_watcher.py), and _run returns before it
+        reads stdin or captures output. The old test had been failing at HEAD, and the answer
+        was in the OTHER tree — LiteSuite's copy carried the comment explaining the no-op that
+        this tree did not.
 
-        self.assertEqual(exit_code, 0)
-        payload = json.loads(output)
-        self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
-        self.assertIn("1 message(s) received", payload["hookSpecificOutput"]["additionalContext"])
+        It also replaces test_post_tool_use_check_emits_nothing_when_no_context_exists, which
+        passed VACUOUSLY: it stubbed check_inbox and asserted empty output, but the early
+        return means the stub can never run, so the assertion held no matter what the stub did.
+        A test whose subject is unreachable proves nothing about the subject.
 
-    def test_post_tool_use_check_emits_nothing_when_no_context_exists(self) -> None:
-        codex_hooks.hooks.check_inbox = lambda: None
+        So the stub here is made LOUD. If any "-check" command ever regains a path to the
+        action, this fails — which the quiet stub could not detect.
+        """
+        for command in ("session-start-check", "post-tool-use-check", "user-prompt-submit-check"):
+            with self.subTest(command=command):
+                codex_hooks.hooks.check_inbox = lambda: print("SHOULD NEVER BE EMITTED")
+                exit_code, output = self._run_main(command)
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(output, "")
 
-        exit_code, output = self._run_main("post-tool-use-check")
+    def test_check_commands_are_not_wired_into_the_shipped_config(self) -> None:
+        """The no-op only saves anything if the config stops invoking it.
 
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(output, "")
+        Measured 2026-08-10: LiteSuite's copy had 0 "-check" entries and THIS tree — the one
+        `import liteharness` resolves to — still had 3, so every Codex agent paid a Python
+        process launch per SessionStart, per tool call and per prompt to reach an early return.
+        The optimisation's comment lived in the tree that does not run; its cost lived here.
+        """
+        config = (
+            Path(codex_hooks.__file__).resolve().parent / "hooks_configs" / "codex_hooks.json"
+        )
+        raw = config.read_text(encoding="utf-8")
+        json.loads(raw)  # a malformed config is its own failure
+        wired = re.findall(r"codex_hooks\s+([a-z0-9-]*-check)\b", raw)
+        self.assertEqual(
+            wired, [], f"no-op -check hooks are still wired and cost a subprocess each: {wired}"
+        )
 
     def test_adapter_emits_valid_warning_json_on_failure(self) -> None:
         def boom() -> None:
