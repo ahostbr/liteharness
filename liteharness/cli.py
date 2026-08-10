@@ -465,6 +465,29 @@ def cmd_status() -> None:
 
 def cmd_send(to: str, body: str, project: str | None = None, from_id: str | None = None, thread_id: str | None = None) -> None:
     """Send a message to another agent."""
+    # `to` is POSITIONAL. Called flag-style (`send --to X --message Y`) it silently
+    # accepts the literal "--to" as the recipient and swallows the real id into the
+    # body — the message is written to the maildir, reported as "Sent", and then never
+    # matches any agent because watch_inbox requires an exact id or "broadcast". It sits
+    # in new/ forever, re-read on every poll by every watcher.
+    #
+    # This actually happened (2026-08-08): a substantive LB-4 briefing sat undelivered
+    # for two hours with `to == "--to"`, and was only found by inspecting the maildir by
+    # hand. Fail loudly at the call instead — an undeliverable address is not a warning.
+    #
+    # Ported here 2026-08-10 from the LiteSuite-bundled copy (LiteSuite 5bf93107), where
+    # it had lived alone for two days. The two liteharness trees have diverged and each
+    # held a different half of this fix: that tree had the recipient guard and index-based
+    # flag consumption; this tree — the one `import liteharness` actually resolves to —
+    # had neither, so the guard was invisible to every agent at runtime.
+    if to.startswith("-"):
+        print(
+            f"Error: recipient looks like a flag ({to!r}). `send` takes POSITIONAL args:\n"
+            f'  python -m liteharness.cli send <agent-id> "message" --from <your-id>\n'
+            f"Nothing was sent.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     agent_id = from_id or config.get_agent_id()
     resolved_thread = thread_id or os.environ.get("LITEHARNESS_THREAD_ID", "") or None
     msg_id = inbox.send(
