@@ -143,6 +143,48 @@ def _merge_claude_hooks(settings_path: Path, hook_config: dict) -> bool:
         return False
 
 
+_DEFAULT_STATUSLINE = {
+    "type": "command",
+    "command": "python -m liteharness.statusline",
+    "refreshInterval": 5,
+}
+
+
+def _merge_claude_statusline(settings_path: Path) -> str:
+    """Install the status line into Claude Code settings.json.
+
+    Returns "installed" | "kept" | "failed".
+
+    🔴 NEVER clobbers an existing statusLine. Someone who has written their own has
+    invested in it, and silently replacing it during an unrelated hook install is the
+    kind of thing that makes people distrust an installer permanently. Absent is the
+    only state we write into.
+
+    This exists because putting "statusLine" in the plugin's own settings.json does
+    NOTHING: nothing reads that file. Measured 2026-08-10 — the plugin has shipped
+    "subagentStatusLine": true for months and it is absent from every user
+    settings.json, because the plugin manifest does not reference settings.json and no
+    code merges it. The visible consequence was that no installed LiteSuite has ever
+    shown a status line at all.
+    """
+    try:
+        settings = (
+            json.loads(settings_path.read_text(encoding="utf-8"))
+            if settings_path.exists()
+            else {}
+        )
+        existing = settings.get("statusLine")
+        if isinstance(existing, dict) and existing.get("command"):
+            return "kept"
+        settings["statusLine"] = dict(_DEFAULT_STATUSLINE)
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        return "installed"
+    except Exception as e:
+        print(f"    Warning: could not install status line: {e}")
+        return "failed"
+
+
 def _install_claude_hooks() -> bool:
     """Install hooks into Claude Code settings.json."""
     settings_path = Path.home() / ".claude" / "settings.json"
@@ -150,7 +192,15 @@ def _install_claude_hooks() -> bool:
     if not config_src.exists():
         return False
     hook_config = json.loads(config_src.read_text(encoding="utf-8"))
-    return _merge_claude_hooks(settings_path, hook_config)
+    ok = _merge_claude_hooks(settings_path, hook_config)
+    # Order matters: hooks first, so a status-line failure can never cost the user
+    # their hooks. The status line is cosmetic; the hooks are the product.
+    status = _merge_claude_statusline(settings_path)
+    if status == "installed":
+        print("    Status line installed")
+    elif status == "kept":
+        print("    Status line: kept your existing one")
+    return ok
 
 
 def _install_codex_hooks() -> bool:
