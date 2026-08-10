@@ -1138,8 +1138,37 @@ def main() -> None:
 
     action = sys.argv[1]
 
+    # Validate the action BEFORE touching stdin.
+    #
+    # This ordering is load-bearing, not tidiness. _read_hook_stdin() is documented
+    # "non-blocking" but performs a plain sys.stdin.read(), which returns only at EOF.
+    # An unknown action therefore reached the reader before it ever reached the
+    # "Unknown action" branch below, and its behaviour then depended entirely on what
+    # stdin happened to be:
+    #   * TTY or /dev/null  -> instant EOF -> exit 1, loud and correct
+    #   * an inherited handle that yields neither data nor EOF -> it never returns
+    #
+    # Measured 2026-08-10: three processes launched on 8/8 with the invalid action
+    # "watch-auto" were still alive two days later having burned 9,188s + 1,727s +
+    # 1,874s of CPU (~3.5 core-hours) at ~15MB RSS, having produced no output and
+    # done no work. They looked exactly like healthy long-lived watchers.
+    #
+    # The source of that invalid action was the plugin's own monitors.json, so this
+    # was self-inflicted and fleet-wide. Validating first makes the failure loud in
+    # every launch context instead of only the ones where stdin happens to EOF.
+    KNOWN_ACTIONS = {
+        "check", "register", "register-quiet", "heartbeat", "watch", "deregister",
+        "bridge", "stop-failure", "worktree-create", "worktree-remove",
+        "task-created", "cwd-changed", "memory-nudge", "obs", "cleanup",
+    }
+    if action not in KNOWN_ACTIONS:
+        print(f"Unknown action: {action}", file=sys.stderr)
+        print(f"Valid actions: {' | '.join(sorted(KNOWN_ACTIONS))}", file=sys.stderr)
+        sys.exit(1)
+
     # Read stdin JSON from hook-supporting CLIs (Codex, Copilot, Claude Code)
     # watch mode is long-running and shouldn't consume stdin
+    hook_input: dict = {}
     if action != "watch":
         hook_input = _read_hook_stdin()
         if hook_input:
