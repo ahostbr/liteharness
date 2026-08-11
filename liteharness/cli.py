@@ -462,6 +462,35 @@ _INSTALLERS = {
 _SCRIPT_CLIS = {"codex-cli", "copilot-cli"}
 
 
+def cmd_install_statusline() -> None:
+    """Install ONLY the status line into Claude Code settings.json.
+
+    `init` installs hooks and the status line together, which is right for a bare
+    machine and wrong for a caller that has already written its own hooks. LiteSuite's
+    desktop wizard writes settings.json itself and tags every entry it owns with
+    `_source: liteharness-wizard`; running `init` behind it would add a SECOND,
+    untagged set of hooks, and uninstall strips by `_source`, so those would be
+    orphaned on removal. This exposes the one half such a caller is missing.
+
+    Measured 2026-08-11, virgin Windows Sandbox, first run of LiteSuite 0.0.50:
+    liteharness 0.2.9 installed, 11 hook events present in settings.json, `statusLine`
+    absent. The capability shipped and nothing ever called it — the wizard writes the
+    file by a different path than `init` does, so the half that only `init` knows about
+    never ran.
+
+    Exits non-zero on failure so a caller can tell; "kept" is a success.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    status = _merge_claude_statusline(settings_path)
+    if status == "installed":
+        print(f"Status line installed -> {settings_path}")
+    elif status == "kept":
+        print("Status line: kept your existing one (an existing value is never clobbered)")
+    else:
+        print("Status line: FAILED")
+        sys.exit(1)
+
+
 def cmd_init() -> None:
     """Initialize LiteHarness: create dirs, detect CLIs, install hooks."""
     print("Initializing LiteHarness...")
@@ -2252,6 +2281,8 @@ def main() -> None:
         print("Commands:")
         print("  bootstrap <path>               Bootstrap harness for a project (global init + scaffold)")
         print("  init                           Initialize LiteHarness (global only)")
+        print("  install-statusline             Install ONLY the status line (for callers that")
+        print("                                 already wrote their own hooks, e.g. the wizard)")
         print("  update-scripts [--cli name]    Update watcher scripts for Codex/Copilot")
         print("  status                         Show status")
         print("  send <to> <message>            Send a message")
@@ -2315,6 +2346,8 @@ def main() -> None:
         cmd_bootstrap(sys.argv[2])
     elif cmd == "init":
         cmd_init()
+    elif cmd == "install-statusline":
+        cmd_install_statusline()
     elif cmd == "update-scripts":
         cli_filter = None
         if "--cli" in sys.argv:
