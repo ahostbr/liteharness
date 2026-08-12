@@ -63,6 +63,41 @@ def short_model(display_name: str) -> str:
     return name or "Claude"
 
 
+def agent_badge(session_id: str | None) -> str:
+    """'1f09ba64-...' -> 'SwiftRelay 1f09ba64'. Silent when there is no session id.
+
+    WHY THIS EXISTS. Every other segment describes the MODEL or the REPO; none of them
+    said WHO. On a machine running several agents at once - which is the entire point of
+    the harness - four identical status lines is not a status line, it is wallpaper. The
+    PowerShell status line this module replaced had carried the name and id for months,
+    so the packaged version was a REGRESSION nobody noticed, because the two are never
+    on screen at the same time.
+
+    `session_id` is already in the payload Claude Code writes to stdin. It was read by
+    nothing here, so the id was present and discarded on every refresh.
+
+    NEVER RAISES, and that is not decoration: get_name() touches the filesystem
+    (~/.liteharness/names/<uuid>, plus the config root), so it can fail for reasons that
+    have nothing to do with this line - a missing home directory, a permissions change,
+    a half-written override. This runs every few seconds on a surface the user cannot
+    easily turn off, so a traceback here does not fail once, it papers the terminal
+    forever. Degrade to the bare id, then to silence.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return ""
+    short = session_id[:8]
+    try:
+        from liteharness.naming import get_name
+
+        name = (get_name(session_id) or "").strip()
+    except Exception:
+        # A name is a nicety; the id is the part that actually disambiguates.
+        name = ""
+    if name:
+        return f"{_c(FG_BLUE, name)} {_c(FG_DIM, short)}"
+    return _c(FG_DIM, short)
+
+
 def _fmt_tokens(n: int) -> str:
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
@@ -175,6 +210,9 @@ def build_line(data: dict) -> str:
     segments = [
         short_model((data.get("model") or {}).get("display_name", "")),
         effort_badge(data.get("effort") or {}),
+        # Identity sits between the model and the repo, matching the PowerShell line this
+        # module replaced: what am I / WHO am I / where am I / how full / how throttled.
+        agent_badge(data.get("session_id")),
         git_branch((data.get("workspace") or {}).get("current_dir") or data.get("cwd")),
         context_bar(data.get("context_window") or {}),
         rate_limits(data.get("rate_limits") or {}),
