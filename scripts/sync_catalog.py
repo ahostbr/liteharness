@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,27 +141,103 @@ def gate_skill_classification(src_root: Path) -> None:
           f"{len(present & set(PRIVATE_SKILLS))} private, 0 unclassified")
 
 
-CATALOG_INIT = """\"\"\"Vendored LiteHarness catalog (skills, agents, commands, hooks).\"\"\"
-"""
+# The pristine module, kept OUTSIDE the directory this script wipes. Embedding it as a
+# string constant here is what went wrong before: the constant drifted from the real
+# module and nothing compared them. A file on disk, in git, is one source of truth.
+CATALOG_INIT_TEMPLATE = Path(__file__).resolve().parent / "catalog_init_template.py"
+
+# The names liteharness/installers.py imports at module scope. If the vendored
+# __init__.py does not define these, `import liteharness.installers` raises and the
+# LiteSuite first-run wizard's "Install skills into other CLIs" step dies with a
+# traceback in the UI. Derived from the consumer, so it cannot silently disagree.
+REQUIRED_CATALOG_NAMES = ("catalog_root", "subtree")
 
 
-def restore_catalog_init(dest_root: Path) -> None:
-    """Re-create liteharness/catalog/__init__.py after the copytree wipes it.
+def capture_catalog_init(dest_root: Path) -> str | None:
+    """Read the REAL __init__.py before anything deletes it. Call BEFORE the wipe."""
+    init = dest_root / "__init__.py"
+    if init.is_file():
+        return init.read_text(encoding="utf-8")
+    return None
 
-    LOAD-BEARING. This script replaces the catalog directory wholesale, which deletes
-    __init__.py every single run. Without that file the directory is a PEP 420 NAMESPACE
-    package: the ~400 data files still ship, `import liteharness.catalog` still appears to
-    succeed, and `catalog.__file__` is None - so `from liteharness.catalog import
-    catalog_root` raises ImportError with an "(unknown location)" traceback.
 
-    That is precisely how 0.2.4 shipped dead on arrival for every user, and it would have
-    happened again on 0.3.1: the sync ran, the file vanished, and the wheel built cleanly.
-    Nothing in the build complains, because a namespace package is legal.
+def restore_catalog_init(dest_root: Path, preserved: str | None) -> None:
+    """Put the catalog module back after the wipe, and PROVE it is the real one.
+
+    🔴 HOW THIS FAILED ON 0.3.1, because the previous version of this function looked
+    correct and was not. It wrote a one-line docstring constant, guarded by
+    `if not init.exists()`. That guard reads as "never clobber a good file", and it is
+    true as far as it goes - but `sync(--clean)` rmtree's `dest_root` itself, so by the
+    time this ran there was NO file to clobber, and the stub won uncontested. The real
+    57-line module - defining catalog_root and subtree - was replaced by 1 line, and the
+    commit that did it was titled "restore catalog/__init__.py".
+
+    ⭐ The predicate was "a file exists at this path". The promise was "the catalog
+    imports". A namespace package satisfies the first and fails the second, which is
+    exactly the 0.2.4 failure this function was written to prevent - reintroduced by its
+    own fix, one level in: ModuleNotFoundError became
+    `ImportError: cannot import name 'catalog_root'`.
+
+    So: prefer the content that was actually there (preserved across the wipe), fall back
+    to the tracked template, and then ASSERT the required names are present. Existence is
+    never again treated as sufficient.
     """
     init = dest_root / "__init__.py"
-    if not init.exists():
-        init.write_text(CATALOG_INIT, encoding="utf-8")
-        print(f"[fix] restored {init} (copytree deletes it every run)")
+
+    if preserved is not None:
+        init.write_text(preserved, encoding="utf-8")
+        source = "preserved across the wipe"
+    elif CATALOG_INIT_TEMPLATE.is_file():
+        init.write_text(CATALOG_INIT_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
+        source = f"template {CATALOG_INIT_TEMPLATE.name}"
+    else:
+        raise SystemExit(
+            f"[catalog] FATAL: nothing to restore {init} from - no preserved copy and no "
+            f"template at {CATALOG_INIT_TEMPLATE}. Refusing to ship a namespace package."
+        )
+
+    text = init.read_text(encoding="utf-8")
+    missing = [n for n in REQUIRED_CATALOG_NAMES if f"def {n}" not in text]
+    if missing:
+        raise SystemExit(
+            f"[catalog] FATAL: restored {init} from {source} but it does not define "
+            f"{', '.join(missing)}. liteharness.installers imports these at module scope, "
+            f"so the wheel would build clean and die on first use. This is the 0.3.1 bug."
+        )
+    print(f"[fix] restored {init} from {source} ({len(text.splitlines())} lines, "
+          f"defines {', '.join(REQUIRED_CATALOG_NAMES)})")
+
+
+def assert_catalog_imports(pkg_root: Path) -> None:
+    """The gate that would have caught 0.3.1: IMPORT it, in a fresh interpreter.
+
+    Reading the file proves the text is right; only an import proves the package is.
+    A subprocess is used deliberately - this process may already have a stale
+    `liteharness.catalog` in sys.modules from an earlier import, and a cached module is
+    the one thing that could make a broken package look fine.
+    """
+    code = (
+        "from liteharness.catalog import " + ", ".join(REQUIRED_CATALOG_NAMES) + "\n"
+        "r = catalog_root()\n"
+        "assert r.is_dir(), f'catalog_root() -> {r} which is not a directory'\n"
+        "s = subtree('skills')\n"
+        "assert s.is_dir(), f'subtree(skills) -> {s} which is not a directory'\n"
+        "n = sum(1 for _ in s.iterdir() if _.is_dir())\n"
+        "assert n > 0, 'subtree(skills) is EMPTY - a clean import over nothing'\n"
+        "print(f'[gate] catalog imports: {n} skills under {s}')\n"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=str(pkg_root),
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise SystemExit(
+            "[catalog] FATAL: the vendored catalog does not import.\n"
+            + (r.stderr or r.stdout).strip()
+            + "\n  This is precisely how 0.2.4 and 0.3.1 shipped dead on arrival: the wheel "
+              "builds clean because a namespace package is legal."
+        )
+    print(r.stdout.strip())
 
 
 def short_sha(path: Path) -> str:
@@ -183,6 +260,10 @@ def sync(src_root: Path, dest_root: Path, clean: bool) -> dict[str, str | int]:
     # lands in the package is exactly PUBLIC, by construction rather than by
     # anybody remembering.
     gate_skill_classification(src_root)
+
+    # Read the real catalog module BEFORE anything deletes it. `--clean` rmtree's
+    # dest_root itself, which is how the 57-line module became a 1-line stub on 0.3.1.
+    preserved_init = capture_catalog_init(dest_root)
 
     if clean and dest_root.exists():
         shutil.rmtree(dest_root)
@@ -215,7 +296,9 @@ def sync(src_root: Path, dest_root: Path, clean: bool) -> dict[str, str | int]:
         "hash": short_sha(dest_root),
     }
     (dest_root / "PROVENANCE.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    restore_catalog_init(DEST_ROOT)
+    restore_catalog_init(DEST_ROOT, preserved_init)
+    # Text-level checks above prove the FILE is right; this proves the PACKAGE is.
+    assert_catalog_imports(THIS_PKG_ROOT)
     print(f"[ok] wrote PROVENANCE.json — {file_count} files, hash {manifest['hash']}")
     return manifest
 
