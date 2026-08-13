@@ -120,22 +120,77 @@ def selftest():
             ok = False
             print("SELFTEST FAIL: %r is allowed brand/placeholder but tripped %s" % (line, got))
 
+    me = str(Path(__file__).resolve())
+
     # And the defect this whole exercise came from: an unreachable git must
     # be an ERROR, never an empty scan that renders as clean.
     with tempfile.TemporaryDirectory() as tmp:
-        proc = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), "--all"],
-            capture_output=True, text=True, cwd=tmp)
+        proc = subprocess.run([sys.executable, me, "--all"],
+                              capture_output=True, text=True, cwd=tmp)
         if proc.returncode == 0:
             ok = False
             print("SELFTEST FAIL: run outside a repo exited 0 — the vacuous "
                   "green is back (%s)" % (proc.stdout.strip()[:120]))
 
-    print("SELFTEST %s: %d block cases, %d allow cases, plus the empty-set case"
+    # The same shape one level out: an unknown flag must not exit 0 by
+    # silently becoming staged mode. A pipeline reads only this number.
+    for bad in ("--alll", "--scan-everything", "extra-positional"):
+        proc = subprocess.run([sys.executable, me, bad],
+                              capture_output=True, text=True,
+                              cwd=str(Path(me).parent))
+        if proc.returncode == 0:
+            ok = False
+            print("SELFTEST FAIL: %r exited 0 — an unknown flag still passes "
+                  "green having scanned nothing" % bad)
+
+    # ...and the recognised flags must still work, or the check above could
+    # be satisfied by a script that rejects everything.
+    proc = subprocess.run([sys.executable, me, "--all"],
+                          capture_output=True, text=True,
+                          cwd=str(Path(me).parent))
+    if proc.returncode != 0:
+        ok = False
+        print("SELFTEST FAIL: --all now exits %d — the argv guard rejects a "
+              "VALID flag, so its refusals prove nothing" % proc.returncode)
+
+    print("SELFTEST %s: %d block cases, %d allow cases, the empty-set case, "
+          "3 unknown-flag cases and the valid-flag control"
           % ("OK" if ok else "FAILED", len(must_block), len(must_pass)))
     return 0 if ok else 1
 
+KNOWN_FLAGS = {"--all", "--selftest"}
+
+def check_argv():
+    """Reject anything we do not recognise. Returns an error string or None.
+
+    🔴 FOUND BY SENTINEL IN THE FIX FOR THE VACUOUS GREEN, which is the same
+    defect one level out. Flags were tested with `"--all" in sys.argv` and
+    nothing validated the rest, so an unrecognised token — a typo, a renamed
+    flag, a CI step that drifted — FELL THROUGH TO STAGED MODE. With nothing
+    staged that scans zero files and exits 0.
+
+        `check_pii.py --alll` PASSED GREEN HAVING SCANNED NOTHING.
+
+    The NOTHING SCANNED message saves a human reading output. It does not save
+    a PIPELINE, which reads only the exit code — and a pipeline is the only
+    thing that runs this in CI. "You passed an unknown flag" and "your staged
+    set is clean" have to stop being the same answer.
+    """
+    unknown = [a for a in sys.argv[1:] if a not in KNOWN_FLAGS]
+    if unknown:
+        return ("unrecognised argument(s): %s\nusage: check_pii.py [--all] "
+                "[--selftest]\n(refusing rather than defaulting to staged mode: "
+                "an unknown flag scanning nothing must not exit 0)"
+                % ", ".join(unknown))
+    return None
+
+
 def main():
+    argv_error = check_argv()
+    if argv_error:
+        print("ERROR: %s" % argv_error)
+        return 2
+
     if "--selftest" in sys.argv:
         return selftest()
 
