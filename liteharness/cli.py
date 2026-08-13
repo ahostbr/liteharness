@@ -3256,7 +3256,10 @@ def main() -> None:
         if len(sys.argv) < 4:
             print(
                 "Usage: liteharness send <to-agent-id> <message> [--from <your-id>] "
-                "[--thread-id <id>] [--force]"
+                "[--thread-id <id>] [--force]\n"
+                "   or: liteharness send <to-agent-id> --body-file <path> [--from <your-id>]\n"
+                "       Use --body-file for anything containing code, backticks or $ -- "
+                "the shell edits an inline body silently and still reports success."
             )
             sys.exit(1)
         # Consume flags by ARGV POSITION, never by string-matching the joined body.
@@ -3269,7 +3272,15 @@ def main() -> None:
         #     a command line) -> everything from that point on deleted.
         # The old scan for values had the mirror of the same fault: `"--from" in sys.argv`
         # matched a flag appearing inside the MESSAGE and took the next word as its value.
-        flags = {"--project": None, "--from": None, "--thread-id": None}
+        # --body-file exists because THE BODY IS PASSED THROUGH A SHELL and the shell
+        # edits it silently. Two agents hit this within one hour on 2026-08-13, both
+        # using backticks inside a double-quoted string: bash ran the contents as a
+        # command substitution and DELETED them, the send reported success, and only
+        # reading the delivered copy showed the gap. `$VAR` expands the same way. Any
+        # body containing code, paths or shell metacharacters should be written to a
+        # file and passed by path -- there is then no shell between the text and the
+        # maildir, so there is nothing to mangle rather than a rule to remember.
+        flags = {"--project": None, "--from": None, "--thread-id": None, "--body-file": None}
         bool_flags = {"--force": False}
         msg_tokens = []
         rest = sys.argv[3:]
@@ -3294,6 +3305,24 @@ def main() -> None:
         from_id = flags["--from"]
         send_thread_id = flags["--thread-id"]
         msg_parts = " ".join(msg_tokens).strip()
+        body_file = flags["--body-file"]
+        if body_file:
+            # Ambiguity is refused rather than resolved by precedence: a caller who
+            # passed both meant one of them, and silently dropping the other is the
+            # emptied-body failure again wearing a different hat.
+            if msg_parts:
+                print(
+                    "Error: --body-file and an inline message were both given. "
+                    "Pass one. Nothing was sent.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            try:
+                msg_parts = Path(body_file).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                print(f"Error: cannot read --body-file {body_file!r}: {exc}. Nothing was sent.",
+                      file=sys.stderr)
+                sys.exit(1)
         # Fail closed. A send that reports success on a body it emptied is worse than a
         # send that refuses: the caller believes the message landed and never re-sends.
         if not msg_parts:
