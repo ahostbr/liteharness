@@ -24,10 +24,24 @@ def make_tree(root: Path, tier: str = "orchestrator", stems=("default",)) -> Pat
 
 
 @pytest.fixture
-def only(monkeypatch):
-    """Point resolution at exactly one tree, so a test measures the code and not the box."""
+def only(monkeypatch, tmp_path_factory):
+    """Point resolution at exactly one tree, so a test measures the code and not the box.
+
+    Isolates BOTH roots. There are two since 0.3.3: the shipped library, and the
+    user-owned overlay that holds generated architectures. Pinning only the first let a
+    test resolve a real file out of the developer's own home directory - which is exactly
+    how test_does_not_resurrect_the_human_named_file started returning `sentinel` instead
+    of `default`. It was reading the box, not the code, and the assertion it broke was the
+    fixture's own promise.
+
+    The overlay gets a FRESH directory per use, so migration (a read that legitimately
+    writes) cannot leak between tests or into the developer's home.
+    """
     def _use(root: Path):
         monkeypatch.setenv("LITEHARNESS_PROMPTS_DIR", str(root))
+        overlay = tmp_path_factory.mktemp("user-overlay")
+        monkeypatch.setenv("LITEHARNESS_USER_PROMPTS_DIR", str(overlay))
+        return overlay
     return _use
 
 

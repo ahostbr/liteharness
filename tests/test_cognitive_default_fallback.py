@@ -20,6 +20,24 @@ import pytest
 from liteharness.prompts import resolve_cognitive_file, resolve_prompts_dir
 
 
+@pytest.fixture(autouse=True)
+def _isolated_user_overlay(monkeypatch, tmp_path_factory):
+    """Every test in this file writes real files at whatever the resolver points to.
+
+    That was ALWAYS non-hermetic - before 0.3.3 the write target was the resolved prompt
+    library, so these tests were creating `the-warden.md` and `roundtripprobe.md` inside
+    the developer's actual LiteSuite checkout and deleting them again. The 0.3.3 move to a
+    user-owned overlay relocated the mess to `~/.liteharness/prompts` without fixing it,
+    and a crashed run left five stray files behind - which the tests then correctly
+    refused to run against, because each one asserts its target does not already exist.
+
+    ⭐ Those `assert not target.exists()` guards are why this was visible at all. A test
+    that silently overwrites whatever is in its way would have hidden the pollution AND
+    the migration bug it exposed.
+    """
+    monkeypatch.setenv("LITEHARNESS_USER_PROMPTS_DIR", str(tmp_path_factory.mktemp("overlay")))
+
+
 pytestmark = pytest.mark.skipif(
     resolve_prompts_dir()[0] is None,
     reason="prompt library not resolvable in this environment",
@@ -115,17 +133,46 @@ def test_real_polymath_still_resolves():
 # never returns — so a perfectly-run interview produced an unfindable file.
 
 
-def test_generation_target_is_under_the_resolved_prompt_library():
+def test_generation_target_is_user_owned_and_not_installer_managed(monkeypatch, tmp_path):
+    """The write target must OUTLIVE the package, not merely agree with it.
+
+    This test used to assert the opposite - that the target sits under
+    resolve_prompts_dir(). That was written to stop the architecture landing somewhere the
+    resolver never reads, which is a real failure, but it fixed it by aiming the WRITE at
+    a tree the installer OWNS: the packaged install, or the version-pinned plugin cache at
+    `.../liteharness/<version>/...`. Both are replaced wholesale on upgrade, so a
+    completed interview was one `plugin update` from silently reverting to default.md.
+
+    Found by an agent inside a virgin Sandbox (WhiteDuct, 2026-08-12) which noticed the
+    resolved target was a version-pinned cache path. Agreement between read and write is
+    still required - the round-trip test below covers it - but it must be reached by
+    pointing the READ at a durable location, not by pointing the WRITE at a disposable one.
+    """
     from liteharness.prompts import resolve_orchestrator_target, resolve_prompts_dir
 
-    pdir, _ = resolve_prompts_dir()
+    overlay = tmp_path / "user"
+    monkeypatch.setenv("LITEHARNESS_USER_PROMPTS_DIR", str(overlay))
+
     target, why = resolve_orchestrator_target("Warden")
     assert target is not None, why
-    assert str(target).startswith(str(pdir)), (
-        "generated architecture would land outside the library the runtime reads"
-    )
     assert target.name == "warden.md"
     assert target.parent.name == "orchestrator"
+
+    # The invariant that matters: not inside anything a package manager replaces.
+    assert str(target).startswith(str(overlay)), f"target {target} is not in the user overlay"
+    lowered = str(target).lower()
+    for doomed in ("plugins\\cache", "plugins/cache", "programs\\litesuite", "programs/litesuite"):
+        assert doomed not in lowered, (
+            f"generated architecture would land in an installer-managed directory ({doomed}) "
+            f"and be destroyed by the next upgrade"
+        )
+
+    # And it must NOT be under the shipped library, which is the thing that changed.
+    pdir, _ = resolve_prompts_dir()
+    if pdir is not None:
+        assert not str(target).startswith(str(pdir)), (
+            "write target is back inside the shipped library - an upgrade will delete it"
+        )
 
 
 def test_generated_file_is_then_resolvable_round_trip(tmp_path):
@@ -138,6 +185,10 @@ def test_generated_file_is_then_resolvable_round_trip(tmp_path):
     assert not target.exists(), "probe name collided with a real architecture"
 
     assert resolve_cognitive_file(name, "orchestrator").name == "default.md"
+    # The overlay is user-owned and may not exist yet on a first run. This mkdir used to be
+    # unnecessary only because the old write target was the SHIPPED library, which always
+    # exists - the test was relying on a directory the installer happened to provide.
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("# RoundTripProbe\n\nprobe\n", encoding="utf-8")
     try:
         found = resolve_cognitive_file(name, "orchestrator")

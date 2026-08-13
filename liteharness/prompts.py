@@ -29,6 +29,7 @@ failing silently means an unconstrained agent, which is why every failure path h
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -180,6 +181,31 @@ def resolve_cognitive_file(name: str, tier: str | None = None) -> Optional[Path]
     slug = orchestrator_slug(name)
     if not name or not name.strip():
         return None
+
+    # USER OVERLAY FIRST. Generated architectures live in a user-owned directory that
+    # survives upgrades (see user_prompts_dir). Searched ahead of the shipped library so
+    # a personalised file always beats the shipped exemplar of the same name — and so
+    # write and read remain the same lookup, which is the property the old
+    # derive-write-from-read design was protecting.
+    preferred_dir = _TIER_TO_COG_DIR.get((tier or "").strip().lower())
+    user_base = user_prompts_dir() / "cognitive-architectures"
+    user_order = [preferred_dir] if preferred_dir else []
+    user_order += [d for d in _COG_TIER_DIRS if d != preferred_dir]
+    for d in user_order:
+        f = user_base / d / f"{slug}.md"
+        if f.is_file():
+            return f
+
+    # Nothing in the overlay: an older version may have written into a shipped tree, one
+    # upgrade from destruction. Rescue it rather than resolving through it.
+    # Only when the CALLER said orchestrator - never inferred - because every other tier
+    # resolves SHIPPED polymath files, and copying one of those into a user overlay would
+    # shadow the shipped version permanently and silently stop it receiving updates.
+    if (tier or "").strip().lower() == "orchestrator":
+        migrated = migrate_generated_architecture(name, "orchestrator")
+        if migrated is not None and migrated.is_file():
+            return migrated
+
     pdir, _src = resolve_prompts_dir()
     if pdir is None:
         return None
@@ -213,33 +239,122 @@ def orchestrator_slug(name: str) -> str:
     return slug or "default"
 
 
+def user_prompts_dir() -> Path:
+    """The USER-OWNED overlay for generated prompt material. Never installer-managed.
+
+    🔴 WHY THIS EXISTS (WhiteDuct, virgin Sandbox, 2026-08-12).
+
+    resolve_orchestrator_target() used to derive the WRITE path from
+    resolve_prompts_dir(), reasoning that "the write location cannot drift from the read
+    location, because they are the same lookup". That instinct is right about DRIFT and
+    catastrophic about LIFECYCLE: every location resolve_prompts_dir() returns is a
+    SHIPPED tree — the packaged install under LOCALAPPDATA, or the version-pinned plugin
+    cache at `.../liteharness/<version>/...`. Both are replaced wholesale by an upgrade.
+
+    So the entire output of the user's interview was being written into a directory a
+    package manager owns. On the next `plugin update` the architecture is orphaned and
+    verify_orchestrator_identity() silently starts returning the SHIPPED DEFAULT for an
+    orchestrator that worked yesterday — the ryan.md failure again, with TIME as the axis
+    instead of naming.
+
+    ⭐⭐ The tell was an asymmetry already in this module: resolve_skill_target() writes to
+    `~/.claude/skills/`, which is user-owned and survives everything. Two halves of one
+    identity, written to two different lifecycles. Whenever generated content and shipped
+    content share a directory, the generated half is on borrowed time.
+
+    Deriving write-from-read is still the right idea; it just has to be derived from a
+    root that OUTLIVES the package. Reads consult this overlay first, so the two locations
+    still cannot drift.
+    """
+    override = os.environ.get("LITEHARNESS_USER_PROMPTS_DIR", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".liteharness" / "prompts"
+
+
+def _user_architecture_path(name: str, tier: str = "orchestrator") -> Path:
+    tier_dir = _TIER_TO_COG_DIR.get((tier or "").strip().lower(), "orchestrator")
+    return user_prompts_dir() / "cognitive-architectures" / tier_dir / f"{orchestrator_slug(name)}.md"
+
+
+def migrate_generated_architecture(name: str, tier: str = "orchestrator") -> Optional[Path]:
+    """Rescue an architecture written into a shipped tree by an older version.
+
+    Anyone who ran the interview on <=0.3.2 has their file inside the plugin cache or the
+    packaged install, one upgrade from destruction. Copy it into the user overlay the
+    first time we look for it — that is the only moment we still know the file exists.
+
+    🔴 ORCHESTRATOR TIER ONLY, and this restriction is load-bearing. The first version of
+    this function migrated any tier, which meant resolving a polymath — "Linus" as a
+    worker, "Holmes" as a thinker — would COPY a SHIPPED library file into the user's
+    overlay, where it would then shadow the shipped one forever and never receive updates.
+    A rescue that cannot tell generated content from shipped content is a corruption.
+
+    The orchestrator directory is the only place generated architectures live; everything
+    else in it is `default.md`, which is never migrated because copying the template would
+    manufacture a fake "personalised" file that verify_orchestrator_identity() would then
+    happily accept — the precise failure it exists to catch.
+
+    Returns the overlay path when a migration happened, else None.
+    """
+    if (tier or "").strip().lower() != "orchestrator":
+        return None
+    slug = orchestrator_slug(name)
+    if slug == "default":
+        return None
+    dest = _user_architecture_path(name, "orchestrator")
+    if dest.is_file():
+        return None
+    pdir, _src = resolve_prompts_dir()
+    if pdir is None:
+        return None
+    src = pdir / "cognitive-architectures" / "orchestrator" / f"{slug}.md"
+    if not src.is_file():
+        return None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # BYTES, not text. read_text()/write_text() round-trips through universal newlines
+        # and re-encodes with os.linesep, so on Windows a rescued LF file came out CRLF -
+        # 11,050 bytes in, 11,228 out, a silent 178-byte rewrite of content this function
+        # exists to PRESERVE. A migration that alters what it is rescuing is not a copy.
+        dest.write_bytes(src.read_bytes())
+        return dest
+    except OSError:
+        return None
+
+
 def resolve_orchestrator_target(name: str) -> Tuple[Optional[Path], str]:
     """Where a GENERATED orchestrator architecture must be written to be findable.
 
-    Derived from resolve_prompts_dir() so it is correct BY CONSTRUCTION — the write
-    location cannot drift from the read location, because they are the same lookup.
+    Now the USER-OWNED overlay (see user_prompts_dir), not the shipped library. Reads
+    consult the overlay first, so write and read still cannot drift — but the file now
+    outlives app and plugin upgrades instead of being deleted by them.
 
-    Two bugs this exists to prevent, both real:
+    Three bugs this exists to prevent, all real:
 
       1. `/ls-init-liteharness` documented its output as
-         `.liteharness/prompts/cognitive-architectures/orchestrator/<username>.md`.
-         resolve_prompts_dir() NEVER returns `.liteharness/` — it resolves to the repo
-         checkout, the packaged install, or the plugin cache. A file written there is
-         unfindable, and "read this file" has no failure mode, so nothing would report it.
+         `.liteharness/prompts/cognitive-architectures/orchestrator/<username>.md`, a path
+         resolve_prompts_dir() never returns. A file written there is unfindable, and
+         "read this file" has no failure mode, so nothing would report it.
 
       2. It named the file after the HUMAN (git user.name) while resolve_cognitive_file()
-         looks up the AGENT's name. Naming a resource by a non-authoritative identifier:
-         the human is not the key anyone searches by.
+         looks up the AGENT's name. The human is not the key anyone searches by.
 
-    Returns (path, reason). Path is None only when no prompt library resolves at all,
-    which callers must be LOUD about — silently skipping identity generation produces an
-    orchestrator with no architecture and no complaint.
+      3. It wrote into a version-pinned, installer-managed directory, so a successful
+         interview was one upgrade away from silently reverting to the shipped default.
+
+    Returns (path, reason). Never None any more: the overlay is derived from the home
+    directory and does not depend on any library resolving, which is the point — identity
+    generation must not be silently skipped because a shipped tree was missing.
+
+    ⚠️ THE CALLER MUST `mkdir(parents=True, exist_ok=True)` the parent. The old target was
+    inside the shipped library, which always exists because an installer put it there;
+    this one is user-owned and is genuinely absent on a first run. Writers that relied on
+    the directory already existing will raise FileNotFoundError on exactly the machine
+    this feature is for.
     """
-    pdir, src = resolve_prompts_dir()
-    if pdir is None:
-        return None, f"no prompt library resolved ({src})"
-    target = pdir / "cognitive-architectures" / "orchestrator" / f"{orchestrator_slug(name)}.md"
-    return target, f"from {src}"
+    target = _user_architecture_path(name, "orchestrator")
+    return target, f"user overlay {target.parent} (survives app and plugin upgrades)"
 
 
 # ── Mode detection ───────────────────────────────────────────────────────────
@@ -278,6 +393,76 @@ def _read(prompts_dir: Path, rel: str) -> Optional[str]:
         return f.read_text(encoding="utf-8").strip()
     except OSError:
         return None
+
+
+TEMPLATE_ONLY_START = "<!-- TEMPLATE-ONLY:START -->"
+TEMPLATE_ONLY_END = "<!-- TEMPLATE-ONLY:END -->"
+_SLOT_RE = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
+
+
+def strip_template_scaffolding(text: str) -> str:
+    """Remove blocks that describe the template's own PRE-generation state.
+
+    🔴 WHY (WhiteDuct, virgin Sandbox, 2026-08-12). `default.md` opens with a blockquote
+    reading *"This file is a TEMPLATE until you run /ls-init-liteharness ... Every
+    `{{SLOT}}` below is a question the interview answers"*, while SKILL.md says
+    **"Leave NO `{{SLOT}}` unreplaced."**
+
+    That `{{SLOT}}` is not a slot. It is PROSE ABOUT slots, and there is no value to
+    substitute it with — so the rule was literally unsatisfiable, and the generated
+    architecture would either keep a placeholder or keep a notice telling its owner the
+    file has not been generated yet. Scaffolding must be DELETED, not filled.
+
+    ⭐ The literal `{{SLOT}}` is deliberately LEFT INSIDE the marked block. If a caller
+    forgets to strip, unfilled_slots() reports it and render_architecture() refuses to
+    write — so the thing that used to make the rule unsatisfiable is now the tripwire that
+    detects the omission. A trap you cannot remove becomes a detector you cannot silence.
+    """
+    out, depth = [], 0
+    for line in text.splitlines(keepends=True):
+        marker = line.strip()
+        if marker == TEMPLATE_ONLY_START:
+            depth += 1
+            continue
+        if marker == TEMPLATE_ONLY_END:
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0:
+            out.append(line)
+    return "".join(out)
+
+
+def unfilled_slots(text: str) -> list[str]:
+    """Every `{{SLOT}}` still present, in order of first appearance, deduplicated."""
+    seen, found = set(), []
+    for m in _SLOT_RE.finditer(text):
+        if m.group(0) not in seen:
+            seen.add(m.group(0))
+            found.append(m.group(0))
+    return found
+
+
+def render_architecture(template: str, values: dict[str, str]) -> str:
+    """Substitute, strip scaffolding, and REFUSE to return anything still holding a slot.
+
+    The 'leave no slot unreplaced' rule lived only in SKILL.md prose, which means it was
+    enforced by whether the agent doing the generation remembered it. This makes it a
+    function that raises. A rule stated in prose is a hope; a rule that returns non-zero
+    is a gate.
+    """
+    text = template
+    for key, val in values.items():
+        text = text.replace("{{" + key + "}}", val)
+    text = strip_template_scaffolding(text)
+    remaining = unfilled_slots(text)
+    if remaining:
+        raise ValueError(
+            "refusing to write an architecture with unreplaced placeholders: "
+            + ", ".join(remaining)
+            + ". If one of these is PROSE about slots rather than a slot, wrap that block "
+            + f"in {TEMPLATE_ONLY_START} / {TEMPLATE_ONLY_END} so it is deleted, not filled."
+        )
+    return text
 
 
 def _fill_slots(text: str) -> str:

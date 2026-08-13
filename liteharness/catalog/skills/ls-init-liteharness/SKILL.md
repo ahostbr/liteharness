@@ -106,8 +106,30 @@ the interview contradicts them — those encode lessons already paid for. Adapt 
 phases to their style (planners get more Phase 1; divers get to Phase 3 faster).
 
 🔴 **Leave NO `{{SLOT}}` unreplaced.** An unsubstituted placeholder reads as literal text to
-the next orchestrator, and nothing checks. If a slot has no answer, delete the line or write
-the default — never ship the braces.
+the next orchestrator. If a slot has no answer, delete the line or write the default — never
+ship the braces.
+
+⚠️ **This rule used to be unsatisfiable, and "nothing checks" is no longer true.** The
+template's own opening blockquote reads *"This file is a TEMPLATE until you run
+`/ls-init-liteharness`. Every `{{SLOT}}` below is a question the interview answers."* That
+`{{SLOT}}` is **prose about slots**, not a slot — there is nothing to substitute it with, so
+obeying the rule literally was impossible, and generated files kept either a placeholder or
+a notice telling their owner the interview had not been run. Scaffolding must be **deleted,
+not filled**. It is now wrapped in `<!-- TEMPLATE-ONLY:START -->` / `<!-- TEMPLATE-ONLY:END -->`.
+
+**Do not hand-substitute. Use the function, which enforces both halves and raises:**
+
+```python
+from liteharness.prompts import render_architecture, resolve_orchestrator_target
+
+target, why = resolve_orchestrator_target(NAME)
+target.parent.mkdir(parents=True, exist_ok=True)   # user-owned; absent on a first run
+target.write_text(render_architecture(TEMPLATE_TEXT, VALUES), encoding="utf-8")
+```
+
+`render_architecture()` substitutes, strips every TEMPLATE-ONLY block, and **refuses to
+return** if any `{{SLOT}}` survives — so a forgotten strip fails loudly instead of shipping.
+A rule stated in prose is enforced by whoever remembers it; a rule that raises is enforced.
 
 ### Where to save it — ASK, do not hardcode
 
