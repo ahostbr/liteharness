@@ -607,7 +607,52 @@ def cmd_status() -> None:
         print(f"  Active agents: {active}")
 
 
-def cmd_send(to: str, body: str, project: str | None = None, from_id: str | None = None, thread_id: str | None = None) -> None:
+def _known_agent_ids() -> tuple[set[str], str | None]:
+    """Every agent id the registry knows about.
+
+    Returns (ids, registry_error). `registry_error` is non-None when the registry
+    could not be READ AT ALL -- a missing directory, an unreadable file, a wrong
+    root. That case must never be reported as "unknown recipient": an empty set
+    from a broken reader and a genuinely unknown id produce the same answer, and
+    blocking on the former would refuse every send in the fleet while looking
+    exactly like a caught typo. Callers verify, or say plainly that they could not.
+    """
+    try:
+        agents_dir = config.get_root() / "agents"
+    except Exception as exc:  # noqa: BLE001 - any resolution failure is "cannot verify"
+        return set(), f"cannot resolve the harness root ({exc})"
+    if not agents_dir.exists():
+        return set(), f"no agent registry at {agents_dir}"
+
+    ids: set[str] = set()
+    for f in agents_dir.glob("*.json"):
+        if f.name.endswith(".tmp"):  # a write in flight, not an agent
+            continue
+        ids.add(f.stem)
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a corrupt record still proves the id exists
+            continue
+        for key in ("agent_id", "id", "session_id"):
+            val = rec.get(key)
+            if isinstance(val, str) and val:
+                ids.add(val)
+    if not ids:
+        # A registry directory with zero agents is not a normal state -- this
+        # process is itself registered. Treat it as unreadable, not as "nobody
+        # exists", for the same reason as above.
+        return set(), f"agent registry at {agents_dir} lists no agents"
+    return ids, None
+
+
+def cmd_send(
+    to: str,
+    body: str,
+    project: str | None = None,
+    from_id: str | None = None,
+    thread_id: str | None = None,
+    force: bool = False,
+) -> None:
     """Send a message to another agent."""
     # `to` is POSITIONAL. Called flag-style (`send --to X --message Y`) it silently
     # accepts the literal "--to" as the recipient and swallows the real id into the
@@ -632,6 +677,42 @@ def cmd_send(to: str, body: str, project: str | None = None, from_id: str | None
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # A WELL-FORMED BUT WRONG RECIPIENT REPORTED SUCCESS. The flag guard above only
+    # catches an address that LOOKS like a flag; a mistyped uuid sails through. Found
+    # 2026-08-13 by an agent who fluffed one hex digit and got
+    # "Sent message <id> to <nobody>" twice, exit 0, with two real briefings left in a
+    # maildir no agent owns. A typo'd send and a delivered send printed identically,
+    # which is the same defect this file already documents twice above -- an
+    # undeliverable address is not a warning.
+    #
+    # Fails CLOSED on an unknown id and OPEN on an unreadable registry, deliberately:
+    # see _known_agent_ids. "broadcast" is a real address that owns no record.
+    if not force and to != "broadcast":
+        known, registry_error = _known_agent_ids()
+        if registry_error:
+            print(
+                f"Warning: RECIPIENT NOT VERIFIED -- {registry_error}.\n"
+                f"  Sending anyway. This is not a claim that {to} exists.",
+                file=sys.stderr,
+            )
+        elif to not in known:
+            import difflib
+
+            near = difflib.get_close_matches(to, sorted(known), n=3, cutoff=0.6)
+            hint = ""
+            if near:
+                hint = "  Did you mean:\n" + "".join(f"    {c}\n" for c in near)
+            print(
+                f"Error: no agent {to!r} is registered. NOTHING WAS SENT.\n"
+                f"{hint}"
+                f"  {len(known)} agent(s) known. `liteharness discover` lists the live ones.\n"
+                f"  Pass --force to send to an id the registry does not know "
+                f"(an agent that has not registered yet).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     agent_id = from_id or config.get_agent_id()
     resolved_thread = thread_id or os.environ.get("LITEHARNESS_THREAD_ID", "") or None
     msg_id = inbox.send(
@@ -3173,7 +3254,10 @@ def main() -> None:
         cmd_status()
     elif cmd == "send":
         if len(sys.argv) < 4:
-            print("Usage: liteharness send <to-agent-id> <message> [--from <your-id>] [--thread-id <id>]")
+            print(
+                "Usage: liteharness send <to-agent-id> <message> [--from <your-id>] "
+                "[--thread-id <id>] [--force]"
+            )
             sys.exit(1)
         # Consume flags by ARGV POSITION, never by string-matching the joined body.
         # The previous form joined argv[3:] into one string and truncated it at the first
@@ -3186,11 +3270,16 @@ def main() -> None:
         # The old scan for values had the mirror of the same fault: `"--from" in sys.argv`
         # matched a flag appearing inside the MESSAGE and took the next word as its value.
         flags = {"--project": None, "--from": None, "--thread-id": None}
+        bool_flags = {"--force": False}
         msg_tokens = []
         rest = sys.argv[3:]
         i = 0
         while i < len(rest):
             token = rest[i]
+            if token in bool_flags:
+                bool_flags[token] = True
+                i += 1
+                continue
             if token in flags:
                 if i + 1 < len(rest):
                     flags[token] = rest[i + 1]
@@ -3214,7 +3303,7 @@ def main() -> None:
                 "[--thread-id <id>]"
             )
             sys.exit(1)
-        cmd_send(sys.argv[2], msg_parts, project, from_id, send_thread_id)
+        cmd_send(sys.argv[2], msg_parts, project, from_id, send_thread_id, bool_flags["--force"])
     elif cmd == "list":
         cmd_list()
     elif cmd == "inbox":
