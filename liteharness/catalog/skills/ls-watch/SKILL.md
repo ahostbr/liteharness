@@ -461,6 +461,7 @@ Launch all three as separate `run_in_background` Bash calls in a single response
 `/watch` is a one-shot — it fires once and exits. For **persistent monitoring** that re-arms after each trigger, you can manually re-launch the watcher in the background after each notification, or write a wrapper script that loops around the watch script.
 
 > **Note:** A `/loop` skill companion is not currently bundled in this plugin. To achieve persistent monitoring, either:
+>
 > - Re-invoke `/watch` after each notification fires, or
 > - Write a small bash wrapper that loops indefinitely around the generated watcher script, sleeping for the desired re-arm interval between runs.
 
@@ -477,11 +478,11 @@ done
 
 Use cases this pattern enables:
 
-| Pattern                                        | What it does                             |
-| ---------------------------------------------- | ---------------------------------------- |
-| Loop + `/watch feed ...`                       | Persistent YouTube/RSS monitor           |
-| Loop + `/watch web ... --expect 200`           | Continuous uptime monitor                |
-| Loop + `/watch command "git ls-remote ..."`    | Watch for new commits on a remote branch |
-| Loop + `/watch pattern app.log "ERROR"`        | Continuous log error alerting            |
+| Pattern                                     | What it does                             |
+| ------------------------------------------- | ---------------------------------------- |
+| Loop + `/watch feed ...`                    | Persistent YouTube/RSS monitor           |
+| Loop + `/watch web ... --expect 200`        | Continuous uptime monitor                |
+| Loop + `/watch command "git ls-remote ..."` | Watch for new commits on a remote branch |
+| Loop + `/watch pattern app.log "ERROR"`     | Continuous log error alerting            |
 
 **Important:** Set the watcher timeout shorter than the re-arm interval to avoid overlap. Rule of thumb: `timeout = interval - 1m`.

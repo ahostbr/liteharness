@@ -1,16 +1,17 @@
 ---
 name: ls-scout
 description: >
-  PROACTIVE BEHAVIOR — not primarily user-triggered. Opus should automatically dispatch Haiku
-  sub-agents for simple research: reading files, listing directories, web searches, doc summaries,
-  factual lookups. Saves Opus tokens by offloading grunt work to the cheapest model with its own
-  separate usage pool. Use Haiku for facts, Sonnet polymaths for reasoning, Opus for decisions.
+  PROACTIVE BEHAVIOR — not primarily user-triggered. Opus should automatically dispatch Sonnet 5
+  sub-agents for research: reading files, listing directories, web searches, doc summaries,
+  factual lookups, and light synthesis. Offloads grunt work to a near-Opus-capable model at a
+  fraction of the cost (separate usage pool), saving Opus tokens for decisions. Use Sonnet 5 for
+  research/facts/light-synthesis, Sonnet polymaths for framed reasoning, Opus for judgment calls.
   Triggers on 'scout', 'send a scout'. Proactively used without user asking.
 ---
 
-# Scout — Haiku Research Agent
+# Scout — Sonnet 5 Research Agent
 
-Dispatch a **Haiku sub-agent** for research and exploration tasks instead of doing them yourself. Haiku draws from a separate, nearly untouched usage pool — offload all grunt work there.
+Dispatch a **Sonnet 5 sub-agent** for research and exploration tasks instead of doing them yourself. Sonnet 5 (`claude-sonnet-5`, released 2026-06-30) delivers near-Opus-4.8 research and synthesis quality at a fraction of the cost, drawing from a separate usage pool — offload grunt work and light analysis there, and keep Opus for the decisions.
 
 ## When to Use (Proactive)
 
@@ -35,7 +36,7 @@ Default to spawning a Scout instead of doing these yourself:
 ```
 Agent(
   name: "scout",
-  model: "haiku",
+  model: "claude-sonnet-5",
   subagent_type: "Explore",
   prompt: "<clear research question with enough context to act on>"
 )

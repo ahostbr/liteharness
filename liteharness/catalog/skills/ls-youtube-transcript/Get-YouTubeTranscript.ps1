@@ -215,6 +215,99 @@ print('ok')
         Write-Host "LiteYT: $liteytStatus" -ForegroundColor Yellow
     }
 
+    # ── 5c. Save to LiteSuite YouTube panel (best-effort) ───────────────────
+    # LiteSuite's YouTube panel reads %APPDATA%/litesuite/yt.db (== %APPDATA%/LiteSuite
+    # on case-insensitive Windows), table yt_transcripts. Schema below mirrors
+    # apps/desktop/src/litesuite/services/youtube/db.ts so a grabbed transcript shows
+    # up in the panel's Library tab. FTS is kept in sync by the AFTER INSERT trigger.
+    # Insert is idempotent on video_id (that column has no UNIQUE constraint).
+
+    $litesuiteStatus = 'Not saved'
+    try {
+        $litesuiteDbDir  = Join-Path $env:APPDATA 'litesuite'
+        $litesuiteDbPath = Join-Path $litesuiteDbDir 'yt.db'
+        if (-not (Test-Path $litesuiteDbDir)) {
+            New-Item -ItemType Directory -Path $litesuiteDbDir -Force | Out-Null
+        }
+
+        $transcriptText = ($Segments | ForEach-Object { $_.text }) -join ' '
+        $transcriptText = ($transcriptText -replace '\s+', ' ').Trim()
+        $segmentsJson = ($Segments | ConvertTo-Json -Depth 3 -Compress)
+
+        $escapedTitle = $VideoTitle -replace "'", "''"
+        $escapedText = $transcriptText -replace "'", "''"
+        $escapedSegments = $segmentsJson -replace "'", "''"
+        $escapedUrl = $Url -replace "'", "''"
+
+        $sql = @"
+CREATE TABLE IF NOT EXISTS yt_transcripts (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  video_id        TEXT NOT NULL,
+  youtube_url     TEXT NOT NULL,
+  video_title     TEXT,
+  language        TEXT,
+  transcript_text TEXT NOT NULL,
+  segments_json   TEXT NOT NULL,
+  summary_text    TEXT,
+  batch_job_id    INTEGER,
+  created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS yt_transcripts_fts USING fts5(
+  video_title, transcript_text, content=yt_transcripts, content_rowid=id
+);
+CREATE TRIGGER IF NOT EXISTS yt_transcripts_ai AFTER INSERT ON yt_transcripts BEGIN
+  INSERT INTO yt_transcripts_fts(rowid, video_title, transcript_text) VALUES (new.id, new.video_title, new.transcript_text);
+END;
+CREATE TRIGGER IF NOT EXISTS yt_transcripts_ad AFTER DELETE ON yt_transcripts BEGIN
+  INSERT INTO yt_transcripts_fts(yt_transcripts_fts, rowid, video_title, transcript_text) VALUES('delete', old.id, old.video_title, old.transcript_text);
+END;
+CREATE TRIGGER IF NOT EXISTS yt_transcripts_au AFTER UPDATE ON yt_transcripts BEGIN
+  INSERT INTO yt_transcripts_fts(yt_transcripts_fts, rowid, video_title, transcript_text) VALUES('delete', old.id, old.video_title, old.transcript_text);
+  INSERT INTO yt_transcripts_fts(rowid, video_title, transcript_text) VALUES (new.id, new.video_title, new.transcript_text);
+END;
+INSERT INTO yt_transcripts (video_id, youtube_url, video_title, language, transcript_text, segments_json, created_at)
+SELECT '$VideoId', '$escapedUrl', '$escapedTitle', 'en', '$escapedText', '$escapedSegments', datetime('now')
+WHERE NOT EXISTS (SELECT 1 FROM yt_transcripts WHERE video_id = '$VideoId');
+"@
+        $lsSqlFile = Join-Path $TempDir "yt-litesuite-$VideoId.sql"
+        $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllText($lsSqlFile, $sql, $utf8NoBom)
+
+        $lsPyHelper = Join-Path $TempDir "yt-litesuite-$VideoId.py"
+        $lsPyCode = @"
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+try:
+    conn.execute('PRAGMA journal_mode=WAL')
+except Exception:
+    pass
+with open(sys.argv[2], 'r', encoding='utf-8') as f:
+    conn.executescript(f.read())
+changed = conn.total_changes
+conn.close()
+print('inserted' if changed else 'exists')
+"@
+        [System.IO.File]::WriteAllText($lsPyHelper, $lsPyCode, $utf8NoBom)
+
+        $lsResult = & python $lsPyHelper $litesuiteDbPath $lsSqlFile 2>&1
+        if ($lsResult -match 'inserted') {
+            $litesuiteStatus = "Saved to LiteSuite YouTube panel"
+            Write-Host "LiteSuite: $litesuiteStatus" -ForegroundColor Green
+        } elseif ($lsResult -match 'exists') {
+            $litesuiteStatus = "Already in LiteSuite panel (skipped)"
+            Write-Host "LiteSuite: $litesuiteStatus" -ForegroundColor Green
+        } else {
+            $litesuiteStatus = "Save failed: $lsResult"
+            Write-Host "LiteSuite: $litesuiteStatus" -ForegroundColor Yellow
+        }
+
+        Remove-Item $lsSqlFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $lsPyHelper -Force -ErrorAction SilentlyContinue
+    } catch {
+        $litesuiteStatus = "Save skipped: $($_.Exception.Message.Substring(0, [math]::Min($_.Exception.Message.Length, 80)))"
+        Write-Host "LiteSuite: $litesuiteStatus" -ForegroundColor Yellow
+    }
+
     # ── 6. Build and output markdown ──────────────────────────────────────────
 
     $exportDate = Get-Date -Format 'yyyy-MM-dd HH:mm'
@@ -227,6 +320,7 @@ print('ok')
 **Exported:** $exportDate
 **Archived:** $archiveStatus
 **LiteYT:** $liteytStatus
+**LiteSuite Panel:** $litesuiteStatus
 
 ---
 

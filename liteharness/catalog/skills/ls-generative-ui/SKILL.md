@@ -29,8 +29,11 @@ When calling `prompt_widget`, you MUST provide:
 - `type` — `"catalog"` | `"html"` | `"specs"`
 - `requestId` — unique identifier per call. Generate `"widget-{8 random hex chars}"` (e.g. `"widget-7f3a9e2c"`). **Must be unique per call.**
 - `agentId` — your agent identifier (session UUID or `"sentinel-chat"` if unknown)
+- `timeout` — optional; auto-expire after N milliseconds. Omit to wait indefinitely.
 
 Plus the band-specific fields below.
+
+> **Legacy path:** `render_widget` with `interactive: true` (plus the same `requestId`/`agentId`) behaves identically to `prompt_widget` — same wire format, same handler, same response shape. Prefer `prompt_widget` for clarity. A blocking call shows as "pending" in the thread until the user acts — design for immediate action.
 
 ## Response shape
 
@@ -214,6 +217,73 @@ For libraries beyond Chart.js/D3, any `https:` script is allowed (sandbox is the
   ]
 }
 ```
+
+## Appendix — full component JSON shapes
+
+Copy-paste prop shapes for every catalog component (condensed table above is the same surface).
+
+### Data
+
+```json
+genui.StatCard      { "title": "Active Users", "value": "12,483", "trend": "+8.2%", "icon": "users" }
+genui.MetricRow     { "metrics": [{ "label": "Revenue", "value": "$42K" }, { "label": "Churn", "value": "2.1%" }] }
+genui.DataTable     { "columns": ["Name", "Status", "Score"], "rows": [["Alice", "active", 94], ["Bob", "idle", 71]] }
+genui.ProgressRing  { "value": 73, "max": 100, "label": "Completion" }
+```
+
+### Summary
+
+```json
+genui.TLDR              { "text": "Deployment succeeded. 3 services restarted. No errors." }
+genui.KeyTakeaways      { "items": ["Latency up 12ms on p99", "Cache hit rate dropped to 68%"] }
+genui.ExecutiveSummary  { "title": "Q2 Performance", "sections": [{ "heading": "Revenue", "body": "..." }, { "heading": "Risks", "body": "..." }] }
+```
+
+### Instructional
+
+```json
+genui.StepCard     { "step": 1, "title": "Install dependencies", "description": "Run `bun install` in the project root." }
+genui.CodeBlock    { "code": "const x = 42;", "language": "typescript" }
+genui.CalloutCard  { "type": "warning", "title": "Breaking Change", "message": "The `userId` field is now required." }
+```
+
+`CalloutCard.type`: `"info"` | `"warning"` | `"error"` | `"success"`
+
+### Resources
+
+```json
+genui.LinkCard  { "url": "https://example.com/docs", "title": "API Reference", "description": "Full endpoint documentation" }
+genui.ToolCard  { "name": "PostgreSQL", "description": "Primary database", "status": "healthy" }
+genui.BookCard  { "title": "Designing Data-Intensive Applications", "author": "Martin Kleppmann", "description": "Replication, sharding, consistency." }
+```
+
+### Layout
+
+```json
+genui.Section    { "title": "Infrastructure", "children": [ ... ] }
+genui.Grid       { "columns": 2, "children": [ ... ] }
+genui.Tabs       { "tabs": [{ "label": "Overview", "content": "..." }, { "label": "Details", "content": "..." }] }
+genui.Accordion  { "items": [{ "title": "What is X?", "content": "X is..." }] }
+```
+
+### Interactive
+
+```json
+genui.FormField  { "name": "email", "label": "Email Address", "type": "email" }
+genui.Button     { "label": "Confirm", "variant": "primary" }
+genui.Select     { "options": ["Option A", "Option B", "Option C"], "value": "Option A" }
+```
+
+### Tags
+
+```json
+genui.StatusIndicator  { "status": "online", "label": "API Gateway" }
+genui.CategoryBadge    { "category": "backend", "color": "blue" }
+```
+
+## Codex agents
+
+Codex agents get the same `render_widget` tool via MCP — hand them the companion reference in this skill's directory: `codex-generative-ui.md` (tool schema + band selection + examples in Codex-friendly form).
 
 ## Best practices
 

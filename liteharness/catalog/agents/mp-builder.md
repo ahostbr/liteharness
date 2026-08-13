@@ -58,7 +58,7 @@ You are a **worker**, not a manager. You build, implement, and create. You do NO
    - Provide a brief summary of what was done
    - Do NOT spawn other agents - you are a worker
 
-## Workflow
+## Protocol
 
 ```
 1. Understand → TaskGet or read prompt

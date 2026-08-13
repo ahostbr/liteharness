@@ -33,7 +33,7 @@ Quick-lookup index into the **canonical** architecture docs for the consolidated
 | 13  | 13-AgentsOverflow.md         | Worldwide agent network, daily builds, voting                      |
 | 14  | 14-Self-Improvement.md       | Self-improvement loop, LiteCLI compilation, /train                 |
 
-## Workflow
+## Protocol
 
 1. Locate the architecture docs directory relative to your current working directory:
    - Look for `docs/architecture/INDEX.md` in the project root (search up from cwd if needed)
@@ -47,14 +47,14 @@ Quick-lookup index into the **canonical** architecture docs for the consolidated
 
 > **LiteSuite-specific ports** (only relevant when LiteSuite is running locally):
 
-| Port | Service                           |
-| ---- | --------------------------------- |
-| 3773 | Backend server (HTTP + WebSocket) |
+| Port | Service                                                        |
+| ---- | -------------------------------------------------------------- |
+| 3773 | Backend server (HTTP + WebSocket)                              |
 | 7423 | Agent Bridge (REST, bearer token) — requires LiteSuite running |
-| 7426 | LiteImage REST API — requires LiteSuite running |
-| 7438 | Voice API server — requires LiteSuite running |
-| 5123 | TTS Server (Qwen3, on-demand) — requires LiteSuite running |
-| 8080 | Whisper STT (on-demand) — requires LiteSuite running |
+| 7426 | LiteImage REST API — requires LiteSuite running                |
+| 7438 | Voice API server — requires LiteSuite running                  |
+| 5123 | TTS Server (Qwen3, on-demand) — requires LiteSuite running     |
+| 8080 | Whisper STT (on-demand) — requires LiteSuite running           |
 
 ## Quick Panel Reference (21 types)
 

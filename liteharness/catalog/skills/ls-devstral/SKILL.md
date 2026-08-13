@@ -6,6 +6,7 @@ description: Spawn a local Devstral coding agent running on LM Studio. Use when 
 # /devstral — Local Devstral Agent via LM Studio
 
 > **Requirements** — before this skill can run, the following must be available on the user's machine:
+>
 > - **LM Studio** installed and running with `mistralai/devstral-small-2-2512` loaded (download from https://lmstudio.ai/)
 > - **uv** on `PATH` — Python package runner (install: `pip install uv` or https://docs.astral.sh/uv/)
 > - **LiteCLI** (optional) — universal CLI for MCP backends; set `LITECLI_DIR` env var to its directory if installed. If missing, Step 3 is skipped gracefully.
@@ -340,14 +341,14 @@ kill $(cat "${CLAUDE_PROJECT_DIR:-.}/.claude/plugins/kuro/proxy/proxy.pid")
 
 ## Quick Reference
 
-| Item                      | Value                                        |
-| ------------------------- | -------------------------------------------- |
-| Proxy port                | `http://127.0.0.1:5111`                      |
-| LM Studio API             | `http://localhost:1234`                 |
-| Devstral model ID         | `mistralai/devstral-small-2-2512`            |
-| Devstral identifier (LMS) | `devstral`                                   |
-| VRAM usage                | ~15.2 GB (Q4_K_M)                            |
-| Context length            | 32768 (recommended), 65536 (max, solo)       |
-| Proxy script              | `.claude/plugins/kuro/proxy/model_router.py` |
-| PID file                  | `.claude/plugins/kuro/proxy/proxy.pid`       |
+| Item                      | Value                                                            |
+| ------------------------- | ---------------------------------------------------------------- |
+| Proxy port                | `http://127.0.0.1:5111`                                          |
+| LM Studio API             | `http://localhost:1234`                                          |
+| Devstral model ID         | `mistralai/devstral-small-2-2512`                                |
+| Devstral identifier (LMS) | `devstral`                                                       |
+| VRAM usage                | ~15.2 GB (Q4_K_M)                                                |
+| Context length            | 32768 (recommended), 65536 (max, solo)                           |
+| Proxy script              | `.claude/plugins/kuro/proxy/model_router.py`                     |
+| PID file                  | `.claude/plugins/kuro/proxy/proxy.pid`                           |
 | uv path                   | `uv` (must be on PATH — install from https://docs.astral.sh/uv/) |

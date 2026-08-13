@@ -20,7 +20,7 @@ Generates comprehensive architecture documentation for any project by scouting t
 └── NN-{Module}.md        # As many as needed
 ```
 
-## Workflow
+## Protocol
 
 ### Phase 1: Scout
 

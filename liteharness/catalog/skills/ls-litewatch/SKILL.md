@@ -10,6 +10,7 @@ Launch LiteWatch and periodically check what's on the user's screen to stay cont
 ## When Invoked
 
 **Prerequisites:**
+
 - **LM Studio** must be installed and running with a VLM loaded (see step 2). Download from https://lmstudio.ai.
 - The `ls-local-lens` skill must be installed (bundled alongside this skill in the plugin).
 

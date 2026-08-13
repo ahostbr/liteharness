@@ -55,7 +55,7 @@ If something is wrong, **report it** - do NOT attempt to fix it.
    - Report PASS or FAIL with detailed findings
    - List specific issues if any found
 
-## Workflow
+## Protocol
 
 ```
 1. Understand → TaskGet to read acceptance criteria

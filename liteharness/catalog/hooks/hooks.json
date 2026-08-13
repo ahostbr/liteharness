@@ -35,6 +35,15 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python -m liteharness.hooks deregister",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "python -m liteharness.hooks obs SessionEnd",
             "timeout": 30,
             "async": true
@@ -62,6 +71,17 @@
             "command": "python -m liteharness.hooks obs InstructionsLoaded",
             "timeout": 30,
             "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m liteharness.hooks memory-nudge",
+            "timeout": 5000
           }
         ]
       }
@@ -238,15 +258,6 @@
       }
     ],
     "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m liteharness.hooks deregister",
-            "timeout": 10000
-          }
-        ]
-      },
       {
         "hooks": [
           {

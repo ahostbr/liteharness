@@ -297,7 +297,7 @@ $VEO extend longer.mp4 --input clip.mp4 "Continue the camera movement"
 
 **Quality:** Best photorealistic image gen available. Perfect text rendering, complex infographics.
 
-#### Workflow (ONE COMMAND)
+#### Protocol (ONE COMMAND)
 
 ```bash
 # Launch ChatGPT Desktop with CDP enabled
@@ -339,6 +339,51 @@ Auth persists — Electron user data dir keeps OAuth tokens across relaunches.
 - For text in images: spell out exactly what text should appear
 - For UI mockups: describe colors (#hex), fonts, layout, spacing in detail
 
+#### Batch generation & reliability (hard-won on a 75-asset game UI run)
+
+The stock `cli-anything-chatgpt image` one-shot is fine for a single image. For BATCHES
+(icon sets, per-era kits, sprite libraries) the ChatGPT-Desktop path has sharp edges — a
+small purpose-built driver beats the stock CLI. A reference implementation of the whole
+driver (submit → count-baseline detect → in-app download → chroma-key → per-era/per-icon
+batching → contact sheet) lives at `C:\Projects\private\TypeOrDie\scripts\genui\`
+(`gen_hud.py`, `batch_era.py`, `batch_icons.py`, `regen_one.py`, `contact_sheet.py`) —
+copy and adapt rather than rebuilding from scratch. The traps it solves:
+
+- **Resolve the exe via the app-execution alias, never a hardcoded path.** The Store app
+  auto-updates: the versioned `WindowsApps\OpenAI.ChatGPT-Desktop_<ver>\app\` path changes
+  AND the exe has been renamed (`ChatGPT.exe` → `ChatGPT Classic.exe`). Direct-spawning the
+  packaged exe = `WinError 5` (ACL). Launch
+  `%LOCALAPPDATA%\Microsoft\WindowsApps\chatgpt-classic.exe` (the alias forwards
+  `--remote-debugging-port=9223`). If `cli-anything-chatgpt launch` fails with
+  FileNotFound/AccessDenied, this is why — patch `core/cdp.py`'s `CHATGPT_EXE`.
+- **Download inside the session.** Generated URLs (`chatgpt.com/backend-api/estuary/…`)
+  are `403` outside the app — fetch via CDP `fetch(url,{credentials:'include'})` → blob →
+  base64 → write bytes. `urllib`/`curl` from the shell fails.
+- **Detect completion by image COUNT, not the last `<img>`.** Popping the last conversation
+  image false-matches the PREVIOUS asset (and can grab the account avatar — filter to
+  `main img` with `naturalWidth ≥ 512`). Record the count of ≥512px images, submit, wait for
+  the count to INCREASE. Stabilize the baseline first (a prior timed-out gen may land late
+  and get claimed by the next request — the off-by-one straggler-shift).
+- **Sprite-sheet drift is the #1 batch failure.** A long thread OR the image cap engaging
+  makes ChatGPT render 2–4 emblems in one image instead of one. Defenses, escalating:
+  (a) fresh thread per batch/era so context can't pile past ~9 assets; (b) fresh thread per
+  SINGLE icon for stragglers (bulletproof — zero context to drift); (c) a hardened prompt
+  tail: "a SINGLE emblem, ONE icon centered, NOT a sprite sheet, NOT a grid, NOT a set, no
+  second icon." Reuse one thread to cut churn, but **reset per era**.
+- **The image cap is ACCOUNT-WIDE (~50 gens/burst), not per-thread.** Onset is silent
+  (submissions get no assistant turn), then the thread answers "You've hit your limit. Please
+  try again later." Resubmits and app relaunch don't help — only a cooldown clears it
+  (observed 30–120+ min). **During onset gens don't cleanly fail; they grab stale/multi
+  images and look "successful,"** so the worst corruption clusters on whichever batch ran as
+  the cap hit. Probe with one cheap gen every ~10 min to detect the lift.
+- **ALWAYS eyeball a contact sheet after a batch — exit codes lie.** Montage the finals,
+  audit every cell, and regen only the multi-icon / wrong-subject ones, one fresh thread each.
+- **Transparent output:** prompt "isolated on a flat solid #00ff00 green chroma-key
+  background, no shadows, no text" then
+  `~/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py --input raw.png --out
+final.png --auto-key border --soft-matte --despill --force` (without `--force` it refuses
+  to overwrite). Keep the green-screen raw as a fallback; commit only the transparent final.
+
 ---
 
 ### Image — ChatGPT Browser (Tier 4, FALLBACK)
@@ -351,7 +396,7 @@ Auth persists — Electron user data dir keeps OAuth tokens across relaunches.
 
 **Quality:** Currently the best photorealistic image gen available. Perfect text rendering, complex infographics, photorealistic subjects.
 
-#### Workflow
+#### Protocol
 
 1. **Get browser context:**
 
@@ -603,7 +648,7 @@ ffmpeg -i hero.mp4 -vcodec libx264 -crf 28 -preset slow -an hero_compressed.mp4
 
 ---
 
-## Workflow
+## Protocol
 
 1. Detect media type (image vs video)
 2. Gather parameters via AskUserQuestion

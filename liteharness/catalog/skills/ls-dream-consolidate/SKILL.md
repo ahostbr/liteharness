@@ -31,15 +31,32 @@ Look for new information worth persisting. Sources in rough priority order:
 
 Don't exhaustively read transcripts. Look only for things you already suspect matter.
 
-## Phase 3 — Consolidate
+## Phase 3 — Consolidate (typed, tool-driven)
 
-For each thing worth remembering, write or update a memory file at the top level of the memory directory. Use the memory file format and type conventions from your system prompt's auto-memory section — it's the source of truth for what to save, how to structure it, and what NOT to save.
+Do NOT free-form delete or wholesale-overwrite memories in this phase. Route every consolidation decision through the deterministic tool, which acquires a single-writer lock, embeds the items, and emits typed proposals. The tool is the destructive floor; you apply its typed verdicts as additive edits.
 
-Focus on:
+**Step 1 — Run the router.** From the repo, run:
 
-- Merging new signal into existing topic files rather than creating near-duplicates
-- Converting relative dates ("yesterday", "last week") to absolute dates so they remain interpretable after time passes
-- Deleting contradicted facts — if today's investigation disproves an old memory, fix it at the source
+```
+python -m liteharness.memory_consolidate propose --dir <memory-dir>
+```
+
+`<memory-dir>` is the Phase 1 memory directory. The tool acquires the write lock (`<state-dir>/.write.lock`; a concurrent run aborts with "another consolidation is in progress"), embeds each item, and prints JSON proposals with an `action` per pair. The bare `propose` walk over existing items can only ever emit `MERGE_UPDATE` / `SKIP` / `KEEP_SEPARATE` — it is structurally incapable of proposing a destructive `REPLACE`. To surface a genuine contradiction as a candidate `REPLACE`, pass a candidates file: `--candidates <file.json>` (a list of `{id, text, contradiction: true}`); even then it is only ever _proposed_, never applied.
+
+**Step 2 — Apply the typed verdicts as ADDITIVE edits.** For each proposal:
+
+- **`MERGE_UPDATE`** — fold the new signal into the existing topic file. Add/enrich; do not delete the old wording wholesale. Convert relative dates ("yesterday", "last week") to absolute dates so they stay interpretable.
+- **`KEEP_SEPARATE`** — the items are distinct. Leave both; optionally write the new one as its own file.
+- **`SKIP`** — pure duplicate/restatement. Do nothing.
+- **`REPLACE`** (destructive, proposal-only) — never execute it yourself and never hand-delete the contradicted memory. It stays a proposal in the ledger. Only after you have confirmed the replacement is correct, execute it through the tool:
+
+  ```
+  python -m liteharness.memory_consolidate apply-replace <mutation-id>
+  ```
+
+  This is the ONLY destructive path. It re-checks the cosine ≥ 0.9 floor, pre-images the live bytes (recoverable via `undo <mutation-id>`), then overwrites — all under the same write lock. A REPLACE below the floor is refused. If in doubt, leave it as a proposal.
+
+Use the memory file format and type conventions from your system prompt's auto-memory section for any file you write or enrich — it's the source of truth for what to save, how to structure it, and what NOT to save.
 
 ## Phase 4 — Prune and index
 
@@ -48,7 +65,7 @@ Update `MEMORY.md` so it stays under 200 lines. It's an **index**, not a dump �
 - Remove pointers to memories that are now stale, wrong, or superseded
 - Demote verbose entries: keep the gist in the index, move the detail into the topic file
 - Add pointers to newly important memories
-- Resolve contradictions — if two files disagree, fix the wrong one
+- Resolve index contradictions — if two MEMORY.md pointers describe the same topic or conflict, merge/update the INDEX entries (one-line summaries only). Do NOT hand-edit topic-file content here; content contradictions go through the tool's typed REPLACE proposal path (Phase 3)
 
 ---
 

@@ -70,7 +70,7 @@ Spawn multiple polymathic thinking agents in parallel to analyze a task from dif
 | **graham**  | Startup strategy, product-market fit — do things that don't scale |
 | **mrbeast** | Content strategy, attention engineering — retention curves        |
 
-## Workflow
+## Protocol
 
 ### Step 1: Gather the Task
 

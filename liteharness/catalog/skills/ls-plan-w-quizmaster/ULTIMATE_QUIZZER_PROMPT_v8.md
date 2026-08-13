@@ -167,7 +167,7 @@ If Reconnaissance detected natural boundaries (app directories, services), menti
 
 **Single workstream:**
 
-- Plan will produce `master.md` + one `sub-<name>.md` (consistent v8 format)
+- Plan will produce `master.html` + one `sub-<name>.html` (consistent v8 format)
 - Proceed to Prior Question normally
 
 **Multiple workstreams:**
@@ -486,179 +486,493 @@ When ready (user says "plan it" OR stopping criterion triggered and user agrees)
 1. Run Final Inversion on remaining assumptions
 2. Run Specification Enrichment (read designs, read components, map data, build golden paths)
 3. Run Buildability Gate on each sub-plan
-4. Generate the plan
+4. Generate the plan as **HTML** (see templates below) — one `master.html` plus one `sub-<name>.html` per workstream
+5. **Show master.html in LiteSuite's browser pane** — open the saved master file in the existing LiteSuite browser pane via the `litesuite-tools` **`browser`** bridge tool, passing a `file://` URL to the absolute path of `master.html`:
+   - If a browser pane already exists, call `browser` with `action: "navigate"`, `url: "file:///<ABSOLUTE_PATH_TO_master.html>"`.
+   - Otherwise call `browser` with `action: "create"`, same `url`.
+   - **Fallback** (Agent Bridge unreachable / LiteSuite not running): open `master.html` in the OS default browser (`Start-Process "<path>"` on Windows) and say so.
+6. **Report** the folder path and confirm the pane opened.
 
 ### Plan Output Structure
 
-All v8 plans output to a **folder**:
+All v8 plans output to a **folder of self-contained HTML files** (open `master.html` to view — it links to every sub-plan):
 
 ```
 Docs/Plans/<kebab-case-name>/
-  master.md          — orchestration, overview, acceptance criteria
-  sub-<name-1>.md    — agent-executable specification for workstream 1
-  sub-<name-2>.md    — agent-executable specification for workstream 2
+  master.html          — orchestration, overview, acceptance criteria, workstream DAG (the entry point — opened in the browser pane)
+  sub-<name-1>.html    — agent-executable specification for workstream 1
+  sub-<name-2>.html    — agent-executable specification for workstream 2
   ...
 ```
 
-### Master Plan Format (Provenance-Tagged)
+Every file is a single self-contained HTML page: all CSS inline in the `<style>` block, no external stylesheets, scripts, or images. Reproduce the same Oscura Midnight `<style>` block (shown in the master template) verbatim in every file. All task / validation / workstream lines start at status `[]`; the Build phase flips them to `[wip]` / `[x]` / `[f]` live. Every metadata field except `created` is an append-only list — never overwrite an existing entry.
 
-```markdown
-# Plan: <descriptive task name>
+### Master Plan Format (HTML, Provenance-Tagged)
 
-## Why This Exists
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plan: {{PLAN_TITLE}}</title>
+    <style>
+      :root {
+        --bg: #09090b;
+        --card: #111113;
+        --secondary: #18181b;
+        --border: #27272a;
+        --text: #fafafa;
+        --textSec: #a1a1aa;
+        --muted: #71717a;
+        --primary: #facc15;
+        --idle: #3f3f46;
+        --wip: #facc15;
+        --done: #22c55e;
+        --fail: #ef4444;
+        --mono: ui-monospace, "Cascadia Code", monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+        line-height: 1.55;
+        font-size: 14px;
+      }
+      main {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 28px 24px 60px;
+      }
+      h1 {
+        font-size: 23px;
+        margin: 0 0 6px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 26px 0 8px;
+        color: var(--primary);
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+      h3 {
+        font-size: 14px;
+        margin: 14px 0 6px;
+      }
+      p,
+      li,
+      td {
+        color: var(--textSec);
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+      a {
+        color: var(--primary);
+      }
+      section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 12px 0;
+      }
+      details.meta {
+        background: var(--secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 12px;
+      }
+      details.meta summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+        font-family: var(--mono);
+      }
+      dl {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 3px 12px;
+        font-size: 12px;
+        font-family: var(--mono);
+        margin: 8px 0 0;
+      }
+      dt {
+        color: var(--muted);
+      }
+      dd {
+        margin: 0;
+        color: var(--textSec);
+        word-break: break-all;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+        margin: 6px 0;
+      }
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 5px 8px;
+        text-align: left;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        background: var(--secondary);
+      }
+      ul.checklist {
+        list-style: none;
+        padding-left: 0;
+      }
+      ul.checklist li {
+        margin: 3px 0;
+        font-size: 13px;
+      }
+      .status {
+        font-family: var(--mono);
+        font-weight: 700;
+        margin-right: 8px;
+        display: inline-block;
+        width: 34px;
+      }
+      .s-idle {
+        color: var(--idle);
+      }
+      .s-wip {
+        color: var(--wip);
+      }
+      .s-done {
+        color: var(--done);
+      }
+      .s-fail {
+        color: var(--fail);
+      }
+      .dag {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--textSec);
+        white-space: pre-wrap;
+        background: var(--secondary);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px;
+      }
+      .loop {
+        background: var(--secondary);
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        margin: 8px 0;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .cond {
+        color: var(--muted);
+        font-size: 11px;
+        font-style: italic;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Plan: {{PLAN_TITLE}}</h1>
+        <p>{{WHY_THIS_EXISTS — the problem being solved, not the feature}}</p>
+        <details class="meta">
+          <summary>Metadata (append-only)</summary>
+          <dl>
+            <dt>created</dt>
+            <dd>{{CREATED_ISO}}</dd>
+            <dt>modified</dt>
+            <dd>{{MODIFIED_ISO_LIST}}</dd>
+            <dt>commits</dt>
+            <dd>{{COMMIT_SHA_LIST}}</dd>
+            <dt>agent</dt>
+            <dd>{{AGENT_NAME_LIST}}</dd>
+            <dt>session</dt>
+            <dd>{{SESSION_ID_LIST}}</dd>
+            <dt>back refs</dt>
+            <dd>{{BACK_REFERENCES}}</dd>
+            <dt>forward refs</dt>
+            <dd>{{FORWARD_REFERENCES}}</dd>
+          </dl>
+        </details>
+      </header>
 
-<the outcome from the Prior Question — not the feature, the problem being solved>
+      <section>
+        <h2>Task Description</h2>
+        <p>{{WHAT_WILL_BE_ACCOMPLISHED_ACROSS_ALL_WORKSTREAMS}}</p>
+      </section>
+      <section>
+        <h2>Objective</h2>
+        <p>{{MEASURABLE_SUCCESS_CRITERIA}}</p>
+      </section>
+      <section>
+        <h2>Solution Approach</h2>
+        <p>{{CROSS_CUTTING_TECHNICAL_APPROACH}}</p>
+      </section>
 
-## Task Description
+      <!-- Include only for a consolidation/merge task -->
+      <section>
+        <h2>Consolidation Mapping <span class="cond">(if applicable)</span></h2>
+        <p><strong>Frontend source:</strong> {{COMPONENT_NAMES_AND_FILE_PATHS}}</p>
+        <p><strong>Backend source:</strong> {{STORE_NAMES_AND_API_PATHS}}</p>
+        <p><strong>Data mapping:</strong> {{FIELD_A_TO_FIELD_B}}</p>
+      </section>
 
-<what will be accomplished across all workstreams>
+      <section>
+        <h2>Fact Dependencies</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Fact</th>
+              <th>Confidence</th>
+              <th>Workstream</th>
+              <th>Impact if Wrong</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- repeat: one row per fact -->
+            <tr>
+              <td>{{FACT}}</td>
+              <td>{{HIGH_MED_LOW}}</td>
+              <td>{{WS_ID_OR_ALL}}</td>
+              <td>{{IMPACT_IF_WRONG}}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
 
-## Objective
+      <section>
+        <h2>Workstreams</h2>
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Description</th>
+              <th>Sub-Plan</th>
+              <th>Phase</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- repeat: one row per workstream -->
+            <tr>
+              <td><span class="status s-idle">[]</span></td>
+              <td>{{WS_ID}}</td>
+              <td>{{WS_NAME}}</td>
+              <td>{{WS_DESCRIPTION}}</td>
+              <td><a href="sub-{{WS_KEBAB}}.html">sub-{{WS_KEBAB}}.html</a></td>
+              <td>{{PHASE}}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
 
-<success criteria — measurable, from the interrogation>
+      <section>
+        <h2>Orchestration DAG</h2>
+        <div class="dag">
+          {{EXECUTION_PHASES — parallel vs sequential, e.g. "Phase 1 (parallel): WS1, WS2 · Phase 2
+          (after Phase 1): WS3"}}
+        </div>
+      </section>
 
-## Solution Approach
+      <section>
+        <h2>Acceptance Criteria</h2>
+        <ul class="checklist">
+          <!-- repeat -->
+          <li><span class="status s-idle">[]</span> {{GLOBAL_MEASURABLE_CRITERION}}</li>
+        </ul>
+      </section>
 
-<technical approach — high level, cross-cutting>
+      <section>
+        <h2>Golden-Path Scenarios</h2>
+        <!-- repeat: 1-3 end-to-end scenarios that prove the whole system works -->
+        <h3>{{SCENARIO_NAME}}</h3>
+        <p>{{STEP_BY_STEP — user does X → sees Y → Z happens}}</p>
+      </section>
 
-## Consolidation Mapping (if applicable)
+      <section>
+        <h2>Validation Commands</h2>
+        <ul class="checklist">
+          <!-- repeat -->
+          <li>
+            <span class="status s-idle">[]</span>
+            <code>{{COMMAND_THAT_VERIFIES_THE_WHOLE_PLAN}}</code> — {{WHAT_IT_PROVES}}
+          </li>
+        </ul>
+        <div class="loop">
+          🔁 The plan is complete only when every box is checked and every command passes. Mark
+          <code>[f]</code> and move on only if truly blocked.
+        </div>
+      </section>
 
-<Frontend source: [component names + file paths]>
-<Backend source: [store names + API paths]>
-<Data mapping: [field A → field B]>
+      <section>
+        <h2>Remaining Uncertainties</h2>
+        <ul>
+          <!-- repeat -->
+          <li>{{ANYTHING_STILL_MED_OR_LOW_THAT_COULD_CHANGE_THE_PLAN}}</li>
+        </ul>
+      </section>
 
-## Fact Dependencies
+      <section>
+        <h2>Execution Workflow</h2>
+        <ol>
+          <li>Worktree (git worktrees) — isolate before touching code</li>
+          <li>Tests (test-driven development) — tests before implementation</li>
+          <li>Implement — dispatch sub-plans to agents via ultracode (Workflow tool)</li>
+          <li>Debug (systematic debugging) — when tests fail</li>
+          <li>Verify (verification before completion) — every task verified</li>
+          <li>Review (polymathic code review) — before merging</li>
+          <li>Finish (structured merge/PR/cleanup) — structured merge/PR/cleanup</li>
+        </ol>
+      </section>
 
-| Fact | Confidence | Workstream | Impact if Wrong     |
-| ---- | ---------- | ---------- | ------------------- |
-| ...  | HIGH       | ALL        | Low — plan survives |
+      <section>
+        <h2>Execution Echo</h2>
+        <p class="cond">After implementing this plan, revisit:</p>
+        <ul>
+          <li>Did the plan succeed as written?</li>
+          <li>Did builder agents have enough specification to implement correctly?</li>
+          <li>What information was missing from sub-plans that builders needed?</li>
+          <li>What question, if asked during planning, would have changed the plan?</li>
+          <li>Did the workstream split make sense?</li>
+        </ul>
+      </section>
 
-## Workstreams
-
-| ID  | Name   | Description                   | Sub-Plan                       | Phase |
-| --- | ------ | ----------------------------- | ------------------------------ | ----- |
-| WS1 | <name> | <what this workstream covers> | [sub-<name>.md](sub-<name>.md) | 1     |
-
-## Orchestration DAG
-
-<execution phases — parallel vs sequential>
-
-## Acceptance Criteria
-
-<from quizzing — measurable, global across all workstreams>
-
-## Golden-Path Scenarios
-
-<1-3 end-to-end user scenarios that prove the whole system works>
-
-## Validation Commands
-
-<commands that verify the WHOLE plan succeeded>
-
-## Remaining Uncertainties
-
-<anything still at MED/LOW that could change the plan>
-
-## Execution Workflow
-
-1. Worktree (git worktrees) — isolate before touching code
-2. Tests (test-driven development) — tests before implementation
-3. Implement — dispatch sub-plans to agents via ultracode (Workflow tool)
-4. Debug (systematic debugging) — when tests fail
-5. Verify (verification before completion) — every task verified
-6. Review (polymathic code review) — before merging
-7. Finish (structured merge/PR/cleanup) — structured merge/PR/cleanup
-
-## Execution Echo
-
-After implementing this plan, revisit:
-
-- Did the plan succeed as written?
-- Did builder agents have enough specification to implement correctly?
-- What information was missing from sub-plans that builders needed?
-- What question, if asked during planning, would have changed the plan?
-- Did the workstream split make sense?
-
-## Notes
-
-<optional>
+      <section>
+        <h2>Notes</h2>
+        {{NOTES: optional — free-form HTML}}
+      </section>
+    </main>
+  </body>
+</html>
 ```
 
-### Sub-Plan Format (Agent-Executable Specification — ENHANCED in v8)
+### Sub-Plan Format (HTML, Agent-Executable Specification — ENHANCED in v8)
 
-```markdown
-# Sub-Plan: <workstream name>
+Inline the **same** Oscura Midnight `<style>` block from the master template in every sub-plan file.
 
-**Master:** [master.md](master.md)
-**Workstream:** <WS-ID> — <name>
-**Dependencies:** <other sub-plans that must complete first, or "None">
-**Phase:** <phase number from master DAG>
+```html
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sub-Plan: {{WORKSTREAM_NAME}}</title>
+    <style>
+      /* inline the same Oscura Midnight <style> block as master.html, verbatim */
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Sub-Plan: {{WORKSTREAM_NAME}}</h1>
+        <details class="meta" open>
+          <summary>Workstream</summary>
+          <dl>
+            <dt>master</dt>
+            <dd><a href="master.html">master.html</a></dd>
+            <dt>workstream</dt>
+            <dd>{{WS_ID}} — {{WS_NAME}}</dd>
+            <dt>dependencies</dt>
+            <dd>{{OTHER_SUB_PLANS_THAT_MUST_COMPLETE_FIRST_OR_None}}</dd>
+            <dt>phase</dt>
+            <dd>{{PHASE_NUMBER_FROM_MASTER_DAG}}</dd>
+          </dl>
+        </details>
+      </header>
 
-## Frontend Source (if consolidation)
+      <!-- Include only the sections that apply to this workstream -->
+      <section>
+        <h2>Frontend Source <span class="cond">(if consolidation)</span></h2>
+        <p>{{EXACT_COMPONENT_NAMES_FILE_PATHS_IMPORT_STATEMENTS — which parts to use vs skip}}</p>
+      </section>
+      <section>
+        <h2>Backend Source <span class="cond">(if consolidation)</span></h2>
+        <p>{{EXACT_STORE_NAMES_FIELD_PATHS_API_FUNCTIONS_IMPORT_PATHS_SIGNATURES}}</p>
+      </section>
+      <section>
+        <h2>Data Mapping <span class="cond">(if consolidation)</span></h2>
+        <p>{{FIELD_BY_FIELD_FRONTEND_TO_BACKEND_PLUS_TRANSFORMS}}</p>
+      </section>
 
-<exact component names, file paths, import statements>
-<which parts of the component to use vs. skip>
+      <section>
+        <h2>Visual Specification</h2>
+        <p>
+          {{INLINED_FROM_DESIGN_ASSETS — exact colors, dimensions, fonts, spacing. NOT "match the
+          mockup" — the actual CSS values FROM the mockup}}
+        </p>
+      </section>
 
-## Backend Source (if consolidation)
+      <section>
+        <h2>Tasks</h2>
+        <!-- repeat: one block per task -->
+        <div style="border-left:2px solid var(--border);padding-left:14px;margin:14px 0">
+          <h3><span class="status s-idle">[]</span> T{{N}}: {{TASK_TITLE}}</h3>
+          <ul>
+            <li>{{SPECIFIC_IMPLEMENTATION_DETAIL}}</li>
+            <li><strong>Component:</strong> {{EXACT_COMPONENT_WITH_IMPORT_PATH}}</li>
+            <li><strong>Data source:</strong> {{EXACT_STORE_SELECTOR_OR_API_CALL}}</li>
+            <li><strong>Styling:</strong> {{EXACT_CSS_VALUES_FROM_DESIGN_SPEC}}</li>
+            <li><strong>Files:</strong> {{SPECIFIC_FILES_TO_MODIFY_OR_CREATE}}</li>
+            <li><strong>Depends on:</strong> {{PRIOR_TASK_OR_None}}</li>
+          </ul>
+        </div>
+      </section>
 
-<exact store names, field paths, API functions>
-<import paths and function signatures>
+      <section>
+        <h2>Golden-Path Scenarios</h2>
+        <!-- repeat: 1-3 concrete scenarios specific to this workstream; builder verifies against these -->
+        <h3>{{SCENARIO_NAME}}</h3>
+        <p>{{STEP_BY_STEP — user does X → sees Y → Z happens}}</p>
+      </section>
 
-## Data Mapping (if consolidation)
+      <section>
+        <h2>Validation Commands</h2>
+        <ul class="checklist">
+          <!-- repeat -->
+          <li>
+            <span class="status s-idle">[]</span>
+            <code>{{COMMAND_SPECIFIC_TO_THIS_WORKSTREAM}}</code> — {{WHAT_IT_PROVES}}
+          </li>
+        </ul>
+      </section>
 
-<field-by-field mapping between frontend types and backend types>
-<any transformation needed>
-
-## Visual Specification
-
-<inlined from design assets — exact colors, dimensions, fonts, spacing>
-<NOT "match the mockup" — the actual CSS values FROM the mockup>
-
-## Tasks
-
-### T1: <task title>
-
-- <details with SPECIFIC implementation instructions>
-- **Component:** <exact component to use, with import path>
-- **Data source:** <exact store selector or API call>
-- **Styling:** <exact CSS values from design spec>
-- **Files:** <specific files to modify/create>
-
-### T2: <task title>
-
-- <details>
-- **Files:** <specific files>
-- **Depends on:** T1
-
-## Golden-Path Scenarios
-
-<1-3 concrete user scenarios specific to this workstream>
-<step-by-step: user does X → sees Y → Z happens>
-<builder verifies their implementation against these>
-
-## Validation Commands
-
-<commands specific to THIS workstream>
-
-## Acceptance Criteria
-
-<subset of master criteria relevant to this workstream>
-<PLUS: all golden-path scenarios pass>
+      <section>
+        <h2>Acceptance Criteria</h2>
+        <ul class="checklist">
+          <!-- repeat -->
+          <li><span class="status s-idle">[]</span> {{CRITERION_RELEVANT_TO_THIS_WORKSTREAM}}</li>
+        </ul>
+        <p class="cond">PLUS: all golden-path scenarios pass.</p>
+      </section>
+    </main>
+  </body>
+</html>
 ```
 
 **Sub-plans are designed to be agent-executable specifications.** A builder agent reads ONE sub-plan and has EVERYTHING: component names with import paths, store selectors with field names, API calls with parameter types, CSS values from the design, golden-path scenarios to verify against. The builder should NEVER need to read a file not mentioned in the sub-plan.
 
 ### Enforced Best Practices
 
-| Practice                | Skill                                        | When                            |
-| ----------------------- | -------------------------------------------- | ------------------------------- |
-| Isolated workspace      | git worktrees            | Before touching code            |
+| Practice                | Skill                          | When                            |
+| ----------------------- | ------------------------------ | ------------------------------- |
+| Isolated workspace      | git worktrees                  | Before touching code            |
 | Test-driven development | test-driven development        | Tests before implementation     |
-| Structured plan         | a structured execution doc                  | Quizmaster plan → execution doc |
+| Structured plan         | a structured execution doc     | Quizmaster plan → execution doc |
 | Systematic debugging    | systematic debugging           | When tests fail                 |
 | Verification            | verification before completion | Every task verified before done |
 | Code review             | polymathic code review         | Before merging                  |
-| Branch completion       | structured merge/PR/cleanup | Structured merge/PR/cleanup     |
+| Branch completion       | structured merge/PR/cleanup    | Structured merge/PR/cleanup     |
 
 ---
 

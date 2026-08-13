@@ -180,6 +180,56 @@ The user always restarts the app after changes. Never ask if they restarted. If 
 | Handshake timeout | `fatal-error` after 15s, no `initialized` event                | Wrong binary (`.cmd` vs `.exe`), wrong spawn options, or binary needs `shell: true` |
 | Bridge silent     | No `webview→bridge` messages                                   | Preload failed to expose the API, or IPC channel name mismatch                      |
 
+## Build the Instrument, Don't Resolve to Be Careful
+
+**LAW: when deduction costs more than ~30 minutes, stop and build the thing that READS the
+answer.** Every expensive debugging session in this codebase has been verification-shaped,
+not skill-shaped:
+
+| Cost paid                               | Missing instrument                             | Cost once built  |
+| --------------------------------------- | ---------------------------------------------- | ---------------- |
+| Codex panel, **2 nights** of inference  | read the denial reason out of the React fiber  | **45 seconds**   |
+| 0.0.29 shipped a **dead updater**       | extract `app-update.yml` from the NSIS payload | one `7z` command |
+| "test suite is green" — wrong **twice** | run it _under load_, not on a quiet box        | one re-run       |
+| Hours of agent "DONE" reports           | ask "seen on screen, or transport evidence?"   | one question     |
+
+### The four rules
+
+1. **Stop deducing state you can read.** If the app knows the answer, get it out of the app —
+   React fiber, IPC probe, disk artifact. Do not infer it from symptoms.
+2. **Convert every catch into a command that hard-fails.** A check that lives in a script
+   survives the session; a note-to-self does not. See `scripts/release-preflight.py`, which
+   exists because a _prose_ runbook let 0.0.29 ship with no update feed.
+3. **State the conditions a green result was measured under.** "Passes" is not a property.
+   "Passes under load, three consecutive runs" is. Generalising from one favourable run is
+   how a flaky suite gets declared fixed.
+4. **Verify the instrument itself.** The first run of `release-preflight.py` reported a
+   FAILED download round-trip that was really Cloudflare bouncing its `User-Agent` — minutes
+   after curl got a clean 302 on the same URL. **An instrument that invents failures is worse
+   than none.** Always prove the negative path too: make it fail on purpose and confirm it
+   exits non-zero.
+
+### Instruments that lie by OMISSION
+
+Silence is not evidence. Before treating "no log line" as a finding, **read the code that
+writes the log**. Real examples from this repo, all of which cost hours:
+
+- a log line gated on `>500ms`, so 32 requests and 1 response read as a dead RPC layer
+- a DOM observer that never attached (preload runs at `document_start`; `document.body` null)
+- a redaction that dropped the response headers holding the answer
+- a UA fix that never executed, so its negative result meant nothing
+- a probe calling a method that did not exist, optional-chained to `false` forever
+- every updater message being a bare `console.info` that never reached the disk log at all
+
+**Prove a fix EXECUTED before trusting its negative result.**
+
+### Timeout knobs nest
+
+Raising the outer knob is not raising the effective deadline. `vitest testTimeout` was set to
+60s while `GitManager` still failed at 12s — it had four per-test overrides silently winning.
+Grep for inner deadlines: `timeoutMs =`, `Date.now() + N`, per-test third arguments, and
+hand-rolled poll helpers that own their own clock.
+
 ## Anti-Patterns
 
 - Reading code and guessing without running it

@@ -26,11 +26,11 @@ Read the file `.claude/consult-config.json` to get the model panel configuration
     "timeoutSeconds": 60
   },
   "presets": {
-    "quick":        ["cc-sonnet"],
-    "default":      ["cc-sonnet", "lms-local"],
-    "wide":         ["cc-sonnet", "cc-opus", "lms-local"],
-    "claude-family":["cc-haiku", "cc-sonnet", "cc-opus"],
-    "full":         ["cc-haiku", "cc-sonnet", "cc-opus", "lms-local"]
+    "quick": ["cc-sonnet"],
+    "default": ["cc-sonnet", "lms-local"],
+    "wide": ["cc-sonnet", "cc-opus", "lms-local"],
+    "claude-family": ["cc-haiku", "cc-sonnet", "cc-opus"],
+    "full": ["cc-haiku", "cc-sonnet", "cc-opus", "lms-local"]
   },
   "alwaysInclude": [],
   "providers": {
@@ -45,10 +45,22 @@ Read the file `.claude/consult-config.json` to get the model panel configuration
     }
   },
   "models": {
-    "cc-haiku":  { "id": "claude-haiku-4-5",  "name": "Claude Haiku 4.5 (CLI)",   "provider": "claude-cli" },
-    "cc-sonnet": { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6 (CLI)",  "provider": "claude-cli" },
-    "cc-opus":   { "id": "claude-opus-4-8",   "name": "Claude Opus 4.8 (CLI)",    "provider": "claude-cli" },
-    "lms-local": { "id": "local-model",       "name": "LM Studio (local)",        "provider": "lmstudio"  }
+    "cc-haiku": {
+      "id": "claude-haiku-4-5",
+      "name": "Claude Haiku 4.5 (CLI)",
+      "provider": "claude-cli"
+    },
+    "cc-sonnet": {
+      "id": "claude-sonnet-4-6",
+      "name": "Claude Sonnet 4.6 (CLI)",
+      "provider": "claude-cli"
+    },
+    "cc-opus": {
+      "id": "claude-opus-4-8",
+      "name": "Claude Opus 4.8 (CLI)",
+      "provider": "claude-cli"
+    },
+    "lms-local": { "id": "local-model", "name": "LM Studio (local)", "provider": "lmstudio" }
   }
 }
 ```
@@ -271,12 +283,12 @@ After presenting all raw responses, provide a synthesis:
 
 ## Error Handling
 
-| Scenario                                | Action                                                                                                                 |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| A provider is down (health check fails) | Skip its models, note in output, continue with others                                                                  |
-| A single model errors or times out      | Show `[ERROR: reason]` for that model, continue with others                                                            |
+| Scenario                                | Action                                                                                                                                 |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| A provider is down (health check fails) | Skip its models, note in output, continue with others                                                                                  |
+| A single model errors or times out      | Show `[ERROR: reason]` for that model, continue with others                                                                            |
 | All models fail                         | Report failure, suggest checking that LM Studio is running (port 1234) and/or API keys are configured in `.claude/consult-config.json` |
-| Claude CLI model fails                  | Show the stderr output as the error. Common causes: not authenticated (`claude auth`), model unavailable, rate limited |
-| No question provided                    | Ask the user what they want to consult about                                                                           |
-| Unknown model key in `--models`         | Warn and skip that key, continue with valid ones                                                                       |
-| Unknown preset in `--preset`            | Warn and fall back to `"default"` preset                                                                               |
+| Claude CLI model fails                  | Show the stderr output as the error. Common causes: not authenticated (`claude auth`), model unavailable, rate limited                 |
+| No question provided                    | Ask the user what they want to consult about                                                                                           |
+| Unknown model key in `--models`         | Warn and skip that key, continue with valid ones                                                                                       |
+| Unknown preset in `--preset`            | Warn and fall back to `"default"` preset                                                                                               |

@@ -2,7 +2,7 @@
 
 > A **reusable visual choreography structure** distilled from the huashu-design hero animation v9 (25 seconds, 8 scenes).
 > This is not an animation production pipeline — it is about **when this kind of choreography is the "right" choice**.
-> Practical reference: [demos/hero-animation-v9.mp4](../demos/hero-animation-v9.mp4) · [https://www.huasheng.ai/huashu-design-hero/](https://www.huasheng.ai/huashu-design-hero/)
+> Practical reference: [https://www.huasheng.ai/huashu-design-hero/](https://www.huasheng.ai/huashu-design-hero/)
 
 ## The One-Sentence Summary
 

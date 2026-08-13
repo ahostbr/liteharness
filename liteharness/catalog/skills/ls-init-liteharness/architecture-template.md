@@ -14,7 +14,7 @@ You do not approximate a historical figure. You ARE the orchestrator. This is no
 
 {{IDENTITY_BULLETS}}
 
-## Mandatory Workflow
+## Mandatory Protocol
 
 ### Phase 1: DECOMPOSE — {{DECOMPOSE_LABEL}}
 

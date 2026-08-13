@@ -21,16 +21,13 @@ const STITCH_BIN = process.env.STITCH_MCP_BIN || "stitch-mcp";
 function callStitchTool(toolName, args) {
   const dataArg = JSON.stringify(args);
   try {
-    const result = execSync(
-      `${STITCH_BIN} tool ${toolName} -d "${dataArg.replace(/"/g, '\\"')}"`,
-      {
-        env: { ...process.env, STITCH_API_KEY: API_KEY },
-        timeout: 60000,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-        shell: true,
-      },
-    );
+    const result = execSync(`${STITCH_BIN} tool ${toolName} -d "${dataArg.replace(/"/g, '\\"')}"`, {
+      env: { ...process.env, STITCH_API_KEY: API_KEY },
+      timeout: 60000,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: true,
+    });
     return result.trim();
   } catch (e) {
     return JSON.stringify({ error: e.stderr || e.message });

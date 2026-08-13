@@ -13,7 +13,7 @@ End-to-end workflow: **Stitch design** -> **Taste enforcement** -> **Production-
 - Google Stitch project with screens at [stitch.withgoogle.com](https://stitch.withgoogle.com)
 - If MCP is not connected, fall back to manual mode (user pastes Stitch code)
 
-## Workflow
+## Protocol
 
 ### Phase 0: Input Resolution
 

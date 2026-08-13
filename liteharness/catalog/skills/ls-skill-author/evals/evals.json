@@ -1,0 +1,23 @@
+[
+  { "query": "author a skill for me", "should_trigger": true },
+  { "query": "make a skill from this workflow", "should_trigger": true },
+  { "query": "create a new skill that does X", "should_trigger": true },
+  { "query": "turn this process into a reusable skill", "should_trigger": true },
+  { "query": "generate a SKILL.md for a changelog helper", "should_trigger": true },
+  { "query": "scaffold a new skill and security-scan it before install", "should_trigger": true },
+  { "query": "build me a skill from these steps and gate it", "should_trigger": true },
+  { "query": "write a skill that triggers on 'summarize my inbox'", "should_trigger": true },
+  { "query": "author a new agent skill and promote it safely", "should_trigger": true },
+  { "query": "I want a custom skill, run it through the scanner", "should_trigger": true },
+
+  { "query": "train the vault skill to trigger better", "should_trigger": false },
+  { "query": "self-improve my skill descriptions", "should_trigger": false },
+  { "query": "list all my skills", "should_trigger": false },
+  { "query": "what skills do I have for pdfs", "should_trigger": false },
+  { "query": "run the eval gate on this deliverable", "should_trigger": false },
+  { "query": "compile this skill into a CLI", "should_trigger": false },
+  { "query": "search my conversations for the auth bug", "should_trigger": false },
+  { "query": "write a python function to parse dates", "should_trigger": false },
+  { "query": "review this pull request for security issues", "should_trigger": false },
+  { "query": "spawn a worker agent to build the feature", "should_trigger": false }
+]

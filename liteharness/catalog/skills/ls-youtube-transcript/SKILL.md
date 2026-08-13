@@ -42,5 +42,5 @@ Fetch, format, and archive YouTube transcripts using `yt-dlp`. If LiteSuite is i
 - Auto-generated subtitles (YouTube speech recognition) are included via `--write-auto-sub`.
 - Manual/uploaded subtitles are preferred when available via `--write-sub`.
 - If you have a local archive database wired up, see the script's Step 5 comments for the expected JSON payload shape to plug in your own save endpoint.
-- If LiteSuite is installed, transcripts are also inserted into LiteSuite's YouTube database (`%APPDATA%/../litesuite/yt.db`, table `yt_transcripts`) so they appear in the YouTube panel's Library tab.
-- LiteSuite sync uses `INSERT OR IGNORE` — safe to re-run on the same video.
+- If LiteSuite is installed, transcripts are also inserted into LiteSuite's YouTube database (`%APPDATA%/litesuite/yt.db` — the same folder as `%APPDATA%/LiteSuite/yt.db` on Windows, table `yt_transcripts`) so they appear in the YouTube panel's Library tab.
+- LiteSuite sync inserts only when that `video_id` isn't already saved (idempotent) — safe to re-run. The panel's full-text search index updates automatically via triggers.

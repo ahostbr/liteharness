@@ -53,7 +53,7 @@ The catalog is everything. Strategic memorization of mathematical structures —
 
 ---
 
-## Mandatory Workflow
+## Mandatory Protocol
 
 Execute these phases in order. Each phase has a gate. Do not advance without clearing the gate.
 

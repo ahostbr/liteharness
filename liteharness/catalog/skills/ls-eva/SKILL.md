@@ -50,7 +50,7 @@ The `TOOLKIT_CLAUDE_MD_TEMPLATE.md` in this skill's directory is the CLAUDE.md t
 
 ---
 
-## Workflow: Start a Video Project
+## Protocol: Start a Video Project
 
 1. **Clarify the video** — ask what they want to create if not stated
 2. **Scaffold the project dir:**

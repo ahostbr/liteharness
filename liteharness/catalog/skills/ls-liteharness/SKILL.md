@@ -38,7 +38,7 @@ Every agent MUST register on activation. Choose the inbox monitor path for the c
 3. **Codex terminal sessions: use stdout delivery.** Start `~\.codex\skills\liteharness\scripts\liteharness_watcher_supervisor.py` in an attached terminal with `LITEHARNESS_AGENT_ID=<YOUR-AGENT-ID>`. The supervisor only runs `python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>` and streams stdout. There is no UIAutomation, clipboard paste, SendKeys, or pane injection in the Codex watcher stack.
 4. **Register with correct info:**
    ```bash
-   python -m liteharness.cli register --agent-id <YOUR-AGENT-ID> --cli <claude-code|pi|codex|copilot-cli> --model <your-model>
+   python -m liteharness.cli register --agent-id <YOUR-AGENT-ID> --cli <claude-code|pi|codex|copilot-cli|copilot-desktop> --model <your-model>
    ```
    Optionally add `--name "<NAME>"` to override your generated name.
 
@@ -48,19 +48,24 @@ Get your agent ID from:
 - **Pi**: the system prompt "Session ID:" line, or run `/session` to see it
 - Use the **full UUID** for all `--agent-id` and `--from` flags.
 
-### Copilot CLI startup and troubleshooting
+### GitHub Copilot Desktop / Copilot CLI startup and troubleshooting
 
-Copilot CLI does **not** use Claude Code's `Monitor(...)` path. Its LiteHarness inbox delivery comes from the detached watcher scripts in `~/.copilot/skills/liteharness/`.
+Copilot does **not** use Claude Code's `Monitor(...)` path. The primary Copilot path is an agent-started background monitor whose stdout is the notification surface. Do not use clipboard paste, SendKeys, UIAutomation, or pane injection except as explicit fallback repair.
 
 1. Register the session with the real Copilot session ID:
-   ```bash
-   python -m liteharness.cli register --agent-id <YOUR-SESSION-ID> --cli copilot-cli --model <your-model>
+   ```powershell
+   python "$env:USERPROFILE\.copilot\skills\liteharness\scripts\copilot_bootstrap.py" start --agent-id <YOUR-SESSION-ID> --cli copilot-desktop --model <your-model> --check-now
    ```
-2. Bootstrap the watcher against the current Windows Terminal pane:
-   ```bash
-   python ~/.copilot/skills/liteharness/scripts/copilot_notify.py --agent-id <YOUR-SESSION-ID> --window-handle <HANDLE> --pane-id <PANE>
+2. Start the one-shot monitor as an attached background process:
+   ```powershell
+   python "$env:USERPROFILE\.copilot\skills\liteharness\scripts\copilot_monitor.py" --agent-id <YOUR-SESSION-ID> --timeout 3600
    ```
-3. If a sender gets dropped as `ignored-non-whitelisted-sender`, validate the sender's presence file in `~/.liteharness/agents/<id>.json`. The Copilot watcher whitelist is derived from successfully parsed agent JSON files; malformed JSON silently excludes that sender from auto-injection.
+3. When the monitor prints a message and exits, handle the instructions immediately, then run the same monitor command again to re-arm it.
+4. If the scripts are missing, reinstall them:
+   ```powershell
+   python -m liteharness.cli update-scripts --cli copilot-cli
+   ```
+5. The older `copilot_notify.py` / Windows Terminal targeting path remains fallback-only. If a sender gets dropped as `ignored-non-whitelisted-sender`, validate the sender's presence file in `~/.liteharness/agents/<id>.json`; that whitelist applies only to the fallback injector.
 
 ## Agent Naming
 
@@ -110,7 +115,7 @@ Spawn new Claude Code sessions. **Default is always headless PTY mode** — only
 ### PTY Mode (DEFAULT) — headless, full programmatic control
 
 ```bash
-liteharness pty-daemon                              # start daemon first (port 7450)
+liteharness pty-daemon                              # start daemon first (port 7460)
 liteharness spawn --pty --model haiku --name "Worker" --prompt "run the tests"
 liteharness send-input <agent-id> "fix the auth bug" # send prompts
 liteharness send-input <agent-id> "/compact"         # send slash commands
@@ -252,7 +257,7 @@ The ConPTY daemon (`pty_daemon.py`) runs headlessly (`CREATE_NO_WINDOW`) and aut
 
 - **Headless by default** — no visible terminal window, fully invisible background process
 - **Auto-shutdown** — kills itself after 2 hours idle with no active sessions
-- **Token race protection** — `ensure_daemon()` checks if port 7450 is in use before spawning a new daemon
+- **Token race protection** — `ensure_daemon()` checks if port 7460 is in use before spawning a new daemon
 - **Prompt delivery** — initial prompt sent via stdin 8s after spawn (Claude Code needs time to init)
 - **Per-session send queue** — FIFO queue with single consumer thread serializes concurrent writes to the same PTY
 
@@ -271,14 +276,14 @@ The ConPTY daemon (`pty_daemon.py`) runs headlessly (`CREATE_NO_WINDOW`) and aut
 
 ## Architecture
 
-| Path                                          | Purpose                                           |
-| --------------------------------------------- | ------------------------------------------------- |
-| `~/.liteharness/`                             | Runtime root (global, shared across all CLIs)     |
-| `~/.liteharness/inbox/{new,cur,done,tmp}/`    | Maildir-style message inbox                       |
-| `~/.liteharness/agents/<id>.json`             | Agent presence files (heartbeat, model, CLI)      |
-| `~/.liteharness/names/<id>`                   | Name overrides (plain text, immune to clobbering) |
-| `~/.liteharness/pty_daemon.lock`              | PTY daemon token + port (auto-created)            |
-| `~/.liteharness/config.json`                  | Global config                                     |
+| Path                                              | Purpose                                                |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| `~/.liteharness/`                                 | Runtime root (global, shared across all CLIs)          |
+| `~/.liteharness/inbox/{new,cur,done,tmp}/`        | Maildir-style message inbox                            |
+| `~/.liteharness/agents/<id>.json`                 | Agent presence files (heartbeat, model, CLI)           |
+| `~/.liteharness/names/<id>`                       | Name overrides (plain text, immune to clobbering)      |
+| `~/.liteharness/pty_daemon.lock`                  | PTY daemon token + port (auto-created)                 |
+| `~/.liteharness/config.json`                      | Global config                                          |
 | `<your-project>/packages/liteharness/` (optional) | Package source (if using a local development checkout) |
 
 ## Hook Integration

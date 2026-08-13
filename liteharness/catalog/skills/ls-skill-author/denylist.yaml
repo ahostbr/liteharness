@@ -1,0 +1,188 @@
+# ls-skill-author Layer-1 denylist
+# Versioned regex+severity ruleset for deterministic static analysis of an
+# authored skill's frontmatter, body, and companion files.
+#
+# Gate rule (enforced in scan_skill.py): ANY finding with severity HIGH => the
+# skill FAILS the scan and can never be promoted. MEDIUM / LOW are advisory
+# signals surfaced to the Layer-2 reviewer and the human, but do not by
+# themselves block promotion.
+#
+# Patterns are compiled with re.IGNORECASE | re.MULTILINE unless the rule sets
+# `case_sensitive: true`. Keep this file the single source of truth — bump
+# `version` on every change.
+version: "1.0.0"
+
+rules:
+  # ------------------------------------------------------------------ #
+  # Destructive shell                                                   #
+  # ------------------------------------------------------------------ #
+  - id: destructive-rm-rf
+    severity: HIGH
+    category: destructive-shell
+    description: Recursive force delete (rm -rf / rm -fr).
+    pattern: '\brm\s+(?:-[a-z]*\s+)*-[a-z]*(?:rf|fr)[a-z]*\b|\brm\s+-[a-z]*r[a-z]*\s+-[a-z]*f'
+
+  - id: powershell-recursive-remove
+    severity: HIGH
+    category: destructive-shell
+    description: PowerShell recursive force delete.
+    pattern: 'Remove-Item\b[^\n]*-Recurse[^\n]*-Force|Remove-Item\b[^\n]*-Force[^\n]*-Recurse'
+
+  - id: curl-pipe-shell
+    severity: HIGH
+    category: destructive-shell
+    description: Download piped straight into a shell interpreter (curl|bash).
+    pattern: '\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|python|python3|node|perl|ruby)\b'
+
+  - id: powershell-iex
+    severity: HIGH
+    category: destructive-shell
+    description: PowerShell Invoke-Expression of downloaded / dynamic content.
+    pattern: '\b(?:iex|Invoke-Expression)\b\s*\(|\|\s*(?:iex|Invoke-Expression)\b'
+
+  - id: powershell-encoded-command
+    severity: HIGH
+    category: destructive-shell
+    description: PowerShell encoded command (payload obfuscation).
+    pattern: 'powershell(?:\.exe)?\b[^\n]*\s-(?:enc|e|ec|encodedcommand)\b'
+
+  - id: shell-fork-bomb
+    severity: HIGH
+    category: destructive-shell
+    description: Classic fork bomb.
+    pattern: ':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:'
+
+  # ------------------------------------------------------------------ #
+  # Credential exfiltration                                             #
+  # ------------------------------------------------------------------ #
+  - id: read-claude-credentials
+    severity: HIGH
+    category: credential-exfil
+    description: Access to Claude Code credential store.
+    pattern: '\.claude[\\/]\.credentials(?:\.json)?|\.credentials\.json'
+
+  - id: read-private-keys
+    severity: HIGH
+    category: credential-exfil
+    description: Access to SSH / signing private keys.
+    pattern: '\bid_rsa\b|\bid_ed25519\b|\bid_ecdsa\b|\.ssh[\\/]id_|-----BEGIN\s+(?:RSA|OPENSSH|EC|DSA)?\s*PRIVATE KEY-----'
+
+  - id: read-cloud-credentials
+    severity: HIGH
+    category: credential-exfil
+    description: Access to cloud / provider credential files.
+    pattern: '\.aws[\\/]credentials|\.config[\\/]gcloud|\.netrc\b|\.npmrc\b[^\n]*_authToken|\.docker[\\/]config\.json'
+
+  - id: read-dotenv
+    severity: HIGH
+    category: credential-exfil
+    description: Reading a .env secrets file (cat/type/Get-Content/open).
+    pattern: '\b(?:cat|type|less|more|Get-Content|source|open)\b[^\n]*\.env\b|\bread[^\n]*\.env\b'
+
+  - id: exfil-egress-upload
+    severity: HIGH
+    category: credential-exfil
+    description: Uploading data to a non-localhost host (curl/wget/iwr with a body).
+    pattern: '\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr)\b[^\n]*\b(?:-d|--data(?:-binary|-raw)?|-F|--form|-T|--upload-file|-Body|-InFile|-Method\s+Post)\b[^\n]*https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])'
+
+  - id: exfil-egress-post-code
+    severity: HIGH
+    category: credential-exfil
+    description: Programmatic POST to a remote host from skill code.
+    pattern: '\b(?:requests\.(?:post|put)|urllib\.request\.urlopen|fetch|axios\.(?:post|put)|http\.client)\b[^\n]*https?://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])'
+
+  # ------------------------------------------------------------------ #
+  # Config / permission tampering                                      #
+  # ------------------------------------------------------------------ #
+  - id: permission-bypass-flag
+    severity: HIGH
+    category: config-tamper
+    description: Permission-bypass / dangerous-mode flags.
+    pattern: "bypassPermissions|skipDangerousModePermissionPrompt|--dangerously-skip-permissions|dangerouslyDisableSandbox|acceptEdits.*autoApprove"
+
+  - id: write-claude-settings
+    severity: HIGH
+    category: config-tamper
+    description: Writing / editing Claude Code settings.json.
+    pattern: '(?:>>?|Set-Content|Out-File|tee|Write[- ]?File|Edit\b|echo\b[^\n]*>)[^\n]*\.claude[\\/][^\n]*settings(?:\.local)?\.json|settings(?:\.local)?\.json[^\n]*(?:permissions|bypass|hooks)'
+
+  - id: edit-instruction-files
+    severity: HIGH
+    category: config-tamper
+    description: Overwriting CLAUDE.md / AGENTS.md instruction files.
+    pattern: '(?:>>?|Set-Content|Out-File|tee|Write[- ]?File|Edit\b|echo\b[^\n]*>)[^\n]*\b(?:CLAUDE|AGENTS|GEMINI)\.md\b'
+
+  - id: mention-settings-json
+    severity: MEDIUM
+    category: config-tamper
+    description: References a settings.json file (context for reviewer).
+    pattern: '\bsettings(?:\.local)?\.json\b'
+
+  # ------------------------------------------------------------------ #
+  # Persistence                                                         #
+  # ------------------------------------------------------------------ #
+  - id: persistence-hooks-file
+    severity: HIGH
+    category: persistence
+    description: Writing a hooks configuration (auto-run persistence).
+    pattern: '\bhooks\.json\b|["'']hooks["'']\s*:\s*[\{\[]|\.claude[\\/]hooks[\\/]'
+
+  - id: persistence-hook-event
+    severity: HIGH
+    category: persistence
+    description: Wiring a lifecycle hook event to a command.
+    pattern: '["'']?(?:SessionStart|SessionEnd|PreToolUse|PostToolUse|UserPromptSubmit|Stop|Notification)["'']?\s*[:=][^\n]*(?:command|hooks|\.py|\.sh|\.ps1|bash|python|node)'
+
+  - id: persistence-cron
+    severity: HIGH
+    category: persistence
+    description: Scheduled-task / cron persistence.
+    pattern: '\bcrontab\b|\bschtasks\b|/etc/cron|Register-ScheduledTask|launchctl\s+load|systemd[\\/].*\.timer'
+
+  # ------------------------------------------------------------------ #
+  # Prompt injection                                                   #
+  # ------------------------------------------------------------------ #
+  - id: prompt-injection-override
+    severity: HIGH
+    category: prompt-injection
+    description: Instruction-override / jailbreak phrasing.
+    pattern: 'ignore\s+(?:all\s+|any\s+)?(?:previous|prior|above|earlier|the\s+preceding)\s+(?:instructions|prompts|directions|context)|disregard\s+(?:the\s+|all\s+)?(?:above|previous|prior|system|earlier)|pretend\s+you\s+(?:have\s+no|are\s+not\s+bound)|you\s+have\s+no\s+(?:restrictions|guardrails|rules)|reveal\s+your\s+(?:system\s+)?(?:prompt|instructions)|do\s+anything\s+now\b|developer\s+mode\s+enabled'
+
+  - id: prompt-injection-markers
+    severity: MEDIUM
+    category: prompt-injection
+    description: Suspicious injected role / system markers in a skill body.
+    pattern: '<\s*/?\s*system\s*>|\[/?INST\]|<\|im_start\|>|###\s*system\s*prompt'
+
+  # ------------------------------------------------------------------ #
+  # Obfuscation                                                         #
+  # ------------------------------------------------------------------ #
+  - id: base64-decode-exec
+    severity: HIGH
+    category: obfuscation
+    description: Decoding then executing an encoded payload.
+    pattern: 'eval\s*\(\s*atob\s*\(|base64\s+(?:-d|--decode|-D)\b[^\n]*\|\s*(?:bash|sh|python|node)|\[Convert\]::FromBase64String|python\s+-c[^\n]*base64|exec\s*\(\s*(?:base64|codecs\.decode)'
+
+  - id: zero-width-unicode
+    severity: HIGH
+    category: obfuscation
+    description: Zero-width / invisible unicode (hidden-instruction smuggling).
+    pattern: "[\\u200b\\u200c\\u200d\\u2060\\u2061\\u2062\\u2063\\ufeff\\u180e\\u200e\\u200f]"
+
+  - id: bidi-override
+    severity: HIGH
+    category: obfuscation
+    description: Unicode bidirectional override (Trojan Source).
+    pattern: "[\\u202a\\u202b\\u202c\\u202d\\u202e\\u2066\\u2067\\u2068\\u2069]"
+
+  - id: large-base64-blob
+    severity: MEDIUM
+    category: obfuscation
+    description: Large opaque base64 string (possible embedded payload).
+    pattern: "[A-Za-z0-9+/]{120,}={0,2}"
+
+  - id: hex-escape-blob
+    severity: MEDIUM
+    category: obfuscation
+    description: Long run of hex escapes (possible obfuscated payload).
+    pattern: '(?:\\x[0-9a-fA-F]{2}){16,}'

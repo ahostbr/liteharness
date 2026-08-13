@@ -29,7 +29,8 @@ Options:
   - "v5" — Self-evaluating, ever-evolving meta planner. Learns and adapts.
   - "v6" — Adaptive quizmaster with fact dependencies, unified inversion, invisible ceremony. Built by the Polymathic Tribunal.
   - "v7" — v6 + master plan/sub-plan decomposition, workstream discovery, phased DAG orchestration. Enables parallel agent dispatch.
-  - "v8 (Recommended)" — v7 + specification enrichment, self-contained sub-plans, buildability gate, golden-path scenarios, banned ambiguity. Fixes the decision-to-specification gap that caused placeholder code in v7.
+  - "v8" — v7 + specification enrichment, self-contained sub-plans, buildability gate, golden-path scenarios, banned ambiguity. Fixes the decision-to-specification gap that caused placeholder code in v7.
+  - "v9 (Recommended)" — v8 + verification instrumentation, measurement conditions, negative-path proof, instrument-trust audit. Fixes the gap that lets a plan specify HOW to build but not how to PROVE it worked — the gap that shipped an app with a dead updater behind a fully green build log.
 ```
 
 **Do NOT skip this step. Do NOT default to any variant. Always ask.**
@@ -40,6 +41,7 @@ After the user selects a variant, use the `Read` tool to load the corresponding 
 
 | Variant   | File to Read                       |
 | --------- | ---------------------------------- |
+| **v9**    | `ULTIMATE_QUIZZER_PROMPT_v9.md`    |
 | **v8**    | `ULTIMATE_QUIZZER_PROMPT_v8.md`    |
 | **v7**    | `ULTIMATE_QUIZZER_PROMPT_v7.md`    |
 | **v6**    | `ULTIMATE_QUIZZER_PROMPT_v6.md`    |
@@ -69,7 +71,8 @@ When the user says "plan it" / "ok plan" / "enough" / "go ahead":
 
 After quizzing is complete, generate the plan. The plan format depends on the variant used:
 
-- **v7:** Produces a **folder** with `master.md` + `sub-<workstream>.md` files. The v7 prompt defines the exact master and sub-plan templates. See `ULTIMATE_QUIZZER_PROMPT_v7.md` for details.
+- **v9:** Produces a **folder** containing BOTH `master.md` + `sub-<workstream>.md` (the builder-facing source of truth) AND `master.html` + `sub-<workstream>.html` (the styled render opened in the LiteSuite browser pane). The HTML is generated from the markdown so they cannot drift.
+- **v7/v8:** Produce a **folder** with per-workstream master and sub-plan files. ⚠️ Note: the v7 and v8 PROMPT files instruct HTML output while this SKILL.md historically documented `.md` — a real contradiction in the shipped plugin. v9 resolves it by emitting both. If you run v7 or v8, expect HTML and convert if a builder agent needs the markdown.
 - **v6 and earlier:** Produces a single plan file using the format below.
 
 ### Single-File Plan Format (v6 and earlier)
@@ -131,15 +134,15 @@ You NEVER write code directly - you use Task and Task\* tools to deploy team mem
 
 When generating the plan, **always include these engineering disciplines** as part of the execution strategy. These are non-negotiable when going through quizmaster planning — the whole point of rigorous planning is rigorous execution.
 
-| Practice                           | Skill                                        | When                                                                   |
-| ---------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------- |
-| **Isolated workspace**             | git worktrees            | Create a worktree before touching code. Keep main clean.               |
+| Practice                           | Skill                          | When                                                                   |
+| ---------------------------------- | ------------------------------ | ---------------------------------------------------------------------- |
+| **Isolated workspace**             | git worktrees                  | Create a worktree before touching code. Keep main clean.               |
 | **Test-driven development**        | test-driven development        | Write tests before implementation for each task in the plan.           |
-| **Structured implementation plan** | a structured execution doc                  | The quizmaster plan feeds directly into a writing-plans execution doc. |
+| **Structured implementation plan** | a structured execution doc     | The quizmaster plan feeds directly into a writing-plans execution doc. |
 | **Systematic debugging**           | systematic debugging           | When tests fail, follow the debugging skill — don't guess.             |
 | **Verification before completion** | verification before completion | Every task must pass verification commands before claiming done.       |
 | **Code review**                    | polymathic code review         | Request review before merging back.                                    |
-| **Branch completion**              | structured merge/PR/cleanup | Follow the structured merge/PR/cleanup flow at the end.                |
+| **Branch completion**              | structured merge/PR/cleanup    | Follow the structured merge/PR/cleanup flow at the end.                |
 
 Include a **"Execution Workflow"** section in every generated plan that applies these disciplines in order:
 

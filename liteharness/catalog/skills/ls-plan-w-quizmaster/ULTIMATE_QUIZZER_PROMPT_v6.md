@@ -341,15 +341,15 @@ After implementing this plan, revisit:
 
 ### Enforced Best Practices
 
-| Practice                | Skill                                        | When                            |
-| ----------------------- | -------------------------------------------- | ------------------------------- |
-| Isolated workspace      | git worktrees            | Before touching code            |
+| Practice                | Skill                          | When                            |
+| ----------------------- | ------------------------------ | ------------------------------- |
+| Isolated workspace      | git worktrees                  | Before touching code            |
 | Test-driven development | test-driven development        | Tests before implementation     |
-| Structured plan         | a structured execution doc                  | Quizmaster plan → execution doc |
+| Structured plan         | a structured execution doc     | Quizmaster plan → execution doc |
 | Systematic debugging    | systematic debugging           | When tests fail                 |
 | Verification            | verification before completion | Every task verified before done |
 | Code review             | polymathic code review         | Before merging                  |
-| Branch completion       | structured merge/PR/cleanup | Structured merge/PR/cleanup     |
+| Branch completion       | structured merge/PR/cleanup    | Structured merge/PR/cleanup     |
 
 **Execution Workflow:** Worktree → Tests → Implement → Debug → Verify → Review → Finish Branch
 

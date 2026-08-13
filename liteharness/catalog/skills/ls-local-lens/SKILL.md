@@ -7,6 +7,7 @@ allowed-tools: Bash
 # Local Lens — LM Studio Model Manager & Context Compressor
 
 > **Requirements:**
+>
 > - **LM Studio** must be installed and running locally. Download from https://lmstudio.ai.
 > - The `lms` CLI must be available at `%USERPROFILE%\.lmstudio\bin\lms.exe` (installed automatically with LM Studio).
 > - At least one model must be downloaded inside LM Studio before loading.

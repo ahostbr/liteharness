@@ -1,6 +1,6 @@
 ---
 name: ls-mockup
-description: Use when creating visual mockups, screenshot layouts, page previews, prototype arrangements, data visualizations, or any visual design work. Outputs to a Next.js mockup project (user-supplied). Triggers on 'mockup', 'create a mockup', 'layout mockup', 'screenshot preview', 'page preview', 'arrange screenshots', 'visual prototype', 'visualize this', 'make this pretty', 'visualize this markdown', 'visualize this document'.
+description: Use when creating visual mockups, screenshot layouts, page previews, prototype arrangements, data visualizations, INTERACTIVE or DRIVEN mockups that ask the user questions and accept image uploads, or any visual design work. Triggers on 'mockup', 'create a mockup', 'layout mockup', 'screenshot preview', 'page preview', 'arrange screenshots', 'visual prototype', 'visualize this', 'make this pretty', 'visualize this markdown', 'visualize this document', 'interactive mockup', 'driven mockup', 'generative UI', 'let me answer questions', 'let me upload images'.
 ---
 
 # Mockup
@@ -8,6 +8,7 @@ description: Use when creating visual mockups, screenshot layouts, page previews
 > **Requirements:** A Next.js project that serves as the mockup host. Set `MOCKUP_PROJECT_DIR` to its absolute path, or tell the agent the path at invocation time (e.g. `/mockup --dir /home/user/my-mockup-app`). The project must already have the component library described below installed (Next.js 15+, Framer Motion, Recharts, Nivo, visx, D3, react-force-graph, Three.js/R3F, pnpm).
 >
 > If you do not have a mockup project yet, create one with:
+>
 > ```bash
 > pnpm create next-app my-mockup --typescript --tailwind
 > cd my-mockup
@@ -15,6 +16,30 @@ description: Use when creating visual mockups, screenshot layouts, page previews
 > ```
 
 All mockups output to the **mockup project** at `<MOCKUP_PROJECT_DIR>` (set by the user). No standalone HTML mode — everything goes through the full project with animations, 3D, scroll effects, and interactive data visualization.
+
+## Two modes — pick one before you design
+
+| Mode       | What it is                                                                                                                     | When                                                                |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| **Static** | A page that presents. Read-only.                                                                                               | Decks, reports, visualisations, anything to look at or send         |
+| **Driven** | A page that **asks and listens** — questions, uploads and verdicts flow back to the agent, which rewrites the page in response | Anything where the user's answer should change what gets built next |
+
+**Default to Driven whenever you would otherwise ask the questions in chat.** A choice grid beats a
+wall of numbered options, and an image drop-zone beats asking for a file path. Full contract at the
+end of this file.
+
+## Driven mode — one-time setup in the host project
+
+Driven mockups need three files that a fresh project will not have. Create them before the first
+interactive page:
+
+| File                                  | Role                                                                                                                                         |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/lib/mockup-session.ts`           | server-side session store — reads/writes `.mockup-io/<id>/session.json`, saves uploads, sanitises ids so they cannot escape the session root |
+| `src/app/api/mockup-session/route.ts` | `GET`/`POST` handler; `export const dynamic = "force-dynamic"` so a session is never served from cache                                       |
+| `src/components/interactive/`         | `useMockupSession` hook + `SessionBanner`, `AskChoice`, `AskText`, `AskScale`, `DropImages`, `ReviewGate`                                    |
+
+Add `/.mockup-io/` to `.gitignore` — session data is not source.
 
 ## Step 1: Load Design Principles
 
@@ -529,3 +554,208 @@ Read the source file. Identify:
 - **Network/relationship data** → react-force-graph-2d/3d
 
 Always use the installed viz libraries (Recharts, Nivo, visx, D3, force graphs) — never hand-roll CSS charts.
+
+---
+
+# Driven Mockups — interactive, two-way
+
+A mockup does not have to be a picture you look at. It can be a **surface you drive**: it asks
+questions, takes uploads, and the answers come straight back to the agent that generated it, which
+then rewrites the page you are standing in.
+
+**Reference implementation: `src/app/driven-demo/page.tsx` in the host project.** Copy it as the starting point.
+
+## Why this exists
+
+The page renders in a browser; the agent runs in a terminal. They need a transport. It is a **file
+on disk** — deliberately, not a socket:
+
+- it survives a dev-server restart, which happens constantly during HMR
+- the agent already has file tools; there is no extra channel to keep alive
+- a human can read and hand-edit the whole session in a text editor
+
+## The loop
+
+```
+agent writes page  ->  Ryan answers in the browser
+                            |
+                            v
+         POST /api/mockup-session?id=<mockupId>
+                            |
+                            v
+       .mockup-io/<mockupId>/session.json   (+ uploads/)
+                            |
+                            v
+      agent reads it  ->  agent rewrites the page
+                            |
+                            v
+     Next dev server hot-reloads -> the page changes under him
+```
+
+That last hop is what makes it feel generative: **you do not tell him to refresh.** Rewrite the
+section files and the open tab updates itself.
+
+## Wiring a page
+
+```tsx
+"use client";
+import {
+  useMockupSession, SessionBanner,
+  AskChoice, AskText, AskScale, DropImages, ReviewGate,
+} from "@/components/interactive";
+
+export default function Page() {
+  // pollMs is optional — it makes the page pick up edits the AGENT makes to the
+  // session file, not just the ones made in this tab.
+  const session = useMockupSession("my-mockup-id", { pollMs: 2000 });
+
+  return (
+    <main>
+      <SessionBanner session={session} title="Wired to Sentinel" />
+
+      <AskChoice session={session} promptId="direction"
+        title="Which direction?"
+        options={[{ value: "a", label: "Option A", desc: "why" }]} />
+
+      <AskChoice session={session} promptId="sections" multi
+        title="Which sections?" options={[...]} />
+
+      <DropImages session={session} promptId="refs"
+        title="Drop reference images" />
+
+      <AskScale session={session} promptId="density"
+        title="How dense?" minLabel="airy" maxLabel="packed" />
+
+      <AskText session={session} promptId="notes"
+        title="Anything else?" rows={4} />
+
+      <ReviewGate session={session} promptId="verdict"
+        title="Verdict on this draft" />
+    </main>
+  );
+}
+```
+
+### Controls
+
+| Component         | Answer shape                            | Use for                                 |
+| ----------------- | --------------------------------------- | --------------------------------------- |
+| `AskChoice`       | `string`                                | branch the page on one decision         |
+| `AskChoice multi` | `string[]`                              | pick-any-number                         |
+| `AskText`         | `string`                                | the most useful answer on most pages    |
+| `AskScale`        | `number`                                | taste dials — density, boldness, risk   |
+| `DropImages`      | files on disk                           | screenshots, sketches, competitor pages |
+| `ReviewGate`      | `approve\|revise\|reject` + `<id>.note` | the decision gate                       |
+
+**There is no submit button, by design.** Each answer lands the moment it is given, so you can act
+on the first one without waiting for the last.
+
+`AskText` commits on **blur** (or ⌘/ctrl+enter), not per keystroke — every write bumps the session
+revision, and a watcher should fire on a finished thought rather than on typing.
+
+## Reading the answers (agent side)
+
+```bash
+# the whole session
+cat <MOCKUP_PROJECT_DIR>/.mockup-io/<mockupId>/session.json
+```
+
+```jsonc
+{
+  "mockupId": "driven-demo",
+  "revision": 3, // monotonic — bumped on every write
+  "answers": [
+    { "promptId": "direction", "value": "technical", "at": "..." },
+    { "promptId": "sections", "value": ["hero", "proof"], "at": "..." },
+  ],
+  "uploads": [
+    {
+      "promptId": "references",
+      "originalName": "hero.jpg",
+      "filePath": "C:\\...\\uploads\\hero.jpg",
+      "bytes": 266295,
+      "mimeType": "image/jpeg",
+      "at": "...",
+    },
+  ],
+  "meta": {},
+}
+```
+
+**Uploads are real files at absolute paths — open them with the Read tool.** They are images; you
+can see them.
+
+### 🔴 MANDATORY: arm the answer watcher BEFORE you hand over the URL
+
+**A driven page is not delivered until a Monitor is watching its session file.** The user
+answers in the browser and _nothing tells you_. Without the watcher you find out only when
+they type "i saved it" — which has happened — and that wasted round trip is the exact thing
+the two-way design exists to remove.
+
+Arm it the moment the page renders, and give them the URL in the same message.
+
+```
+Monitor({
+  description: "<mockupId> answers",   // be specific — this text appears in every notification
+  persistent: true,
+  timeout_ms: 3600000,
+  command: <the one-liner below>,
+})
+```
+
+```bash
+F=<MOCKUP_PROJECT_DIR>/.mockup-io/<mockupId>/session.json
+last=""
+while true; do
+  cur=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['revision'])" "$F" 2>/dev/null || echo "-")
+  if [ "$cur" != "$last" ]; then
+    [ -n "$last" ] && echo "<mockupId> answered — revision $last -> $cur"
+    last="$cur"
+  fi
+  sleep 3
+done
+```
+
+Behaviour, tested both directions before this went into the skill:
+
+| condition                                                            | result                                              |
+| -------------------------------------------------------------------- | --------------------------------------------------- |
+| session file does not exist yet (created lazily on the first answer) | silent — no spam                                    |
+| first tick after arming                                              | silent — seeds the baseline instead of firing on it |
+| a real answer lands                                                  | fires **once** — `answered — revision 11 -> 12`     |
+
+**Compare `revision`, never mtime.** `revision` is monotonic and bumps only on a real write;
+mtime also moves for a touch, a temp-file rename, or an editor save. The session writer uses
+write-then-rename, so mtime would fire on a partial write that `revision` correctly ignores.
+
+On each notification: read the session file, act on the **new** answers only, and rewrite the
+page so they can see the answer landed. Never re-ask something already answered.
+
+**`TaskStop` the monitor when the page is finished** — a persistent monitor outlives the task
+that needed it.
+
+## Rules for driven pages
+
+1. **Never ship a control that writes nowhere.** `SessionBanner` prints the destination path on
+   screen for exactly this reason. A live-looking control that silently does nothing is the worst
+   outcome available here.
+2. **Ask what actually branches the work.** Every prompt should change what you build next. If an
+   answer would not change anything, it is decoration — cut it.
+3. **React visibly.** After reading an answer, rewrite the page so he can see it landed. A driven
+   mockup that never changes is just a form.
+4. **Seed sensible defaults**, so an unanswered page is still a coherent design.
+5. **`.mockup-io/` is gitignored** — session data is not source.
+6. **Arm the watcher before you share the URL** (see above). A driven page with nobody
+   listening is a one-way page with extra steps — and the user has no way to tell, because
+   from their side it looks exactly like a page that is being watched.
+
+## Operational gotchas
+
+- **The dev server must be running** for any of this to work: `cd <MOCKUP_PROJECT_DIR> && pnpm dev`.
+- 🔴 **Running `next build` breaks the running `next dev` server.** The build replaces `.next` with
+  production output and the dev server then 500s on _every_ route, including pages you never
+  touched. If pages that used to work start failing, that is why: kill the server, `rm -rf .next`,
+  restart. Do not go hunting in your own code first — check this.
+- Uploads cap at **25 MB** per file and land in `.mockup-io/<id>/uploads/`.
+- `reset` clears **answers only** and deliberately keeps uploads, so "start over" never destroys an
+  image he dragged in.

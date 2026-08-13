@@ -7,7 +7,7 @@ description: Premium web design skill — applies high-end agency-level design p
 
 4 modules loaded from `${CLAUDE_SKILL_DIR}/`:
 
-## Workflow
+## Protocol
 
 ### Step 1: Detect Mode
 

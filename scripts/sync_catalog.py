@@ -48,6 +48,29 @@ PRIVATE_SKILLS: tuple[str, ...] = (
 )
 
 
+CATALOG_INIT = """\"\"\"Vendored LiteHarness catalog (skills, agents, commands, hooks).\"\"\"
+"""
+
+
+def restore_catalog_init(dest_root: Path) -> None:
+    """Re-create liteharness/catalog/__init__.py after the copytree wipes it.
+
+    LOAD-BEARING. This script replaces the catalog directory wholesale, which deletes
+    __init__.py every single run. Without that file the directory is a PEP 420 NAMESPACE
+    package: the ~400 data files still ship, `import liteharness.catalog` still appears to
+    succeed, and `catalog.__file__` is None - so `from liteharness.catalog import
+    catalog_root` raises ImportError with an "(unknown location)" traceback.
+
+    That is precisely how 0.2.4 shipped dead on arrival for every user, and it would have
+    happened again on 0.3.1: the sync ran, the file vanished, and the wheel built cleanly.
+    Nothing in the build complains, because a namespace package is legal.
+    """
+    init = dest_root / "__init__.py"
+    if not init.exists():
+        init.write_text(CATALOG_INIT, encoding="utf-8")
+        print(f"[fix] restored {init} (copytree deletes it every run)")
+
+
 def short_sha(path: Path) -> str:
     h = hashlib.sha256()
     if path.is_file():
@@ -94,6 +117,7 @@ def sync(src_root: Path, dest_root: Path, clean: bool) -> dict[str, str | int]:
         "hash": short_sha(dest_root),
     }
     (dest_root / "PROVENANCE.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    restore_catalog_init(DEST_ROOT)
     print(f"[ok] wrote PROVENANCE.json — {file_count} files, hash {manifest['hash']}")
     return manifest
 

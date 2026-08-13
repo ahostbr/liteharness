@@ -17,7 +17,7 @@ One command to see everything. Catalogs all skills, commands, and agents across 
 | **refresh**  | `/library refresh`         | Re-scan all sources, update library.yaml                |
 | **register** | `/library register <path>` | Add a new codebase to scan                              |
 
-## Workflow by Command
+## Protocol by Command
 
 ### list
 

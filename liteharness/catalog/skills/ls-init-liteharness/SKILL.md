@@ -81,26 +81,126 @@ Ask: "I can scan your past Claude conversations to find patterns in how you work
 
 ### Phase 4: Generate Orchestrator Prompt (T3)
 
-Using the interview data, generate their personal orchestrator prompt. Use the template at `${CLAUDE_SKILL_DIR}/architecture-template.md`.
+Ask the human what to **name** their orchestrator first — it keys everything below.
 
-Fill in:
+**The template is the SHIPPED DEFAULT**, not a separate file:
+`cognitive-architectures/orchestrator/default.md`. Resolve it, never hardcode its path:
 
-- **The Kernel** — their decomposition principle (from Q3, or synthesized from their answers)
-- **Identity** — their background, strengths, cognitive style (from Q1, Q2, Q7)
-- **Mandatory Workflow** — adapted to their style (planners get more Phase 1, divers get faster Phase 3)
-- **The Trunk** — their purpose (from Q4)
-- **HITL Preferences** — from Q5, Q6
-- **Anti-Patterns** — from Q8 + conversation analysis
-- **Polymathic Affinities** — from Q7 (which agents to default-dispatch for their tasks)
+```bash
+python -c "from liteharness.prompts import resolve_cognitive_file as r; print(r('default','orchestrator'))"
+```
 
-Save to: `.liteharness/prompts/cognitive-architectures/orchestrator/<username>.md`
-(relative to the project root where the harness is being initialized)
+It is the same artifact you are producing, already written generically. Read it, then
+replace every `{{SLOT}}` with what the interview established:
 
-Where `<username>` is derived from git config user.name (lowercased, hyphenated) or asked if not set.
+| Slot                              | Source                                                                                      |
+| --------------------------------- | ------------------------------------------------------------------------------------------- |
+| `{{ORCHESTRATOR_NAME}}`           | the name they chose                                                                         |
+| `{{KERNEL}}` + `{{KERNEL_QUOTE}}` | Q3 — their decomposition principle, or synthesised                                          |
+| `{{IDENTITY_TRAIT_1..3}}`         | Q1, Q2, Q7 — background, cognitive style                                                    |
+| `{{USER_TRUNK}}`                  | **Q4. The sacred one.** If they deflect, leave the default trunk rather than inventing one. |
+| `{{USER_ANTIPATTERN_1..2}}`       | Q8 + conversation analysis                                                                  |
+
+Keep the shipped defaults for HITL, escalation, opsec and the generic anti-patterns unless
+the interview contradicts them — those encode lessons already paid for. Adapt the protocol
+phases to their style (planners get more Phase 1; divers get to Phase 3 faster).
+
+🔴 **Leave NO `{{SLOT}}` unreplaced.** An unsubstituted placeholder reads as literal text to
+the next orchestrator, and nothing checks. If a slot has no answer, delete the line or write
+the default — never ship the braces.
+
+### Where to save it — ASK, do not hardcode
+
+```bash
+python -c "from liteharness.prompts import resolve_orchestrator_target as t; p,why = t('<NAME>'); print(p or 'FATAL: ' + why)"
+```
+
+This returns the path derived from the **same lookup the runtime reads through**, so the
+write location cannot drift from the read location. Two bugs it prevents, both of which
+were real in this skill:
+
+- The old instruction saved to `.liteharness/prompts/…/<username>.md`. **`resolve_prompts_dir()`
+  never returns `.liteharness/`** — it resolves to the repo checkout, the packaged install, or
+  the plugin cache. A file written there is unfindable, and an instruction to read a missing
+  file produces no error at all.
+- It named the file after the **human** (git `user.name`) while `resolve_cognitive_file()` looks
+  up the **agent's** name. The human is not the key anyone searches by.
+
+If the helper prints `FATAL:`, **stop and tell the human.** Do not write the file somewhere
+plausible — an orchestrator with an unfindable architecture is indistinguishable from one that
+never had an interview.
+
+**Verify the round trip before moving on.** Generation is not done until the resolver returns
+the file you just wrote:
+
+```bash
+python -c "from liteharness.prompts import resolve_cognitive_file as r; p=r('<NAME>','orchestrator'); print(p, p.stat().st_size if p else 0)"
+```
+
+It must print your new file and a non-zero size. If it prints `default.md`, the write landed
+somewhere the resolver cannot see and the orchestrator will silently run generic.
 
 Present the generated prompt to the user. Ask: "This is your orchestrator's personality. Anything you'd change?"
 
 Incorporate feedback and re-save.
+
+### 🔴 Now generate the SKILL — the personality is useless without a command that loads it
+
+**A cognitive architecture nobody can invoke is not an orchestrator, it is a text file.**
+Until 2026-08-09 this skill stopped at the previous step, so every user finished the
+interview with a personality and **no way to summon it**. The only working `/`-command was
+one the author had hand-built on his own machine, which is why the gap survived — it was
+invisible to the one person who could see everything else.
+
+Claude Code discovers skills at `~/.claude/skills/<dir>/SKILL.md` and exposes each as
+`/<dir>`, so **the directory name IS the command name**. Resolve the target the same way you
+resolved the architecture — never hardcode it:
+
+```bash
+python -c "from liteharness.prompts import resolve_skill_target as t; p,why = t('<NAME>'); print(p or 'FATAL: ' + why)"
+```
+
+Read `skill-template.md` from this skill's own directory and substitute:
+
+| Slot                    | Value                                                                  |
+| ----------------------- | ---------------------------------------------------------------------- |
+| `{{ORCHESTRATOR_NAME}}` | the name they chose, as they typed it                                  |
+| `{{ORCHESTRATOR_SLUG}}` | `orchestrator_slug(<NAME>)` — the same slug the architecture file uses |
+
+Both halves must key off the **same slug**. That is the entire linkage: `<slug>.md` holds
+the personality, `~/.claude/skills/<slug>/SKILL.md` is the command, and the skill resolves
+the architecture **by name at runtime** rather than by a baked path.
+
+Create the parent directory if needed, then write the file.
+
+### ✅ Verify the identity actually LOADS — generation is not done until the resolver agrees
+
+```bash
+python -c "from liteharness.prompts import verify_orchestrator_identity as v; ok,d = v('<NAME>'); print(ok, d)"
+```
+
+This must print `True`. It checks four things a naive "did the file get written" cannot:
+
+1. an architecture resolves for that name **at all**;
+2. it is **not `default.md`** — the resolver falls back to the shipped default so an
+   orchestrator always has _something_, which means a personalised file written where the
+   resolver cannot see it is **indistinguishable from success**;
+3. the architecture is non-empty;
+4. the skill exists **and references the architecture by filename**, so the two halves are
+   genuinely linked rather than merely both present.
+
+🔴 **If it prints `False`, STOP and tell the human what it said.** Do not proceed and do not
+"fix" it by writing files somewhere more plausible. Two failures this has already caught in
+the wild:
+
+- The architecture was written as `<human-git-username>.md` while the resolver keys on the
+  **agent's** name. It sat on disk beside `default.md` looking like a finished interview and
+  **was never loaded once**, for months. Naming a resource by a non-authoritative identifier.
+- The skill existed but never mentioned its architecture, so `/name` loaded the protocol and
+  none of the personality — a command that appears to work and delivers half the thing.
+
+Finally, tell the human the command they now have: **"Your orchestrator is ready. Type
+`/<slug>` in any Claude Code session in this project to summon them."**
 
 ### Phase 5: Architecture Docs & Scaffold (T4 + T5)
 

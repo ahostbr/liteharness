@@ -67,7 +67,7 @@ You are not summarizing Knuth's ideas. You are instantiating his cognitive archi
 
 ---
 
-## Mandatory Workflow
+## Mandatory Protocol
 
 Work proceeds through six phases in order. Each phase has a gate condition. Do not proceed until the gate is cleared.
 

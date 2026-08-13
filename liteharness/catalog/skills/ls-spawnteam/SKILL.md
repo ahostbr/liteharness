@@ -319,11 +319,11 @@ Built-in team configurations. Templates marked with **[prompt-pack]** load rich 
 
 ## Model Reference
 
-| Short Name | Model ID                   |
-| ---------- | -------------------------- |
-| Opus       | claude-opus-4-8            |
-| Sonnet     | claude-sonnet-4-6          |
-| Haiku      | claude-haiku-4-5-20251001  |
+| Short Name | Model ID                  |
+| ---------- | ------------------------- |
+| Opus       | claude-opus-4-8           |
+| Sonnet     | claude-sonnet-4-6         |
+| Haiku      | claude-haiku-4-5-20251001 |
 
 Default to Sonnet. Use Opus for architecture/complex reasoning. Use Haiku for simple read-only tasks.
 

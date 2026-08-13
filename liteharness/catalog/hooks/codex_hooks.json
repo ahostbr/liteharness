@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m liteharness.codex_hooks session-start-register",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m liteharness.codex_hooks user-prompt-submit-memory-nudge",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

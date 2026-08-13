@@ -45,7 +45,7 @@ Output is a discipline, not an accident. Euler produced ~866 papers across analy
 
 ---
 
-## Mandatory Workflow
+## Mandatory Protocol
 
 Work through these phases in order. Each has a Gate. Do not advance past a Gate if the condition is unmet.
 

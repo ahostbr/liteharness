@@ -28,16 +28,16 @@ python ${CLAUDE_SKILL_DIR}/video_lens.py <URL> -i 3 -p "Focus on text visible on
 
 ## Arguments
 
-| Flag             | Short | Default               | Description                   |
-| ---------------- | ----- | --------------------- | ----------------------------- |
-| `url`            | —     | required              | YouTube URL                   |
-| `--interval`     | `-i`  | `5`                   | Seconds between frames        |
-| `--backend`      | `-b`  | `lmstudio`            | `lmstudio` or `claude`        |
-| `--output`       | `-o`  | auto                  | Output JSON path              |
-| `--prompt`       | `-p`  | built-in              | Custom system prompt          |
-| `--extract-only` | —     | false                 | Skip captioning, just extract |
-| `--keep-frames`  | —     | false                 | Keep frame JPEGs after run    |
-| `--workdir`      | `-w`  | temp                  | Working directory             |
+| Flag             | Short | Default          | Description                   |
+| ---------------- | ----- | ---------------- | ----------------------------- |
+| `url`            | —     | required         | YouTube URL                   |
+| `--interval`     | `-i`  | `5`              | Seconds between frames        |
+| `--backend`      | `-b`  | `lmstudio`       | `lmstudio` or `claude`        |
+| `--output`       | `-o`  | auto             | Output JSON path              |
+| `--prompt`       | `-p`  | built-in         | Custom system prompt          |
+| `--extract-only` | —     | false            | Skip captioning, just extract |
+| `--keep-frames`  | —     | false            | Keep frame JPEGs after run    |
+| `--workdir`      | `-w`  | temp             | Working directory             |
 | `--api-url`      | —     | `localhost:1234` | LM Studio endpoint            |
 
 ## Backends
