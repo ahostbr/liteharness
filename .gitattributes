@@ -1,0 +1,34 @@
+# Pin line endings so a diff means something.
+#
+# WHY THIS FILE EXISTS (2026-08-12)
+# This repo was 18 files CRLF / 66 LF while its upstream sibling
+# (LiteSuite/packages/liteharness) was uniformly LF. A 3-way merge between the two
+# reported SIX modules as 100% conflict — every line "changed" — because the line
+# endings differed, not the code. Normalised, the real conflict surface was 22 hunks
+# in 4 files, and two of the six merged clean.
+#
+# That difference is not cosmetic. It is why a ~1,700-line divergence between two live
+# trees stayed invisible for ten weeks: nobody could read a diff that was always
+# entirely red. An unreadable diff is a diff nobody reads.
+#
+# A related trap already cost a session: a "337-byte repo-vs-cache delta" was chased as
+# drift when it was only CRLF.
+
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+
+# Windows-only launchers must keep CRLF or cmd.exe mis-parses them.
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+*.whl  binary
+*.png  binary
+*.jpg  binary
+*.db   binary
