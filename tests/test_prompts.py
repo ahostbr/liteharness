@@ -1,13 +1,12 @@
-"""
-Tests for cognitive-architecture resolution.
+"""Prompt-library resolution — the parts test_cognitive_default_fallback does not cover.
 
-The behaviour under test is a FALLBACK, which means the dangerous failure is a
-silent success: resolution always returns a usable path, so "it returned
-something" proves nothing about whether the agent got its own architecture. Every
-test here is therefore written around the DISTINCTION between a hit and a
-fallback, not around whether a path came back.
+That file covers slugging, the default fallback and the read/write round trip. This one
+covers the ROOT CHAIN and the diagnosis surface, which is where the 2026-08-12 tree merge
+actually went wrong: the code moved repos and silently lost a root, and every call still
+"worked" because it answered from a different tree.
 """
 
+import io
 import os
 from pathlib import Path
 
@@ -16,7 +15,7 @@ import pytest
 from liteharness import prompts
 
 
-def make_tree(root: Path, tier: str, stems: list[str]) -> Path:
+def make_tree(root: Path, tier: str = "orchestrator", stems=("default",)) -> Path:
     d = root / "cognitive-architectures" / tier
     d.mkdir(parents=True, exist_ok=True)
     for s in stems:
@@ -25,116 +24,132 @@ def make_tree(root: Path, tier: str, stems: list[str]) -> Path:
 
 
 @pytest.fixture
-def isolated(monkeypatch):
-    """
-    Point resolution at exactly one tree.
-
-    Without this the tests would read the developer's real trees and pass or fail
-    according to what happens to be on that machine — a suite that measures the
-    box instead of the code.
-    """
+def only(monkeypatch):
+    """Point resolution at exactly one tree, so a test measures the code and not the box."""
     def _use(root: Path):
-        monkeypatch.setenv("LITEHARNESS_PROMPTS_ROOT", str(root))
+        monkeypatch.setenv("LITEHARNESS_PROMPTS_DIR", str(root))
     return _use
 
 
-def test_resolves_the_personal_file_when_present(tmp_path, isolated):
-    make_tree(tmp_path, "orchestrator", ["default", "sentinel"])
-    isolated(tmp_path)
-    got = prompts.resolve_cognitive_file("Sentinel", "orchestrator")
-    assert got is not None and got.stem == "sentinel"
+class TestRootChain:
+    def test_env_override_wins_and_is_labelled(self, tmp_path, only):
+        make_tree(tmp_path)
+        only(tmp_path)
+        got, src = prompts.resolve_prompts_dir()
+        assert got == tmp_path
+        assert "env" in src
+
+    def test_a_non_directory_override_is_ignored_not_obeyed(self, tmp_path, only):
+        # An override pointing at nothing must fall through to the real chain rather
+        # than resolving to a path that does not exist - otherwise a typo in one env
+        # var silently blanks every architecture on the machine.
+        only(tmp_path / "does-not-exist")
+        got, src = prompts.resolve_prompts_dir()
+        assert got is None or got.is_dir()
+        assert "env" not in src or got is not None
+
+    def test_source_label_always_says_which_tree(self, tmp_path, only):
+        make_tree(tmp_path)
+        only(tmp_path)
+        _, src = prompts.resolve_prompts_dir()
+        # "which file did I get" is only half the question; "from which tree" is the
+        # half that explains why two machines disagree.
+        assert str(tmp_path) in src
 
 
-def test_falls_back_to_default_when_the_personal_file_is_absent(tmp_path, isolated):
-    make_tree(tmp_path, "orchestrator", ["default"])
-    isolated(tmp_path)
-    got = prompts.resolve_cognitive_file("Sentinel", "orchestrator")
-    assert got is not None and got.stem == "default"
+class TestSlugging:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("The Warden", "the-warden"),
+            ("SENTINEL", "sentinel"),
+            ("  Sentinel  ", "sentinel"),
+            ("Iron_Rod", "iron-rod"),
+            ("", "default"),
+        ],
+    )
+    def test_multi_word_names_slug_to_hyphens(self, raw, expected):
+        # THE REGRESSION THIS EXISTS FOR. A bare .lower() maps "The Warden" to
+        # "the warden.md", which never exists, so it falls through to the tier default
+        # - and a fallback that always succeeds is indistinguishable from a hit.
+        # Invisible for every single-word name, i.e. for "Sentinel", i.e. for the only
+        # name the author tested.
+        assert prompts.orchestrator_slug(raw) == expected
 
 
-def test_verify_reports_the_fallback_rather_than_hiding_it(tmp_path, isolated):
-    """
-    THE ASSERTION THIS MODULE EXISTS FOR.
+class TestFallbackIsVisible:
+    def test_falling_back_to_default_is_reported_not_hidden(self, tmp_path, only):
+        make_tree(tmp_path, stems=("default",))
+        only(tmp_path)
+        ok, detail = prompts.verify_orchestrator_identity("Warden")
+        assert ok is False
+        assert "default" in detail.lower()
 
-    A mislocated personal file is indistinguishable from success unless something
-    checks WHICH file came back. This is that something.
-    """
-    make_tree(tmp_path, "orchestrator", ["default"])
-    isolated(tmp_path)
-    v = prompts.verify_orchestrator_identity("Sentinel")
-    assert v["ok"] is False
-    assert v["resolved_stem"] == "default"
-    assert "sentinel" in v["problem"]
+    def test_a_present_architecture_without_a_skill_is_still_not_ok(self, tmp_path, only):
+        # Generation is not done when the FILES exist - it is done when the resolver
+        # returns them AND a command can invoke them. An architecture with no skill is
+        # a personality nobody can call.
+        make_tree(tmp_path, stems=("default", "warden"))
+        only(tmp_path)
+        ok, detail = prompts.verify_orchestrator_identity("Warden")
+        assert ok is False
+        assert "skill" in detail.lower()
 
-
-def test_verify_says_ok_when_the_personal_file_is_there(tmp_path, isolated):
-    # Directional control. Without it, a verify() hardwired to False would pass
-    # the test above and look like a working guard.
-    make_tree(tmp_path, "orchestrator", ["default", "sentinel"])
-    isolated(tmp_path)
-    v = prompts.verify_orchestrator_identity("Sentinel")
-    assert v["ok"] is True
-    assert v["resolved_stem"] == "sentinel"
-    assert "problem" not in v
-
-
-def test_does_not_resurrect_the_old_human_named_file(tmp_path, isolated):
-    """
-    The architecture was once generated as `ryan.md` — named after the human —
-    while resolution keys on the AGENT's name. Falling back to it would make
-    every caller "work" and permanently hide that the shipped tree is stale.
-    """
-    make_tree(tmp_path, "orchestrator", ["default", "ryan"])
-    isolated(tmp_path)
-    v = prompts.verify_orchestrator_identity("Sentinel")
-    assert v["ok"] is False
-    assert v["resolved_stem"] == "default"
+    def test_does_not_resurrect_the_human_named_file(self, tmp_path, only):
+        # The architecture was once generated as ryan.md - named after the HUMAN - while
+        # resolution keys on the AGENT. Falling back to it would make every caller work
+        # and permanently hide that the shipped tree is stale.
+        make_tree(tmp_path, stems=("default", "ryan"))
+        only(tmp_path)
+        got = prompts.resolve_cognitive_file("Sentinel", "orchestrator")
+        assert got is not None
+        assert got.stem == "default"
 
 
-def test_name_matching_is_case_insensitive(tmp_path, isolated):
-    make_tree(tmp_path, "orchestrator", ["sentinel"])
-    isolated(tmp_path)
-    assert prompts.resolve_cognitive_file("SENTINEL").stem == "sentinel"
-    assert prompts.resolve_cognitive_file("  Sentinel  ").stem == "sentinel"
+class TestDiagnose:
+    def test_diagnose_names_every_root_and_ends_in_a_verdict(self, tmp_path, only):
+        make_tree(tmp_path, stems=("default",))
+        only(tmp_path)
+        out = prompts.diagnose("Warden")
+        assert str(tmp_path) in out
+        assert "PROBLEM" in out or "OK" in out
+
+    def test_diagnose_reports_what_each_root_HOLDS(self, tmp_path, only):
+        # A single resolved path cannot reveal that two trees DISAGREE, and disagreeing
+        # trees were the actual defect: repo carried sentinel.md while the installed
+        # plugin still carried ryan.md, so the same call answered differently per machine.
+        make_tree(tmp_path, stems=("default", "ryan"))
+        only(tmp_path)
+        out = prompts.diagnose("Sentinel")
+        assert "holds:" in out
+        assert "ryan" in out
 
 
-def test_env_root_is_exclusive_not_merely_first(tmp_path, isolated):
-    """
-    An explicit root must WIN, not just sort first. If it merely sorted first,
-    a tree lacking the file would silently fall through to another one — so you
-    could never isolate a tree to ask what IT holds, and a check of the installed
-    plugin would quietly answer with the developer's repo. That exact mistake
-    produced a false 'ok=True' while this module was being built.
-    """
-    make_tree(tmp_path, "orchestrator", ["default"])
-    isolated(tmp_path)
-    roots = prompts.prompt_roots()
-    assert len(roots) == 1 and roots[0][0] == "env"
-    assert prompts.verify_orchestrator_identity("Sentinel")["ok"] is False
+class TestModeDetection:
+    def test_explicit_mode_env_beats_inference(self, monkeypatch):
+        monkeypatch.setenv("LITEHARNESS_MODE", "standalone")
+        monkeypatch.setenv("LITESUITE_PANE_ID", "canvas-pane-3")
+        # The /canvas/claude fallback spawn is KNOWN to omit pane envs, so an explicit
+        # override has to beat inference in both directions.
+        assert prompts.detect_mode() == "standalone"
+
+    def test_pane_env_implies_litesuite(self, monkeypatch):
+        monkeypatch.delenv("LITEHARNESS_MODE", raising=False)
+        monkeypatch.setenv("LITESUITE_PANE_ID", "canvas-pane-3")
+        assert prompts.detect_mode() == "litesuite"
+
+    def test_bare_cli_is_standalone(self, monkeypatch):
+        for v in ("LITEHARNESS_MODE", "LITESUITE_PANE_ID", "LITESUITE_BRIDGE_TOKEN",
+                  "LITESUITE_CANVAS_SESSION"):
+            monkeypatch.delenv(v, raising=False)
+        assert prompts.detect_mode() == "standalone"
 
 
-def test_plugin_cache_versions_sort_numerically(tmp_path, monkeypatch):
-    """
-    1.0.10 must beat 1.0.9. A lexical sort silently pins resolution to a stale
-    tree the moment a two-digit patch ships, and nothing would look wrong.
-    """
-    base = tmp_path / ".claude" / "plugins" / "cache" / "liteharness" / "liteharness"
-    for v in ("1.0.9", "1.0.10", "1.0.2"):
-        (base / v / "prompts").mkdir(parents=True)
-    monkeypatch.delenv("LITEHARNESS_PROMPTS_ROOT", raising=False)
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
-    ordered = [p.parent.name for p in prompts._plugin_cache_roots()]
-    assert ordered == ["1.0.10", "1.0.9", "1.0.2"]
-
-
-def test_returns_none_when_no_tree_exists_anywhere(tmp_path, isolated):
-    isolated(tmp_path / "nothing-here")
-    assert prompts.resolve_cognitive_file("Sentinel") is None
-
-
-def test_diagnose_names_every_root_and_the_verdict(tmp_path, isolated):
-    make_tree(tmp_path, "orchestrator", ["default"])
-    isolated(tmp_path)
-    out = prompts.diagnose("Sentinel")
-    assert "FALLBACK" in out
-    assert "default" in out
+class TestComposeNeverReturnsNothing:
+    def test_compose_returns_a_loud_diagnostic_rather_than_empty(self, tmp_path, only):
+        # A silently-undelivered preamble is an unconstrained agent: per-tier TOOL
+        # manifests were deleted as never-enforced theater, so this text is the ONLY
+        # thing constraining tier behaviour. Failure must be printable, never empty.
+        only(tmp_path / "nothing-here")
+        out = prompts.compose("worker", "standalone")
+        assert isinstance(out, str) and out.strip()

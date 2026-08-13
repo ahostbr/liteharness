@@ -45,6 +45,16 @@ def _bridge_request(method: str, path: str, body: dict | None = None) -> dict:
     import urllib.error
 
     token = os.environ.get("LITESUITE_BRIDGE_TOKEN", "")
+    if not token:
+        # Hand-opened sessions have no bridge env — same disk fallback the
+        # hook bridge uses, so canvas ops work from any terminal.
+        try:
+            from pathlib import Path as _Path
+            token = (_Path.home() / ".litesuite" / "bridge-token").read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError:
+            token = ""
     url = os.environ.get("LITESUITE_BRIDGE_URL", "http://127.0.0.1:7423")
 
     req = urllib.request.Request(
@@ -655,7 +665,103 @@ def cmd_list() -> None:
         print(f"{prefix}{ts} from {sender}: {body}")
 
 
+def cmd_inbox(count: int = 10, agent: str | None = None, all_agents: bool = False) -> None:
+    """Read-only inbox view: full bodies across new/cur/done, newest N, no claim/move.
+
+    Replaces the fleet's hand-rolled `ls -t ~/.liteharness/inbox/done | xargs cat`
+    one-liners (which miss new/ and cur/). Never mutates the maildir — the watcher
+    and `hooks check` own claiming.
+    """
+    me = agent or config.get_agent_id()
+    msgs = []
+    for directory in (inbox.INBOX_NEW, inbox.INBOX_CUR, inbox.INBOX_DONE):
+        if not directory.exists():
+            continue
+        for f in directory.iterdir():
+            if f.suffix != ".json":
+                continue
+            try:
+                msg = json.loads(f.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not all_agents:
+                if me not in (msg.get("to"), msg.get("from")) and msg.get("to") != "broadcast":
+                    continue
+            sort_key = msg.get("timestamp") or ""
+            if not sort_key:
+                try:
+                    sort_key = datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat()
+                except OSError:
+                    pass
+            msgs.append((sort_key, directory.name, msg))
+    msgs.sort(key=lambda t: t[0])
+    msgs = msgs[-count:]
+    if not msgs:
+        print("No messages." if all_agents else f"No messages involving {me}. Try --all.")
+        return
+    out = [f"{len(msgs)} message(s), oldest first (read-only view):"]
+    for ts, dirname, msg in msgs:
+        pr = "[!] " if msg.get("priority") == "urgent" else ""
+        thread = f" (thread {msg.get('thread_id')})" if msg.get("thread_id") else ""
+        out.append("")
+        out.append(f"--- {pr}{(msg.get('timestamp') or '')[:19]} [{dirname}] {msg.get('from', '?')} -> {msg.get('to', '?')}{thread}")
+        out.append(msg.get("body", ""))
+    text = "\n".join(out)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        # CP1252 console without PYTHONIOENCODING — never let a non-ASCII body crash a read
+        sys.stdout.buffer.write((text + "\n").encode("utf-8", "replace"))
+
+
 VALID_TIERS = ("orchestrator", "leader", "worker", "thinker", "reviewer")
+
+# Mirror cmd_discover's DISCOVER_STALE_SECONDS so name-takeover liveness uses the
+# same bar as the live-agent roll call (a holder past this with a dead pid is a ghost).
+_NAME_LIVE_STALE_SECONDS = 600
+
+
+def _agent_record_live(agent_id: str) -> bool:
+    """True if the agent's presence shows a fresh heartbeat AND an alive owning
+    session_pid. Mirrors cmd_discover._is_live so name-takeover never steals a name
+    from a genuinely live agent — only from a dead ghost squatting the registry."""
+    from .hooks import _pid_alive
+
+    path = config.get_root() / "agents" / f"{agent_id}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if data.get("exited_at"):
+        return False
+    try:
+        age = time.time() - datetime.fromisoformat(data.get("last_seen", "")).timestamp()
+    except (ValueError, TypeError):
+        return False
+    if age > _NAME_LIVE_STALE_SECONDS:
+        return False
+    session_pid = data.get("session_pid")
+    if not session_pid:  # orphaned watcher: no immutable owning session = not live
+        return False
+    return _pid_alive(session_pid)
+
+
+def _evict_agent_records(agent_id: str) -> str:
+    """Move a dead agent's presence + name-override into a timestamped backup dir so a
+    ghost stops squatting its name/registry slot. Recoverable, not destroyed. Returns
+    the backup dir name."""
+    root = config.get_root()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    backup = root / f".ghost_evicted_{stamp}"
+    backup.mkdir(parents=True, exist_ok=True)
+    for rel in (f"agents/{agent_id}.json", f"names/{agent_id}"):
+        src = root / rel
+        if src.exists():
+            try:
+                src.replace(backup / src.name)
+            except OSError:
+                pass
+    return backup.name
 
 
 def cmd_register(
@@ -671,6 +777,8 @@ def cmd_register(
     thread_id: str | None = None,
     workspace_id: str | None = None,
     project_id: str | None = None,
+    canvas_session: str | None = None,
+    takeover: bool = False,
 ) -> None:
     """Update an agent's presence file with correct CLI/model/name/tier/team and spatial info."""
     from . import naming
@@ -720,18 +828,40 @@ def cmd_register(
     if spatial:
         presence["spatial"] = spatial
 
+    # Canvas pane mapping — top-level field (jsonl-monitor and the War Room
+    # read presence.canvas_session_id to resolve click-to-terminal). Without
+    # this, canvas-spawned agents register a SECOND presence with no pane
+    # link while the pre-created canvas-<sid> file goes stale (identity split).
+    if canvas_session:
+        presence["canvas_session_id"] = canvas_session
+        presence.setdefault("spawn_mode", "canvas")
+
     # Name handling: override > existing override > generated
     if name:
         taken_by = naming.is_name_taken(name, exclude_id=agent_id)
+        if taken_by and takeover and not _agent_record_live(taken_by):
+            backup = _evict_agent_records(taken_by)
+            print(f"Takeover: name '{name}' was held by dead ghost {taken_by[:8]} — evicted to {backup}/. Claiming it.")
+            taken_by = None
         if taken_by:
-            print(f"Warning: name '{name}' is already used by {taken_by[:8]}. Picking a different name.")
+            if takeover:
+                print(f"Warning: name '{name}' is held by LIVE agent {taken_by[:8]} — refusing takeover. Picking a different name.")
+            else:
+                print(f"Warning: name '{name}' is already used by {taken_by[:8]}. Picking a different name.")
             name = None
         else:
             naming.set_override(agent_id, name)
 
     resolved_name = naming.get_name(agent_id)
     presence["name"] = resolved_name
-    presence["last_seen"] = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    presence["last_seen"] = now_iso
+    # Re-registering declares the agent LIVE: clear any recap wind-down flag
+    # (a preserved recap_at kept re-registered agents in the 300s fast-purge
+    # tier) and anchor recap detection so a stale transcript marker can't
+    # re-flag this agent.
+    presence.pop("recap_at", None)
+    presence["registered_at"] = now_iso
 
     path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
     team_str = f", team={presence['team']}" if presence.get("team") else ""
@@ -739,11 +869,36 @@ def cmd_register(
     print(f"Registered agent {agent_id}: cli={presence.get('cli', '?')}, model={presence.get('model', '?')}, tier={presence.get('tier', 'worker')}, name={resolved_name}{team_str}{spatial_str}")
 
 
+# Bump when the `patterns` FTS5 column set changes. The table is a pure cache
+# rebuilt from patterns.jsonl, so a mismatch is resolved by dropping it — never
+# by migrating. v2 added `supersedes` and started populating `id` from task_id.
+_PATTERN_DB_SCHEMA = "2"
+
+
 def _pattern_db_open(db_path: Path):
     """Open (or create) the FTS5-backed patterns SQLite DB. Returns a connection."""
     import sqlite3
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS patterns_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+
+    row = conn.execute(
+        "SELECT value FROM patterns_meta WHERE key='schema_version'"
+    ).fetchone()
+    if (row[0] if row else None) != _PATTERN_DB_SCHEMA:
+        # Derived cache — drop and let _pattern_db_sync rebuild from the JSONL.
+        conn.execute("DROP TABLE IF EXISTS patterns")
+        conn.execute("DELETE FROM patterns_meta WHERE key IN ('jsonl_mtime','jsonl_size')")
+        conn.execute(
+            "INSERT OR REPLACE INTO patterns_meta(key, value) VALUES('schema_version', ?)",
+            (_PATTERN_DB_SCHEMA,),
+        )
+
     conn.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS patterns USING fts5(
             description,
@@ -753,13 +908,8 @@ def _pattern_db_open(db_path: Path):
             timestamp UNINDEXED,
             outcome UNINDEXED,
             complexity UNINDEXED,
+            supersedes UNINDEXED,
             tokenize="unicode61"
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS patterns_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
         )
     """)
     conn.commit()
@@ -797,17 +947,21 @@ def _pattern_db_sync(conn, patterns_path: Path) -> None:
 
     conn.execute("DELETE FROM patterns")
     conn.executemany(
-        "INSERT INTO patterns(description, reason, lesson, id, timestamp, outcome, complexity) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO patterns(description, reason, lesson, id, timestamp, outcome, complexity, supersedes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 e.get("description", ""),
                 e.get("reason", ""),
                 e.get("lesson", ""),
-                e.get("id", ""),
+                # PatternEntry's identifier is `task_id`; the legacy `id` read here
+                # never existed in the JSONL, so this column was empty on every row
+                # and callers had no handle to name a pattern by.
+                e.get("task_id") or e.get("id", ""),
                 e.get("timestamp", ""),
                 e.get("outcome", ""),
                 e.get("complexity", ""),
+                json.dumps(e.get("supersedes") or []),
             )
             for e in entries
         ],
@@ -838,37 +992,78 @@ def _fts5_phrase_query(raw: str) -> str:
     return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
+def _superseded_task_ids(conn) -> set[str]:
+    """task_ids retired by some later pattern's `supersedes` array."""
+    retired: set[str] = set()
+    try:
+        rows = conn.execute(
+            "SELECT supersedes FROM patterns WHERE supersedes NOT IN ('', '[]')"
+        ).fetchall()
+    except Exception:
+        return retired  # pre-v2 cache — nothing is retired
+    for (raw,) in rows:
+        try:
+            for tid in json.loads(raw) or []:
+                if tid:
+                    retired.add(str(tid))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return retired
+
+
 def _pattern_fts5_query(conn, query: str | None, top: int) -> list[dict]:
-    """Run FTS5 query (or full scan when query is None). Returns dicts sorted by recency."""
+    """Run FTS5 query (or full scan when query is None). Returns dicts sorted by recency.
+
+    Patterns named in another pattern's `supersedes` array are dropped: a retired
+    record and the correction that replaced it describe the same subject in the
+    same words, so returning both hands the caller a contradiction it cannot rank.
+    """
+    cols = "description, reason, lesson, id, timestamp, outcome, complexity, supersedes"
+    retired = _superseded_task_ids(conn)
+    # Over-fetch so dropping retired rows still fills `top`.
+    fetch = top * 4 if retired else top
+
     if query:
         safe_q = _fts5_phrase_query(query)
         if not safe_q:
             return []
         rows = conn.execute(
-            "SELECT description, reason, lesson, id, timestamp, outcome, complexity "
-            "FROM patterns WHERE patterns MATCH ? "
+            f"SELECT {cols} FROM patterns WHERE patterns MATCH ? "
             "ORDER BY timestamp DESC LIMIT ?",
-            (safe_q, top),
+            (safe_q, fetch),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT description, reason, lesson, id, timestamp, outcome, complexity "
-            "FROM patterns ORDER BY timestamp DESC LIMIT ?",
-            (top,),
+            f"SELECT {cols} FROM patterns ORDER BY timestamp DESC LIMIT ?",
+            (fetch,),
         ).fetchall()
 
-    return [
-        {
-            "description": r[0],
-            "reason": r[1],
-            "lesson": r[2],
-            "id": r[3],
-            "timestamp": r[4],
-            "outcome": r[5],
-            "complexity": r[6],
-        }
-        for r in rows
-    ]
+    out: list[dict] = []
+    for r in rows:
+        if r[3] and r[3] in retired:
+            continue
+        try:
+            supersedes = json.loads(r[7]) or []
+        except (json.JSONDecodeError, TypeError):
+            supersedes = []
+        out.append(
+            {
+                "description": r[0],
+                "reason": r[1],
+                "lesson": r[2],
+                # `task_id` is the canonical name — pass it to record's
+                # `supersedes` to retire this pattern. `id` kept for back-compat.
+                "task_id": r[3],
+                "id": r[3],
+                "timestamp": r[4],
+                "outcome": r[5],
+                "complexity": r[6],
+                "supersedes": supersedes,
+            }
+        )
+        if len(out) >= top:
+            break
+    return out
 
 
 def _print_patterns(entries: list[dict], fmt: str) -> None:
@@ -884,10 +1079,14 @@ def _print_patterns(entries: list[dict], fmt: str) -> None:
         ts = e.get("timestamp", "")[:19]
         complexity = e.get("complexity", "?")
         marker = "+" if outcome == "success" else "-" if outcome == "failure" else "?"
+        # task_id is the handle for `record-pattern --supersedes` — show it, or
+        # the caller can name what it read but not what it needs to retire.
+        tid = e.get("task_id") or e.get("id") or ""
+        head = f"  [{marker}] {ts} ({complexity})" + (f" <{tid}>" if tid else "")
         try:
-            print(f"  [{marker}] {ts} ({complexity}) {desc}")
+            print(f"{head} {desc}")
         except UnicodeEncodeError:
-            print(f"  [{marker}] {ts} ({complexity}) {desc.encode('ascii', 'replace').decode()}")
+            print(f"{head} {desc.encode('ascii', 'replace').decode()}")
         if e.get("reason"):
             print(f"       Reason: {e['reason']}")
         if e.get("lesson"):
@@ -956,6 +1155,17 @@ def cmd_query_patterns(
             or lower_q in e.get("reason", "").lower()
             or lower_q in e.get("lesson", "").lower()
         ]
+
+    # Same supersession rule as the FTS5 path — the fallback must not hand back
+    # a contradiction the primary path would have filtered.
+    retired = {
+        str(tid)
+        for e in entries
+        for tid in (e.get("supersedes") or [])
+        if tid
+    }
+    if retired:
+        entries = [e for e in entries if e.get("task_id") not in retired]
 
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
     _print_patterns(entries[:top], fmt)
@@ -1030,8 +1240,15 @@ def cmd_record_pattern(
     agent_id: str | None = None,
     task_desc: str | None = None,
     project: str | None = None,
+    supersedes: list[str] | None = None,
 ) -> None:
-    """Record a pattern to .liteharness/patterns.jsonl in the current project."""
+    """Record a pattern to .liteharness/patterns.jsonl in the current project.
+
+    ``supersedes`` names task_ids this record retires. Supersession is append-only
+    — the retired entries are never edited, retrieval just stops returning them.
+    It has to be supplied here, at record time: which fact replaces which is only
+    knowable while both are in the recording agent's context.
+    """
     import subprocess
 
     project_root = project or os.getcwd()
@@ -1073,6 +1290,8 @@ def cmd_record_pattern(
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+    if supersedes:
+        entry["supersedes"] = supersedes
     if outcome in ("failure", "stuck"):
         entry["reason"] = f"Outcome was {outcome}"
     if git_summary:
@@ -1095,19 +1314,25 @@ BOOTSTRAP_HARNESS_CONTENT = """\
 
 This project uses [LiteHarness](https://litesuite.dev) — a five-tier AI agent orchestration system.
 
+`liteharness bootstrap` creates the `.liteharness/` scaffold and an empty `patterns.jsonl`.
+Config and prompt files are optional and are absent on a fresh install — treat a missing
+one as "defaults apply", never as an error, and never block on it.
+
 ## Quick Start
 
-- **Config:** `.liteharness/config.yaml`
-- **Patterns:** `.liteharness/patterns.jsonl`
-- **Tools:** `lst run <tool> action=<action>` (CLI) or MCP tool calls (inside LiteSuite)
+- **Patterns:** `.liteharness/patterns.jsonl` — created by bootstrap
+- **Config:** `.liteharness/config.yaml` — *if present*; absence means defaults
+- **Tools:** `lst run <tool> action=<action>` (CLI) or MCP tool calls (inside LiteSuite).
+  Run `lst run help` to enumerate — a hardcoded list goes stale and then misinforms.
 - **Lifecycle:** `liteharness spawn/discover/send-input/read-output` (agent process management)
 
 ## Session Start
 
-1. Read `.liteharness/config.yaml`
-2. Run `lst run environment` for project context
-3. Run `lst run pattern action=query query="<task>"` for relevant history
-4. Use `liteharness spawn` to create workers, `lst run tasks` to track status
+1. Run `lst run environment` for project context — needs no files, always works
+2. Run `lst run pattern action=query query="<task>"` for relevant history
+3. Read `.liteharness/config.yaml` if it exists
+4. Follow the tier the harness assigned you — **do not assume you are the orchestrator**;
+   spawning, merging and dispatching are orchestrator/leader actions
 """
 
 
@@ -1238,11 +1463,23 @@ def cmd_bootstrap(project_path: str) -> None:
     print("=" * 50)
 
 
+# Short aliases → current model IDs. Full IDs are always accepted verbatim
+# (unknown aliases pass straight through to `claude --model`), so this table is a
+# convenience layer, not a gate. Keep it current with the shipping fleet — the
+# previous table silently pinned Opus 4.6 / Sonnet 4.6 long after 4.8 / Sonnet 5.
 MODEL_ALIASES = {
-    "opus": "claude-opus-4-8[1m]",
-    "opus-1m": "claude-opus-4-8[1m]",
-    "opus-200k": "claude-opus-4-8",
-    "sonnet": "claude-sonnet-4-6",
+    # "opus" tracks the CURRENT Opus generation, so spawning with --model opus
+    # follows the frontier instead of pinning a superseded release.
+    "opus": "claude-opus-5[1m]",
+    "opus-1m": "claude-opus-5[1m]",
+    "opus-200k": "claude-opus-5",
+    "opus-5": "claude-opus-5[1m]",
+    "opus-4.8": "claude-opus-4-8[1m]",
+    "opus-4.8-200k": "claude-opus-4-8",
+    "fable": "claude-fable-5",
+    "sonnet": "claude-sonnet-5",
+    "sonnet-5": "claude-sonnet-5",
+    "sonnet-4.6": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5-20251001",
 }
 
@@ -1267,8 +1504,14 @@ def _build_claude_cmd(
     bootstrap += (
         ". 3) Start your inbox monitor: use the Monitor tool with command "
         "'python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>'. "
-        "4) Pick a unique name for yourself (not Claude/Assistant) and use it when registering. "
     )
+    # Only invite self-naming when the spawner did NOT assign one — the old
+    # unconditional "pick a unique name" contradicted --name and agents
+    # registered under self-chosen names, orphaning the assigned identity.
+    if name:
+        bootstrap += f'4) Register with EXACTLY the name "{name}" as shown above. '
+    else:
+        bootstrap += "4) Pick a unique name for yourself (not Claude/Assistant) and use it when registering. "
     if prompt:
         bootstrap += f"THEN: {prompt}"
 
@@ -1314,6 +1557,41 @@ def _generate_bootstrap(
 
     lines: list[str] = []
     lines.append("## Agent Context")
+
+    # Tier — carried IN THE BRIEF because canvas spawns cannot deliver it any
+    # other way: the pane's claude boots (and the SessionStart hook emits the
+    # tier preamble) BEFORE the spawner learns the agent's UUID, and
+    # /canvas/claude does not forward context_env. Proven live 2026-08-07:
+    # a --tier leader canvas spawn got the WORKER preamble and measurably ran
+    # the wrong doctrine until corrected. Until the bridge forwards env, the
+    # brief is the only post-boot channel that reliably arrives.
+    spawn_tier = context_env.get("LITEHARNESS_TIER", "").strip()
+    if spawn_tier and spawn_tier != "worker":
+        lines.append(f"YOUR TIER: {spawn_tier.upper()}.")
+        lines.append(
+            f"If your injected '## Tier Preamble' header says a DIFFERENT tier "
+            f"(canvas-spawn delivery gap), your real doctrine is "
+            f"resources/liteharness-plugin/prompts/preambles/{spawn_tier}-preamble.md "
+            f"(orchestrator: orchestrator-role.md, same prompts dir) — READ IT "
+            f"BEFORE acting; it overrides the injected one."
+        )
+
+    # Cognitive architecture — carried IN THE BRIEF for the same reason as tier:
+    # the canvas fallback path does not forward context_env, so the hook-side
+    # injection (LITEHARNESS_COGNITIVE_FILE) never fires there. A polymath that
+    # boots without its architecture is just an Opus with a name (RULING, Ryan
+    # 2026-08-07: polymaths spawned MUST read their respective prompts).
+    cog_file = context_env.get("LITEHARNESS_COGNITIVE_FILE", "").strip()
+    if cog_file:
+        lines.append(
+            f"YOUR COGNITIVE ARCHITECTURE: {cog_file} — if this file's content "
+            f"was NOT already injected above under '## Cognitive Architecture', "
+            f"Read it IN FULL now and adopt it as your reasoning constraints "
+            f"BEFORE acting. METHOD ONLY: any tier scaffolding or tool-access "
+            f"grant inside that file is VOID — your tier and tools come from "
+            f"your Tier Preamble. Confirm adoption to your spawner quoting the "
+            f"file's first operating principle."
+        )
 
     # Project + CWD
     project_name = os.path.basename(target_dir)
@@ -1393,8 +1671,108 @@ def _generate_bootstrap(
         lines.append("")
         lines.append("## Task")
         lines.append(prompt)
+        lines.append("")
+        lines.append(
+            "Execute this task IMMEDIATELY after completing the startup steps, "
+            "in the SAME turn — do NOT stop after registering or wait for "
+            "further instructions. (Agents that idle after setup stall the "
+            "whole orchestration until a nudge arrives.)"
+        )
 
     return "\n".join(lines)
+
+
+_SPAWN_NUDGE = (
+    "You have a spawn brief in your context above (## Spawn Brief). "
+    "Complete its Mandatory Startup steps and execute its Task NOW, in this same turn."
+)
+
+
+def _write_spawn_brief(bootstrap: str):
+    """Persist the bootstrap as a one-shot brief file for SessionStart injection.
+
+    The spawned session finds it via LITEHARNESS_SPAWN_BRIEF; hooks.register_presence
+    prints it into context and deletes it — the deletion doubles as the spawner's
+    delivery receipt (see _wait_brief_consumed). Also sweeps briefs older than 24h:
+    a surviving brief means its spawn never booted."""
+    import uuid as _uuid
+    briefs_dir = config.get_root() / "briefs"
+    briefs_dir.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for old in briefs_dir.glob("*.md"):
+        try:
+            if now - old.stat().st_mtime > 86400:
+                old.unlink()
+        except OSError:
+            pass
+    path = briefs_dir / f"{_uuid.uuid4().hex}.md"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(bootstrap.encode("utf-8"))
+    os.replace(tmp, path)
+    return path
+
+
+def _wait_brief_consumed(brief_path, timeout: float) -> bool:
+    """True once the SessionStart hook has injected + deleted the brief."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not brief_path.exists():
+            return True
+        time.sleep(1.0)
+    return not brief_path.exists()
+
+
+def _deliver_prompt(write_fn, read_fn, brief_path, nudge: str, fallback: str, boot_timeout: float) -> str:
+    """Wake a freshly spawned session and confirm its first turn actually started.
+
+    The old design typed the full multi-line bootstrap into the TUI blind after
+    sleep(8) — racing the TUI's raw-mode init and hook/notification-driven turn
+    starts, and losing the ENTIRE prompt (two clean confirmations 2026-08-06).
+    Now:
+      1. Wait for the SessionStart hook to consume the brief file — guaranteed
+         context injection; ANY subsequent wake-up carries the brief with it.
+      2. Type a one-line nudge (retry-safe, unlike an 8KB multi-line brief).
+      3. Confirm a turn started ("esc to interrupt" in the terminal tail);
+         retype up to 3 times.
+      4. Brief never consumed (env not forwarded / stale hooks) → fall back to
+         typing the full bootstrap, same verify loop.
+
+    Returns a human-readable status for the spawn report — measured, not assumed.
+    """
+    if _wait_brief_consumed(brief_path, boot_timeout):
+        payload, label = nudge, "nudge (brief injected via SessionStart)"
+    else:
+        payload, label = fallback, "full bootstrap typed (brief NOT consumed — bridge env not forwarded?)"
+    import re as _re
+
+    def _turn_active(tail: str) -> bool:
+        # The TUI's busy render varies by version/state: some builds show
+        # "esc to interrupt", current ones show a spinner line like
+        # "✻ Elucidating… (27s · ↓ 1.8k tokens)" (verb is randomized — match
+        # the stable timer/token grammar, not the word).
+        low = tail.lower()
+        if "esc to interrupt" in low or "· ↓ " in tail:
+            return True
+        return bool(_re.search(r"\(\d+s ·", tail))
+
+    for attempt in range(1, 4):
+        try:
+            write_fn(payload)
+        except Exception as exc:
+            return f"FAILED to write {label}: {exc}"
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                tail = read_fn()
+            except Exception:
+                tail = ""
+            if _turn_active(tail):
+                return f"{label}; turn confirmed on attempt {attempt}"
+            time.sleep(1.0)
+    return (
+        f"UNVERIFIED — {label} typed 3x, no turn observed. "
+        f'Wake it manually: liteharness send-input <agent-id> "go"'
+    )
 
 
 def cmd_spawn(
@@ -1413,9 +1791,18 @@ def cmd_spawn(
     project_id: str | None = None,
     tier: str | None = None,
     team: str | None = None,
+    split_mode: bool = False,
+    split_pane: str | None = None,
+    # "vertical" = vertical divider = panes side-by-side, terminals stay TALL.
+    # "horizontal" stacks flat bands where leaf chrome eats the height
+    # (RULING, Ryan 2026-08-07: fleet splits must form a grid, columns first).
+    split_direction: str = "vertical",
+    cognitive: str | None = None,
 ) -> None:
     """Spawn a new Claude Code session.
 
+    --split: spawn ALONGSIDE — split a canvas pane (default: the caller's own)
+             and boot the agent visibly in the new split
     --pty: spawn via ConPTY daemon (enables send-input/read-output control)
     default: spawn via Windows Terminal (visible tab, no stdin control)
     """
@@ -1431,27 +1818,290 @@ def cmd_spawn(
     context_env: dict[str, str] = {}
     resolved_thread = thread_id or os.environ.get("LITEHARNESS_THREAD_ID", "")
     resolved_workspace = workspace_id or os.environ.get("LITEHARNESS_WORKSPACE_ID", "")
-    resolved_project = project_id or os.environ.get("LITEHARNESS_PROJECT_ID", "")
+    # LITESUITE_PROJECT_ID — canonical name per the spatial plan; matches the
+    # TS write side and hooks.py's presence reader (drift fixed 2026-08-06).
+    resolved_project = project_id or os.environ.get("LITESUITE_PROJECT_ID", "")
     resolved_tier = tier or "worker"
     if resolved_thread:
         context_env["LITEHARNESS_THREAD_ID"] = resolved_thread
     if resolved_workspace:
         context_env["LITEHARNESS_WORKSPACE_ID"] = resolved_workspace
     if resolved_project:
-        context_env["LITEHARNESS_PROJECT_ID"] = resolved_project
+        context_env["LITESUITE_PROJECT_ID"] = resolved_project
     context_env["LITEHARNESS_TIER"] = resolved_tier
     if team:
         context_env["LITEHARNESS_TEAM"] = team
 
+    # Who spawned this agent. Without it a worker has no way to find its leader —
+    # it can only guess "the orchestrator", which is wrong in any fleet more than
+    # one tier deep. Prefer config.get_agent_id(): LITEHARNESS_AGENT_ID is unset in
+    # a hand-opened session (the same gap that silently defaults tier to "worker"),
+    # so relying on the env alone would drop the link for every top-level spawn.
+    resolved_parent = os.environ.get("LITEHARNESS_AGENT_ID", "").strip() or (config.get_agent_id() or "")
+    if resolved_parent:
+        context_env["LITEHARNESS_SPAWNED_BY"] = resolved_parent
+
+    # `--name` used to reach the agent only as an instruction inside the typed
+    # bootstrap ("register with --name X") — which vanished whenever the
+    # bootstrap did (3 confirmations, 2026-08-06). The SessionStart hook honors
+    # this env at FIRST registration instead: naming overrides are keyed by the
+    # session UUID, which only the hook ever learns.
+    if name:
+        context_env["LITEHARNESS_REQUESTED_NAME"] = name
+
+    # Cognitive architecture — MECHANICAL delivery (RULING, Ryan 2026-08-07:
+    # "the orch flow is broken without them getting their correct prompts").
+    # Discipline-based delivery ("tell the agent to read its file") failed
+    # silently the same day the brief-below-the-fold bug did; a polymath spawn
+    # now resolves its architecture file HERE and the SessionStart hook injects
+    # the content. --cognitive overrides; otherwise --name is tried against the
+    # library, so `--name Linus` alone is enough. A plain fleet name resolving
+    # to nothing is the normal case, not an error.
+    try:
+        from . import prompts as _prompts_mod
+        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", resolved_tier)
+        if _cog is not None:
+            context_env["LITEHARNESS_COGNITIVE_FILE"] = str(_cog)
+        elif cognitive:
+            print(f"WARNING: --cognitive '{cognitive}' matched no file in the "
+                  f"cognitive-architectures library — agent boots WITHOUT an "
+                  f"architecture. Check the name against the library tree.")
+    except Exception as _cog_exc:  # noqa: BLE001 — never let resolution kill a spawn
+        if cognitive:
+            print(f"WARNING: cognitive architecture resolution failed ({_cog_exc!r}).")
+
     # Inside LiteSuite (Electron): route through canvas panel IPC when available
-    spawn_mode = "canvas" if is_inside_litesuite() and not pty_mode else ("pty" if pty_mode else "terminal")
+    if split_mode:
+        spawn_mode = "split"
+    else:
+        spawn_mode = "canvas" if is_inside_litesuite() and not pty_mode else ("pty" if pty_mode else "terminal")
+
+    # Tell the spawned agent its TRUE transport. The hook used to infer
+    # spawn_mode from an inherited LITESUITE_BRIDGE_TOKEN — which the pty
+    # daemon leaks from whichever agent started it, so daemon-spawned agents
+    # tagged themselves "canvas" with no canvas session to attach to (the
+    # bug-7 half-state, orch E2E 2026-08-06). Explicit beats inherited.
+    context_env["LITEHARNESS_SPAWN_MODE"] = spawn_mode
+
+    if spawn_mode == "split":
+        # Spawn ALONGSIDE: split an existing canvas pane and boot the agent
+        # visibly in the new split — the multiplexer pattern (Ryan,
+        # 2026-08-06: "the whole point of the multiplexer is for the agents to
+        # spawn alongside each other, in split panes"). Headless PTY is for
+        # background work; when a human is watching, the fleet works on screen.
+        my_id = os.environ.get("LITEHARNESS_AGENT_ID", "").strip() or (config.get_agent_id() or "")
+        t0 = time.time()
+        agents_dir = config.get_root() / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        known = {p.stem for p in agents_dir.glob("*.json")}
+
+        launch_parts = ["claude"]
+        if resolved_model:
+            launch_parts.extend(["--model", resolved_model])
+        launch_parts.extend(["--permission-mode", permission_mode or "bypassPermissions"])
+        if additional_args:
+            launch_parts.append(additional_args)
+        launch_cmd = " ".join(launch_parts)
+        if cwd:
+            safe_dir = target_dir.replace("'", "''")
+            launch_cmd = f"Set-Location -LiteralPath '{safe_dir}'; {launch_cmd}"
+
+        split_res = _bridge_request("POST", "/canvas/split", {
+            "paneId": split_pane or "self",
+            "agentId": my_id,
+            "direction": split_direction,
+        })
+        new_session = split_res.get("newSessionId")
+        mode_label = "split pane"
+        brief_via_env = False
+        spawned_leaf_id = None
+        actual_spawn_mode = "split"
+        if new_session:
+            # ── Env rides the TYPED COMMAND — the only delivery that exists here.
+            # A split leaf is a live PowerShell; /pty/write types into it, so
+            # `$env:` assignments evaluated by that shell are inherited by the
+            # claude process. Nothing else delivers env on this path (proven
+            # 2026-08-07: a --tier leader spawn booted with the WORKER preamble
+            # because the tier existed nowhere the SessionStart hook could see).
+            # This closes tier/name/mode/brief delivery for splits with NO app
+            # rebuild. NOTE: this is /pty/write into node-pty stdin — not the
+            # pccontrol paste path that pre-expands $env: before it lands.
+            env_delivery = dict(context_env)
+            env_delivery["LITESUITE_CANVAS_SESSION"] = str(new_session)
+            new_leaf = split_res.get("newLeafId")
+            if new_leaf:
+                env_delivery["LITESUITE_LEAF_ID"] = str(new_leaf)
+            if split_pane and not str(split_pane).startswith("self"):
+                # Only when the caller named the panel do we KNOW the pane id —
+                # the split response does not echo the resolved alias back.
+                env_delivery["LITESUITE_PANE_ID"] = str(split_pane)
+            # Brief travels as a FILE + env pointer so the SessionStart hook
+            # injects it into context (the guaranteed-delivery channel) instead
+            # of racing the TUI via a second typed message.
+            if prompt:
+                bootstrap = _generate_bootstrap(resolved_model, None, prompt, target_dir, env_delivery)
+                if name:
+                    bootstrap += (
+                        f"\nNOTE: your name is already registered as {name} — "
+                        f"do NOT pass --name when registering."
+                    )
+                brief_path = _write_spawn_brief(bootstrap)
+                env_delivery["LITEHARNESS_SPAWN_BRIEF"] = str(brief_path)
+                brief_via_env = True
+            spawned_leaf_id = new_leaf
+            env_sets = "; ".join(
+                f"$env:{k}='{str(v).replace(chr(39), chr(39) * 2)}'"
+                for k, v in env_delivery.items()
+                if v and (k.startswith("LITEHARNESS_") or k.startswith("LITESUITE_"))
+            )
+            # Env hygiene for the agent process: pane shells inherit the APP's
+            # environment, and an app launched from an agent tool shell carries
+            # NO_COLOR=1 (Claude Code sets it in its tool shells) — which turned
+            # every fleet terminal monochrome on 2026-08-07. Clear it in the
+            # typed launch so the agent renders color regardless of how the
+            # host app was started; COLORTERM advertises what xterm.js truly is.
+            env_hygiene = (
+                "Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue; "
+                "$env:COLORTERM='truecolor'"
+            )
+            env_sets = f"{env_hygiene}; {env_sets}" if env_sets else env_hygiene
+            if env_sets:
+                launch_cmd = f"{env_sets}; {launch_cmd}"
+            # Let the fresh shell finish booting before typing — a command
+            # written into a pwsh that has not printed its prompt yet is lost.
+            time.sleep(1.5)
+            w = _bridge_request("POST", "/pty/write", {
+                "session_id": new_session,
+                "data": launch_cmd + "\r",
+            })
+            if not w.get("ok"):
+                print(f"Error: could not launch claude in the split — {w.get('error', 'write failed')}")
+                sys.exit(1)
+        else:
+            # Fallback: a fresh visible claude pane (auto-focused) — still on
+            # screen alongside, just not a split of the caller's pane.
+            print(f"  Split unavailable ({split_res.get('error', 'no result')}) — falling back to /canvas/claude")
+            claude_res = _bridge_request("POST", "/canvas/claude", {
+                "cwd": target_dir,
+                **({"model": resolved_model} if resolved_model else {}),
+            })
+            new_session = claude_res.get("session_id")
+            mode_label = "canvas pane (split fallback)"
+            actual_spawn_mode = "canvas"
+            if not new_session:
+                print(f"Error: split spawn failed — {claude_res.get('error', claude_res)}")
+                sys.exit(1)
+
+        print(f"Spawned Claude session ({mode_label}, visible):")
+        print(f"  Canvas session: {new_session}")
+        print(f"  Directory: {target_dir}")
+
+        # The agent registers itself via hooks; only then do we know its UUID.
+        new_uuid = None
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            for p in agents_dir.glob("*.json"):
+                if p.stem in known:
+                    continue
+                if p.stat().st_mtime >= t0 - 1:
+                    new_uuid = p.stem
+                    break
+            if new_uuid:
+                break
+            time.sleep(2)
+
+        if not new_uuid:
+            print(
+                "  Registration: NOT DETECTED within 90s — deliver the brief "
+                "manually via inbox once the agent appears in discover"
+            )
+            return
+
+        print(f"  Agent ID: {new_uuid}")
+        from . import naming
+        if name and not naming.get_override(new_uuid) and not naming.is_name_taken(name, exclude_id=new_uuid):
+            naming.set_override(new_uuid, name)
+        ppath = agents_dir / f"{new_uuid}.json"
+        try:
+            pdata = json.loads(ppath.read_text(encoding="utf-8"))
+            if name:
+                pdata["name"] = naming.get_name(new_uuid)
+            if my_id and not pdata.get("spawned_by"):
+                pdata["spawned_by"] = my_id
+            if resolved_tier and resolved_tier != "worker":
+                pdata["tier"] = resolved_tier
+            pdata["spawn_mode"] = actual_spawn_mode
+            pdata["canvas_session_id"] = new_session
+            # Spatial identity: presence.pane_id is what the bridge's self-alias
+            # resolver reads — writing it here means agents spawned INTO the
+            # panel can themselves split it via paneId "self" (the multiplexer
+            # compounds instead of dead-ending at one generation).
+            if split_pane and not str(split_pane).startswith("self") and not pdata.get("pane_id"):
+                pdata["pane_id"] = str(split_pane)
+            if spawned_leaf_id and not pdata.get("leaf_id"):
+                pdata["leaf_id"] = str(spawned_leaf_id)
+            config.atomic_write_json(ppath, pdata)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+        if brief_via_env:
+            # Brief rode LITEHARNESS_SPAWN_BRIEF (file + env in the typed launch).
+            # Print-then-delete in the hook doubles as a delivery RECEIPT: the
+            # file being GONE proves the hook read it; still-present means the
+            # injection never ran (3/3 idle boots shipped under an unverified
+            # "delivered" claim on 2026-08-07 — never assert what you can check).
+            if brief_path is not None and Path(brief_path).exists():
+                print(
+                    "  Brief: ⚠ NOT CONSUMED — the SessionStart hook never read "
+                    f"{brief_path}; re-deliver via inbox: python -m liteharness.cli "
+                    f'send {new_uuid} "<brief>" --from {my_id or "<your-id>"}'
+                )
+            else:
+                print("  Brief: CONSUMED (SessionStart receipt — file unlinked by the hook)")
+        else:
+            # Brief via INBOX — the notification-carries-the-work channel (the
+            # agent's watcher auto-starts; proven reliable 2026-08-06). Typed
+            # delivery would race the TUI, and env delivery is impossible
+            # post-boot on the /canvas/claude fallback. Generate WITHOUT --name:
+            # the override is already set spawner-side, and a brief that says
+            # "register --name X" invites the agent to overwrite it with an
+            # improvised value (TrueSplit registered itself Worker-C, live).
+            bootstrap = _generate_bootstrap(resolved_model, None, prompt, target_dir, context_env)
+            if name:
+                bootstrap += f"\nNOTE: your name is already registered as {name} — do NOT pass --name when registering."
+            msg_id = inbox.send(
+                from_agent=my_id or "spawner",
+                to_agent=new_uuid,
+                body=bootstrap,
+            )
+            print(f"  Brief delivered via inbox ({msg_id})")
+        if name:
+            print(f"  Name: {name}")
+        return
 
     if spawn_mode == "canvas":
         # Canvas mode: create a terminal pane inside LiteSuite via Agent Bridge.
         # The bridge's /pty/create creates a node-pty session + canvas panel.
+        # The prompt travels as a brief FILE + env pointer (see _deliver_prompt)
+        # — typing it raced TUI startup and could lose the whole prompt, and
+        # embedding it in argv invites cmd.exe quote mangling. The `env` field
+        # needs the bridge to forward it (agent-bridge fix 2026-08-06); against
+        # an older running app the brief poll times out and the fallback types
+        # the full bootstrap exactly as before.
+        bootstrap = _generate_bootstrap(resolved_model, name, prompt, target_dir, context_env)
+        brief_path = _write_spawn_brief(bootstrap)
+        context_env["LITEHARNESS_SPAWN_BRIEF"] = str(brief_path)
+
+        canvas_parts = ["claude"]
+        if resolved_model:
+            canvas_parts.extend(["--model", resolved_model])
+        canvas_parts.extend(["--permission-mode", permission_mode or "bypassPermissions"])
+        if additional_args:
+            canvas_parts.append(additional_args)
         result = _bridge_request("POST", "/pty/create", {
-            "shell": claude_str,
+            "shell": " ".join(canvas_parts),
             "cwd": target_dir,
+            "env": context_env,
         })
 
         if not result.get("session_id"):
@@ -1478,16 +2128,31 @@ def cmd_spawn(
         print(f"  Agent ID: {agent_id}")
         print(f"  Canvas session: {session_id}")
 
-        # Deliver rich bootstrap + prompt after startup delay
-        bootstrap = _generate_bootstrap(resolved_model, name, prompt, target_dir, context_env)
+        # Unify canvas identity: the agent's own register must carry the pane
+        # mapping, or click-to-terminal can never resolve its live presence.
+        # Rides the nudge/fallback because session_id only exists post-create,
+        # after the brief file is already written.
+        canvas_line = f" IMPORTANT: when you register (step 2), ALSO pass: --canvas-session {session_id}"
 
-        time.sleep(8)
-        write_result = _bridge_request("POST", "/pty/write", {
-            "session_id": session_id,
-            "data": bootstrap + "\r",
-        })
-        if write_result.get("ok"):
-            print("  Prompt delivered via canvas PTY")
+        def _canvas_write(text: str) -> None:
+            r = _bridge_request("POST", "/pty/write", {
+                "session_id": session_id,
+                "data": text + "\r",
+            })
+            if not r.get("ok"):
+                raise RuntimeError(r.get("error", "pty/write failed"))
+
+        def _canvas_read() -> str:
+            r = _bridge_request("POST", "/pty/read", {"session_id": session_id, "lines": 40})
+            return str(r.get("output", "")) if r.get("ok") else ""
+
+        status = _deliver_prompt(
+            _canvas_write, _canvas_read, brief_path,
+            nudge=_SPAWN_NUDGE + canvas_line,
+            fallback=bootstrap + canvas_line,
+            boot_timeout=15,
+        )
+        print(f"  Prompt delivery: {status}")
     elif pty_mode:
         # PTY mode: spawn via ConPTY daemon for full stdin/stdout control.
         # Build a clean command without the prompt — the prompt is sent via
@@ -1511,7 +2176,23 @@ def cmd_spawn(
                 pty_parts.append(additional_args)
             pty_cmd = " ".join(pty_parts)
 
+        # Brief file + env pointer BEFORE the daemon spawn — the session must
+        # boot with LITEHARNESS_SPAWN_BRIEF already set for the SessionStart
+        # hook to inject it. exec_cmd spawns run arbitrary processes with no
+        # hooks, so they get no brief.
+        brief_path = None
+        bootstrap = ""
+        if not exec_cmd:
+            bootstrap = _generate_bootstrap(resolved_model, name, prompt, target_dir, context_env)
+            brief_path = _write_spawn_brief(bootstrap)
+            context_env["LITEHARNESS_SPAWN_BRIEF"] = str(brief_path)
+
         agent_id = f"pty-{int(time.time())}-{os.getpid()}"
+        # The daemon session id, passed through so the agent's own presence
+        # records it — that link is what lets `kill <UUID>` find the daemon
+        # session (the provisional pty-* record and the real UUID record were
+        # otherwise never joined, making agents unkillable by their UUID).
+        context_env["LITEHARNESS_PROVISIONAL_ID"] = agent_id
         result = pty_daemon.send_command({
             "cmd": "spawn",
             "agent_id": agent_id,
@@ -1546,29 +2227,51 @@ def cmd_spawn(
         print(f"  Mode: PTY (use send-input/read-output to control)")
 
         if not exec_cmd:
-            # Send rich bootstrap + prompt after a brief delay
-            bootstrap = _generate_bootstrap(resolved_model, name, prompt, target_dir, context_env)
+            # Daemon commands are HYPHENATED. The old delivery here sent
+            # "send_input" (underscore), got {"error": "unknown command"} back
+            # on EVERY spawn, and swallowed it (success-only print) — the PTY
+            # bootstrap was never delivered at all. The "spawn race" of
+            # 2026-08-06 was this silent dispatch mismatch.
+            def _pty_write(text: str) -> None:
+                r = pty_daemon.send_command({
+                    "cmd": "send-input",
+                    "agent_id": agent_id,
+                    "text": text,
+                })
+                if not r.get("ok"):
+                    raise RuntimeError(r.get("error", "send-input failed"))
 
-            time.sleep(8)
-            send_result = pty_daemon.send_command({
-                "cmd": "send_input",
-                "agent_id": agent_id,
-                "text": bootstrap,
-            })
-            if send_result.get("ok"):
-                print("  Prompt delivered via stdin")
+            def _pty_read() -> str:
+                r = pty_daemon.send_command({
+                    "cmd": "read-output",
+                    "agent_id": agent_id,
+                    "lines": 40,
+                })
+                return str(r.get("output", "")) if r.get("ok") else ""
+
+            status = _deliver_prompt(
+                _pty_write, _pty_read, brief_path,
+                nudge=_SPAWN_NUDGE,
+                fallback=bootstrap,
+                boot_timeout=45,
+            )
+            print(f"  Prompt delivery: {status}")
     else:
-        # Terminal mode: spawn via Windows Terminal (visible, detached)
+        # Terminal mode: spawn via Windows Terminal (visible, detached).
+        # context_env rides the process environment (wt → shell → claude) so
+        # requested-name/tier/spawned_by reach the hooks; the prompt itself
+        # stays on argv here — no PTY channel exists to type into.
+        term_env = {**os.environ, **context_env}
         if sys.platform == "win32":
             spawn_cmd = f'start wt -d "{target_dir}" cmd /k {claude_str}'
             subprocess.Popen(
-                spawn_cmd, shell=True,
+                spawn_cmd, shell=True, env=term_env,
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             )
         else:
             subprocess.Popen(
                 f"cd {target_dir} && {claude_str}",
-                shell=True, start_new_session=True,
+                shell=True, start_new_session=True, env=term_env,
             )
         print(f"Spawned Claude session:")
 
@@ -1755,8 +2458,13 @@ def cmd_wt_list_panes(fmt: str = "text") -> None:
         for pane in w.get("panes", []):
             focused = " [focused]" if pane.get("focused") else ""
             print(f"  Pane {pane['id']}: {pane.get('title', '')}{focused} ({pane.get('class_name', '')})")
+        attribution = w.get("shell_attribution", "")
+        if attribution == "none":
+            print("  Shells: (unattributed — shared WT process, no binding evidence)")
+        elif attribution:
+            print(f"  Shells ({attribution}):")
         for shell in w.get("shells", []):
-            print(f"  Shell: {shell.get('name', '')} (pid {shell.get('pid', '?')})")
+            print(f"    Shell: {shell.get('name', '')} (pid {shell.get('pid', '?')})")
 
 
 def cmd_wt_focus(window_handle: int, pane_id: int) -> None:
@@ -1802,6 +2510,7 @@ def cmd_codex_desktop_send(
     click_y: int | None = None,
     dry_run: bool = False,
     probe_only: bool = False,
+    verify_paste: bool = True,
 ) -> None:
     """Paste text into Codex Desktop, then restore the user's cursor."""
     from . import desktop_automation
@@ -1816,22 +2525,46 @@ def cmd_codex_desktop_send(
             click_y=click_y,
             dry_run=dry_run,
             probe_only=probe_only,
+            verify_paste=verify_paste,
         )
     except Exception as exc:
-        print(f"Error: {exc}")
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
     if not result or not result.get("ok"):
-        print(f"Error: {(result or {}).get('error', 'unknown')}")
+        result = result or {}
+        error = result.get("error", "unknown")
+        print(f"Error: DELIVERY FAILED ({error})", file=sys.stderr)
+        holder = result.get("foreground_holder") or {}
+        if holder:
+            print(
+                f"  foreground held by {holder.get('process', '?')} "
+                f"pid={holder.get('pid', '?')} \"{holder.get('title', '')}\"",
+                file=sys.stderr,
+            )
+        if result.get("readback_preview"):
+            print(f"  composer readback: {result['readback_preview']!r}", file=sys.stderr)
+        print(
+            "  Nothing was submitted. The message is NOT delivered — treat it as "
+            "DEFERRED and retry once the Codex Desktop window can take focus.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     click = result.get("click", {})
     window = result.get("window", {})
     mode = "Dry run" if dry_run else ("Probe" if probe_only else "Sent")
+    verified = ""
+    if not dry_run and not probe_only:
+        verified = (
+            f"; foreground_verified={result.get('foreground_verified')}"
+            f" paste_verified={result.get('paste_verified')}"
+        )
     print(
         f"{mode} for Codex Desktop {window.get('handle')} "
         f"at ({click.get('x')}, {click.get('y')}); "
         f"restore_mouse={result.get('restore_mouse', result.get('restored_mouse'))}"
+        f"{verified}"
     )
 
 
@@ -1888,15 +2621,21 @@ def cmd_codex_desktop_target(window_handle: int | None = None) -> None:
     else:
         selected = windows[0]
 
+    agent_id = current_codex_agent_id()
+    # The inbox watcher reads the per-agent target file
+    # (codex_inbox_<slug>_target.json), not the legacy codex_inbox_target.json.
+    slug = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in agent_id)
     target_dir = Path.home() / ".codex" / "memories" / "liteharness"
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / "codex_inbox_target.json"
+    target_path = target_dir / f"codex_inbox_{slug}_target.json"
     payload = {
         "mode": "codex-desktop",
         "window_handle": selected.get("handle"),
         "window_title": selected.get("title", ""),
-        "agent_id": current_codex_agent_id(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "rect": selected.get("rect"),
+        "agent_id": agent_id,
+        "captured_at": time.time(),
+        "captured_via": "cli-codex-desktop-target",
     }
     target_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"Codex Desktop target set: {selected.get('handle')} -> {target_path}")
@@ -1928,18 +2667,68 @@ def cmd_pty_list() -> None:
 
 
 def cmd_pty_kill(agent_id: str) -> None:
-    """Kill a PTY session."""
+    """Kill an agent session — universal routing, not just the pty daemon.
+
+    Accepts a real agent UUID, a daemon session id (pty-*), or a canvas
+    provisional id (canvas-*). Resolution order:
+      1. presence.canvas_session_id      -> bridge DELETE /pty/<sid>
+      2. daemon id (given or linked)     -> pty daemon kill
+      3. presence.session_pid            -> OS kill (last resort)
+    The old daemon-only version reported "session not found" for every
+    canvas agent and every UUID (the provisional pty-* record and the real
+    UUID presence were never linked) — reaping then required a manual
+    taskkill by session_pid (orch E2E, 2026-08-06).
+    """
     from . import pty_daemon
 
-    if not pty_daemon.is_daemon_running():
-        print("Error: PTY daemon is not running.")
-        sys.exit(1)
+    presence: dict = {}
+    presence_path = config.get_root() / "agents" / f"{agent_id}.json"
+    if presence_path.exists():
+        try:
+            presence = json.loads(presence_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            presence = {}
 
-    result = pty_daemon.send_command({"cmd": "kill", "agent_id": agent_id})
-    if result.get("ok"):
-        print(f"Killed session {agent_id}")
+    killed_via: list[str] = []
+
+    # 1. Canvas session via the bridge
+    canvas_sid = presence.get("canvas_session_id") or (
+        agent_id[len("canvas-"):] if agent_id.startswith("canvas-") else None
+    )
+    if canvas_sid:
+        result = _bridge_request("DELETE", f"/pty/{canvas_sid}", None)
+        if result.get("success") or result.get("ok"):
+            killed_via.append(f"canvas session {canvas_sid}")
+
+    # 2. Daemon session (direct id or the linked provisional)
+    daemon_id = agent_id if agent_id.startswith("pty-") else presence.get("provisional_id", "")
+    if daemon_id and str(daemon_id).startswith("pty-") and pty_daemon.is_daemon_running():
+        result = pty_daemon.send_command({"cmd": "kill", "agent_id": daemon_id})
+        if result.get("ok"):
+            killed_via.append(f"daemon session {daemon_id}")
+
+    # 3. OS-level fallback by owning PID
+    if not killed_via:
+        session_pid = presence.get("session_pid")
+        if session_pid:
+            try:
+                import subprocess as _sp
+                if sys.platform == "win32":
+                    _sp.run(["taskkill", "/PID", str(session_pid), "/T", "/F"],
+                            capture_output=True, timeout=15)
+                else:
+                    os.kill(int(session_pid), 15)
+                killed_via.append(f"session_pid {session_pid}")
+            except Exception:
+                pass
+
+    if killed_via:
+        print(f"Killed {agent_id} via {', '.join(killed_via)}")
     else:
-        print(f"Error: {result.get('error', 'unknown')}")
+        print(
+            f"Error: no kill route found for {agent_id} — no canvas session, "
+            f"no daemon session, no live session_pid in presence."
+        )
         sys.exit(1)
 
 
@@ -2267,6 +3056,10 @@ def cmd_install() -> None:
 
 def main() -> None:
     """CLI entry point."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     is_help = len(sys.argv) >= 2 and sys.argv[1] in ("--help", "-h", "help")
     if len(sys.argv) >= 2 and sys.argv[1] in ("--version", "-V", "version"):
         try:
@@ -2287,6 +3080,7 @@ def main() -> None:
         print("  status                         Show status")
         print("  send <to> <message>            Send a message")
         print("  list                           List inbox messages")
+        print("  inbox [N] [--all] [--agent ID] Read-only inbox view: full bodies, new+cur+done, newest N")
         print("  discover [count]               Discover active agents")
         print("  spawn [options]                Spawn a new Claude Code session")
         print("  sessions <cmd> [options]       Save/restore terminal agent sessions")
@@ -2301,13 +3095,19 @@ def main() -> None:
         print("  rag <action> [query] [--top-k N] [--scope S] [--tier T] [--source S]")
         print("                                 Multi-strategy code RAG (help|status|index|query|...)")
         print("  record-pattern --outcome <success|failure|stuck|unknown> [--agent-id ID] [--task DESC]")
+        print("                 [--supersedes task_id[,task_id...]]  # retire patterns this one corrects")
         print("                                 Record a task pattern")
         print("  install --list                 List supported CLIs + auto-detection results")
         print("  install --cli <name> [--path PATH] [--dry-run]")
         print("                                 Install skills+agents into a CLI's canonical dir (opt-in)")
+        print("  workflow run <path> [--model NAME]")
+        print("  workflow run --global <name> [--model NAME]")
+        print("                                 Launch Claude with the Workflow tool to run a workflow file")
+        print("  memory-nudge [--on|--off] [--cadence N]")
+        print("                                 Toggle the every-other-turn MEMORY.md index pointer (off by default)")
         print()
         print("Spawn options:")
-        print("  --model <name>                 Model: opus, opus-1m, opus-200k, sonnet, haiku, or full ID")
+        print("  --model <name>                 Model: opus (=Opus 5), opus-5, opus-1m, opus-200k, opus-4.8, fable, sonnet, sonnet-5, haiku, or full ID")
         print("  --cwd <path>                   Working directory")
         print("  --worktree                     Create a git worktree first")
         print("  --permission-mode <mode>       default, plan, auto, bypassPermissions, acceptEdits")
@@ -2417,6 +3217,19 @@ def main() -> None:
         cmd_send(sys.argv[2], msg_parts, project, from_id, send_thread_id)
     elif cmd == "list":
         cmd_list()
+    elif cmd == "inbox":
+        inbox_count = 10
+        inbox_agent = None
+        inbox_all = "--all" in sys.argv
+        if "--agent" in sys.argv:
+            idx = sys.argv.index("--agent")
+            if idx + 1 < len(sys.argv):
+                inbox_agent = sys.argv[idx + 1]
+        for tok in sys.argv[2:]:
+            if tok.isdigit():
+                inbox_count = int(tok)
+                break
+        cmd_inbox(inbox_count, inbox_agent, inbox_all)
     elif cmd in ("sessions", "session"):
         from . import session_manager
         session_manager.main(sys.argv[2:])
@@ -2433,8 +3246,14 @@ def main() -> None:
         reg_thread_id = None
         reg_workspace_id = None
         reg_project_id = None
+        reg_canvas_session = None
+        reg_takeover = False
         i = 2
         while i < len(sys.argv):
+            if sys.argv[i] == "--takeover":
+                reg_takeover = True
+                i += 1
+                continue
             if sys.argv[i] == "--agent-id" and i + 1 < len(sys.argv):
                 reg_agent_id = sys.argv[i + 1]
                 i += 2
@@ -2471,12 +3290,15 @@ def main() -> None:
             elif sys.argv[i] == "--project-id" and i + 1 < len(sys.argv):
                 reg_project_id = sys.argv[i + 1]
                 i += 2
+            elif sys.argv[i] == "--canvas-session" and i + 1 < len(sys.argv):
+                reg_canvas_session = sys.argv[i + 1]
+                i += 2
             else:
                 i += 1
         if not reg_agent_id:
-            print("Usage: liteharness register --agent-id ID [--cli CLI] [--model MODEL] [--name NAME] [--tier TIER] [--team TEAM] [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID] [--workspace-id WID] [--project-id PID]")
+            print("Usage: liteharness register --agent-id ID [--cli CLI] [--model MODEL] [--name NAME] [--tier TIER] [--team TEAM] [--takeover] [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID] [--workspace-id WID] [--project-id PID] [--canvas-session CSID]")
             sys.exit(1)
-        cmd_register(reg_agent_id, reg_cli, reg_model, reg_name, reg_tier, reg_team, reg_pane_id, reg_leaf_id, reg_session_id, reg_thread_id, reg_workspace_id, reg_project_id)
+        cmd_register(reg_agent_id, reg_cli, reg_model, reg_name, reg_tier, reg_team, reg_pane_id, reg_leaf_id, reg_session_id, reg_thread_id, reg_workspace_id, reg_project_id, canvas_session=reg_canvas_session, takeover=reg_takeover)
     elif cmd == "pty-daemon":
         from . import pty_daemon
         daemon = pty_daemon.PtyDaemon()
@@ -2527,6 +3349,7 @@ def main() -> None:
         dry_run = "--dry-run" in sys.argv
         probe_only = "--probe-only" in sys.argv
         restore_mouse = "--no-restore-mouse" not in sys.argv
+        verify_paste = "--no-verify-paste" not in sys.argv
         window_handle = None
         click_x = None
         click_y = None
@@ -2534,7 +3357,7 @@ def main() -> None:
         i = 2
         while i < len(sys.argv):
             arg = sys.argv[i]
-            if arg in ("--no-submit", "--dry-run", "--probe-only", "--no-restore-mouse"):
+            if arg in ("--no-submit", "--dry-run", "--probe-only", "--no-restore-mouse", "--no-verify-paste"):
                 i += 1
             elif arg == "--handle" and i + 1 < len(sys.argv):
                 window_handle = int(sys.argv[i + 1])
@@ -2550,7 +3373,7 @@ def main() -> None:
                 i += 1
         cd_text = " ".join(text_parts)
         if not cd_text and not dry_run and not probe_only:
-            print("Usage: liteharness codex-desktop-send [--dry-run] [--probe-only] [--no-submit] [--handle N] [--x N --y N] <text>")
+            print("Usage: liteharness codex-desktop-send [--dry-run] [--probe-only] [--no-submit] [--no-verify-paste] [--handle N] [--x N --y N] <text>")
             sys.exit(1)
         cmd_codex_desktop_send(
             cd_text,
@@ -2561,6 +3384,7 @@ def main() -> None:
             click_y=click_y,
             dry_run=dry_run,
             probe_only=probe_only,
+            verify_paste=verify_paste,
         )
     elif cmd == "pty-list":
         cmd_pty_list()
@@ -2611,6 +3435,46 @@ def main() -> None:
         )
         bot = NudgeBot(nb_config, lmstudio=lmstudio_cfg)
         bot.run()
+    elif cmd == "memory-nudge":
+        # Toggle / tune the every-other-turn MEMORY.md index pointer emitted by
+        # the UserPromptSubmit hook (liteharness.hooks memory-nudge). Distinct
+        # from the nudge-bot (which drives idle agents via LM Studio).
+        mn_cfg = config.load()
+        mn = mn_cfg.get("memory_nudge")
+        if not isinstance(mn, dict):
+            mn = {}
+        changed = False
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--on":
+                mn["enabled"] = True
+                changed = True
+                i += 1
+            elif sys.argv[i] == "--off":
+                mn["enabled"] = False
+                changed = True
+                i += 1
+            elif sys.argv[i] == "--cadence" and i + 1 < len(sys.argv):
+                try:
+                    cadence = int(sys.argv[i + 1])
+                except ValueError:
+                    print("Error: --cadence must be an integer")
+                    sys.exit(1)
+                if cadence < 1:
+                    print("Error: --cadence must be >= 1")
+                    sys.exit(1)
+                mn["cadence"] = cadence
+                changed = True
+                i += 2
+            else:
+                i += 1
+        if changed:
+            mn_cfg["memory_nudge"] = mn
+            config.save(mn_cfg)
+        enabled = bool(mn.get("enabled", False))
+        cadence = int(mn.get("cadence", 2))
+        state = "ON" if enabled else "OFF"
+        print(f"memory-nudge: {state} (cadence={cadence} — pointer every {cadence} UserPromptSubmit turn(s))")
     elif cmd == "spawn":
         sp_model = None
         sp_cwd = None
@@ -2627,6 +3491,10 @@ def main() -> None:
         sp_project_id = None
         sp_tier = None
         sp_team = None
+        sp_split = False
+        sp_split_pane = None
+        sp_split_dir = "vertical"
+        sp_cognitive = None
         i = 2
         while i < len(sys.argv):
             if sys.argv[i] == "--model" and i + 1 < len(sys.argv):
@@ -2674,6 +3542,18 @@ def main() -> None:
             elif sys.argv[i] == "--team" and i + 1 < len(sys.argv):
                 sp_team = sys.argv[i + 1]
                 i += 2
+            elif sys.argv[i] == "--split":
+                sp_split = True
+                i += 1
+            elif sys.argv[i] == "--pane" and i + 1 < len(sys.argv):
+                sp_split_pane = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--direction" and i + 1 < len(sys.argv):
+                sp_split_dir = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--cognitive" and i + 1 < len(sys.argv):
+                sp_cognitive = sys.argv[i + 1]
+                i += 2
             else:
                 i += 1
         cmd_spawn(
@@ -2683,6 +3563,8 @@ def main() -> None:
             pty_mode=sp_pty, exec_cmd=sp_exec,
             thread_id=sp_thread_id, workspace_id=sp_workspace_id,
             project_id=sp_project_id, tier=sp_tier, team=sp_team,
+            split_mode=sp_split, split_pane=sp_split_pane,
+            split_direction=sp_split_dir, cognitive=sp_cognitive,
         )
     elif cmd == "discover":
         # `int(sys.argv[2])` consumed argv by POSITION, so the documented
@@ -2740,6 +3622,7 @@ def main() -> None:
         rp_agent_id = None
         rp_task = None
         rp_project = None
+        rp_supersedes: list[str] = []
         i = 2
         while i < len(sys.argv):
             if sys.argv[i] == "--outcome" and i + 1 < len(sys.argv):
@@ -2754,9 +3637,20 @@ def main() -> None:
             elif sys.argv[i] == "--project" and i + 1 < len(sys.argv):
                 rp_project = sys.argv[i + 1]
                 i += 2
+            elif sys.argv[i] == "--supersedes" and i + 1 < len(sys.argv):
+                rp_supersedes.extend(
+                    t.strip() for t in sys.argv[i + 1].split(",") if t.strip()
+                )
+                i += 2
             else:
                 i += 1
-        cmd_record_pattern(outcome=rp_outcome, agent_id=rp_agent_id, task_desc=rp_task, project=rp_project)
+        cmd_record_pattern(
+            outcome=rp_outcome,
+            agent_id=rp_agent_id,
+            task_desc=rp_task,
+            project=rp_project,
+            supersedes=rp_supersedes,
+        )
     elif cmd == "rag":
         cmd_rag()
     elif cmd == "install":

@@ -8,7 +8,6 @@ then restore the user's cursor, Codex window placement, and original focus.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import subprocess
@@ -30,13 +29,12 @@ def _run_ps_script(
     if not script_path.exists():
         raise FileNotFoundError(f"PS script not found: {script_path}")
 
-    script_text = script_path.read_text(encoding="utf-8")
-    encoded = base64.b64encode(script_text.encode("utf-16-le")).decode("ascii")
-
     env = {**os.environ}
     if args:
         env["LWTT_ARGS"] = json.dumps(args)
 
+    # -File, not -EncodedCommand: base64(utf-16) of the script blows past the
+    # 32K command-line limit (WinError 206) once the script grows.
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     result = subprocess.run(
         [
@@ -45,8 +43,8 @@ def _run_ps_script(
             "-Sta",
             "-ExecutionPolicy",
             "Bypass",
-            "-EncodedCommand",
-            encoded,
+            "-File",
+            str(script_path),
         ],
         capture_output=True,
         text=True,
@@ -84,12 +82,18 @@ def send_to_codex_desktop(
     click_y: int | None = None,
     dry_run: bool = False,
     probe_only: bool = False,
+    verify_paste: bool = True,
 ) -> dict:
     """Paste text into Codex Desktop and optionally submit it.
 
     The PowerShell helper snapshots the current cursor position, current
     foreground window, and Codex window placement before touching the UI. It
     restores those values in a finally block.
+
+    Delivery is verified: activation must actually reach the foreground (a
+    fullscreen app holding focus returns ok=false with a foreground_holder
+    diagnostic instead of pasting into the wrong window), and with
+    verify_paste the composer text is read back before submit.
     """
     if not text and not dry_run and not probe_only:
         raise ValueError("text is required")
@@ -106,6 +110,7 @@ def send_to_codex_desktop(
             "clickY": click_y,
             "dryRun": dry_run,
             "probeOnly": probe_only,
+            "verifyPaste": verify_paste,
         },
-        timeout=20,
+        timeout=25,
     )

@@ -459,7 +459,7 @@ def _dedupe_sessions(sessions):
 # -- Command-line extraction -------------------------------------------------
 
 def _extract_launch_args(cmdline, cli):
-    safe = SAFE_ARGS[cli]
+    safe = SAFE_ARGS.get(cli, {})
     args = []
     tokens = list(cmdline or [])
     skip_next = False
@@ -727,7 +727,7 @@ def _agent_command(session):
 
 
 def _sanitize_launch_args(args, cli):
-    safe = SAFE_ARGS[cli]
+    safe = SAFE_ARGS.get(cli, {})
     tokens = list(args or [])
     sanitized = []
     skip_next = False

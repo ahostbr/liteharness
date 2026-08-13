@@ -234,9 +234,6 @@ class NudgeBot:
 
     def _send_reply(self, to_agent: str, body: str):
         inbox.send(from_agent=self.sentinel_id, to_agent=to_agent, body=body)
-        if self._is_codex_agent(to_agent):
-            time.sleep(0.2)
-            inbox.send(from_agent=self.sentinel_id, to_agent=to_agent, body="{ENTER}")
 
     def run(self):
         from .hooks import _create_watcher

@@ -31,7 +31,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-DAEMON_PORT = 7450
+# 7460, not 7450: LiteImage's FaceSwap FastAPI sidecar owns 7450 on the same box
+# (see docs/architecture/00-Ecosystem-Overview.md). Sharing it made `spawn --pty`
+# hard-fail whenever face-swap was active, and vice versa.
+DAEMON_PORT = 7460
 DAEMON_HOST = "127.0.0.1"
 LOCK_FILE = Path.home() / ".liteharness" / "pty_daemon.lock"
 OUTPUT_BUFFER_SIZE = 10_000
@@ -115,35 +118,46 @@ def _validate_send_input(text: str) -> str | None:
 
 
 def _hide_conhost(child_pid: int) -> None:
-    """Hide the ConHost console window created by pywinpty for the given child PID."""
+    """Hide ONLY the ConHost window belonging to the spawned child (or its tree).
+
+    ConPTY (backend=1) usually creates no visible window at all, so this is
+    belt-and-suspenders. The earlier version hid EVERY ConsoleWindowClass window
+    on the desktop — including the user's own open cmd.exe — because it never
+    compared the window's owning pid to child_pid. Now we hide a console window
+    only when its owning process is child_pid or a descendant of it.
+    """
     if not IS_WINDOWS:
         return
     try:
         import ctypes
         import ctypes.wintypes
         user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
 
-        # EnumWindows callback: find console windows owned by our process tree
+        # Build the set of pids we own: child_pid + its descendants (best-effort).
+        owned_pids = {int(child_pid)}
+        try:
+            import psutil
+            for descendant in psutil.Process(child_pid).children(recursive=True):
+                owned_pids.add(descendant.pid)
+        except Exception:
+            pass
+
         SW_HIDE = 0
-        found = []
+        found: list[int] = []
 
         @ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
         def enum_cb(hwnd, _lparam):
-            tid = ctypes.wintypes.DWORD()
             pid = ctypes.wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            # ConHost windows have class "ConsoleWindowClass"
             buf = ctypes.create_unicode_buffer(256)
             user32.GetClassNameW(hwnd, buf, 256)
-            if buf.value == "ConsoleWindowClass":
-                found.append((hwnd, pid.value))
+            if buf.value == "ConsoleWindowClass" and pid.value in owned_pids:
+                found.append(hwnd)
             return True
 
         user32.EnumWindows(enum_cb, 0)
 
-        for hwnd, pid in found:
-            # Hide any console window created around the time of our spawn
+        for hwnd in found:
             user32.ShowWindow(hwnd, SW_HIDE)
     except Exception:
         pass
@@ -306,6 +320,25 @@ class PtyDaemon:
         self.running = True
         LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            server.bind((self.host, self.port))
+        except OSError:
+            # Port held. Only treat this as a benign duplicate if a REAL
+            # authenticated daemon answers on it — otherwise a foreign process
+            # (a sibling service that grabbed the port) must surface as a hard
+            # error, not a silent exit-0 that strands `spawn --pty`.
+            if is_daemon_running():
+                print(f"[pty-daemon] Port {self.port} already served by a live daemon. Exiting.", file=sys.stderr)
+                sys.exit(0)
+            print(
+                f"[pty-daemon] Port {self.port} is held by a non-daemon process. "
+                f"Refusing to start; free the port or change DAEMON_PORT.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         lock_data = json.dumps({
             "token": self.token,
             "port": self.port,
@@ -325,14 +358,6 @@ class PtyDaemon:
                 pass
         else:
             os.chmod(str(LOCK_FILE), 0o600)
-
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            server.bind((self.host, self.port))
-        except OSError:
-            print(f"[pty-daemon] Port {self.port} already in use — another daemon running. Exiting.", file=sys.stderr)
-            sys.exit(0)
 
         server.listen(10)
         server.settimeout(1.0)
@@ -443,10 +468,17 @@ class PtyDaemon:
         if err:
             return {"ok": False, "error": f"spawn blocked: {err}"}
 
-        # Sanitize env: only allow LITEHARNESS_* keys (prevent injection)
+        # Sanitize env: only harness identity namespaces (prevent injection).
+        # LITESUITE_* carries spatial identity (project/pane/leaf) — allowing
+        # only LITEHARNESS_* silently dropped project_id from every PTY spawn,
+        # masked nondeterministically when the daemon itself had inherited the
+        # var from whichever agent started it (found 2026-08-06).
         safe_env: dict[str, str] | None = None
         if env and isinstance(env, dict):
-            safe_env = {k: str(v) for k, v in env.items() if k.startswith("LITEHARNESS_")}
+            safe_env = {
+                k: str(v) for k, v in env.items()
+                if k.startswith("LITEHARNESS_") or k.startswith("LITESUITE_")
+            }
 
         with self._lock:
             if len(self.sessions) >= MAX_SESSIONS:

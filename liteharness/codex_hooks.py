@@ -34,6 +34,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "session-start-check": ("SessionStart", "check_inbox"),
     "post-tool-use-check": ("PostToolUse", "check_inbox"),
     "user-prompt-submit-check": ("UserPromptSubmit", "check_inbox"),
+    "user-prompt-submit-memory-nudge": ("UserPromptSubmit", "memory_nudge"),
 }
 
 

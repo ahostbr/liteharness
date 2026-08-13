@@ -12,6 +12,12 @@ from typing import Optional
 HARNESS_ROOT = Path.home() / ".liteharness"
 CONFIG_PATH = HARNESS_ROOT / "config.json"
 
+# Bounded retry for the rename in atomic_write_json — see its docstring.
+# 8 attempts with linear backoff spans ~0.7s, which covers the observed
+# contention window without stalling a hook noticeably.
+_REPLACE_ATTEMPTS = 8
+_REPLACE_BACKOFF_S = 0.02
+
 
 def get_root() -> Path:
     return HARNESS_ROOT
@@ -35,6 +41,66 @@ def save(config: dict) -> None:
     """Save config to ~/.liteharness/config.json"""
     ensure_root()
     CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Atomically write JSON to `path` via temp-file + os.replace.
+
+    Multiple processes write the same presence file concurrently (SessionStart
+    register + the long-lived `watch` heartbeat). A plain write_text is not
+    atomic, so interleaved writes produced corrupt "Extra data" files that the
+    desktop's strict JSON.parse silently dropped. Writing to a per-pid temp file
+    and renaming makes each write all-or-nothing.
+
+    The rename itself can still fail: on Windows os.replace raises
+    PermissionError (WinError 5/32) while another process holds the destination
+    open, which the concurrent writers above do routinely — observed as a
+    SessionStart traceback on a fresh spawn, 2026-08-08. Contention clears in
+    milliseconds, so retry a bounded number of times; the bound is what stops a
+    genuine permissions failure from spinning forever.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_BACKOFF_S * (attempt + 1))
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def merge_presence_fields(path: Path, updates: dict) -> bool:
+    """Read-merge-write a presence file, touching ONLY the keys in `updates`.
+
+    Non-owner writers (heartbeats, cwd updates, recap scans) must never clobber
+    fields that register/spawn set — atomic_write_json makes each write
+    all-or-nothing, but a writer that read the file earlier and writes a full
+    stale dict back still resurrects old tier/model (last-write-wins). This
+    helper re-reads at write time so the window shrinks to the rename itself,
+    and merges only the caller's own fields.
+
+    Returns False without writing when the file is missing or unreadable —
+    a non-owner writer must not resurrect a purged/deregistered agent.
+    """
+    if not path.exists():
+        return False
+    try:
+        base = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    base.update(updates)
+    atomic_write_json(path, base)
+    return True
 
 
 def _find_claude_session_id() -> Optional[str]:
@@ -177,6 +243,21 @@ def get_cli() -> str:
     if os.environ.get("OPENCODE_SESSION_ID"):
         return "opencode"
     return "unknown"
+
+
+def get_memory_nudge() -> dict:
+    """Memory-nudge settings, merged over defaults.
+
+    On by default (fleet-wide, 2026-07-14): the UserPromptSubmit hook emits a
+    tiny MEMORY.md index pointer every `cadence` turns (default 2 = every other
+    turn). Turn it off per-agent via `liteharness memory-nudge --off` (or
+    config). `cadence` is the every-Nth-turn interval.
+    """
+    defaults = {"enabled": True, "cadence": 2}
+    stored = load().get("memory_nudge")
+    if isinstance(stored, dict):
+        defaults.update(stored)
+    return defaults
 
 
 def detect_installed_clis() -> list[str]:

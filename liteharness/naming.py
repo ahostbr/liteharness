@@ -101,8 +101,24 @@ def get_name(agent_id: str) -> str:
     return generate_name(agent_id)
 
 
+def _pid_alive(pid: int | None) -> bool:
+    """Return True if a PID currently maps to a running process."""
+    if not pid:
+        return False
+    try:
+        import psutil
+        return psutil.pid_exists(int(pid))
+    except Exception:
+        return False
+
+
 def is_name_taken(name: str, exclude_id: str | None = None) -> str | None:
-    """Check if a name is already in use by an active agent. Returns the agent_id or None."""
+    """Check if a name is already in use by a live agent. Returns the agent_id or None.
+
+    An agent is considered live only if it has a recent heartbeat AND an alive
+    owning session_pid — matching the liveness bar used by cmd_discover and the
+    takeover path. A dead ghost (fresh heartbeat, dead PID) no longer blocks
+    plain ``register --name``."""
     import json
     import time
     from datetime import datetime
@@ -118,8 +134,13 @@ def is_name_taken(name: str, exclude_id: str | None = None) -> str | None:
             continue
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
+            if data.get("exited_at"):
+                continue
             last_seen = datetime.fromisoformat(data.get("last_seen", "")).timestamp()
             if now - last_seen > 43200:
+                continue
+            session_pid = data.get("session_pid")
+            if session_pid and not _pid_alive(session_pid):
                 continue
             agent_name = get_name(agent_id)
             if agent_name.lower() == name.lower():
