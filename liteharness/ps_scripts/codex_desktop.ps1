@@ -119,7 +119,10 @@ function Convert-WindowPlacementObject($placement) {
 
 function Get-CodexWindows {
     $windows = @()
-    foreach ($proc in Get-Process -Name Codex -ErrorAction SilentlyContinue) {
+    # The Windows Store package kept the OpenAI.Codex package identity but
+    # renamed the desktop host from Codex.exe to ChatGPT.exe. Accept both so
+    # existing installs and the renamed app use the same watcher target path.
+    foreach ($proc in Get-Process -Name Codex, ChatGPT -ErrorAction SilentlyContinue) {
         if ($proc.MainWindowHandle -eq 0) {
             continue
         }
@@ -133,12 +136,13 @@ function Get-CodexWindows {
         }
         $windows += [pscustomobject]@{
             pid = $proc.Id
+            process = $proc.ProcessName
             handle = $handle.ToInt64()
             title = $proc.MainWindowTitle
             rect = $rect
         }
     }
-    return $windows | Sort-Object @{ Expression = { if ($_.title -eq 'Codex') { 0 } else { 1 } } }, pid
+    return $windows | Sort-Object @{ Expression = { if ($_.title -in @('ChatGPT', 'Codex')) { 0 } else { 1 } } }, pid
 }
 
 function Resolve-CodexWindow($requestedHandle) {
