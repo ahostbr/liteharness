@@ -57,7 +57,17 @@ PRIVATE_SKILLS: tuple[str, ...] = (
     # Ryan, 2026-08-16: never ship. Removed from PUBLIC_SKILLS in the same edit —
     # naming a skill in BOTH sets makes the sync ABORT by design, so a one-sided
     # move here would have looked like a denylist working and been a broken gate.
+    # Ryan, 2026-08-16: the WHOLE ls-arch* family is private, not just -opus.
+    # These read LiteSuite's own docs/architecture/ tree — ports, panel names,
+    # doc filenames — so shipping them hands every end user a reference to a
+    # codebase that is not theirs. The replacement is end-user arch docs
+    # generated per project by that user's own Sentinel after assistant setup.
+    # Removed until that exists; ls-arch-gen goes too, by explicit ruling, even
+    # though it is the plausible seed for that work.
     "ls-arch-opus",
+    "ls-arch",
+    "ls-arch-fable",
+    "ls-arch-gen",
 )
 
 # The allowlist. A skill ships ONLY if it is named here — the inverse of the
@@ -71,8 +81,7 @@ PRIVATE_SKILLS: tuple[str, ...] = (
 # the sync ABORTS on anything it has never been told about, so the decision is
 # forced to a human at publish time instead of defaulting either way.
 PUBLIC_SKILLS: frozenset[str] = frozenset({
-    "ls-ao", "ls-arch", "ls-arch-fable",
-    "ls-arch-gen", "ls-canvas-design",
+    "ls-ao", "ls-canvas-design",
     "ls-casestudy", "ls-caveman-mode", "ls-comfy-to-liteimage",
     "ls-compile-cli", "ls-consult", "ls-consult-polymaths",
     "ls-conversation-lookup", "ls-debug", "ls-design-huashu",

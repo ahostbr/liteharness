@@ -47,3 +47,12 @@ liteharness/catalog/skills/ls-release-litesuite/
 # PRIVATE_SKILLS in scripts/sync_catalog.py; the gitignore alone would not have
 # stopped the sync from vendoring it.
 liteharness/catalog/skills/ls-arch-opus/
+
+# The whole ls-arch* family is operator-internal — it reads LiteSuite's own
+# docs/architecture/ tree. Ryan's ruling 2026-08-16: none of it ships until
+# end-user arch docs are generated per project by that user's own Sentinel.
+# Also removed from PUBLIC_SKILLS and added to PRIVATE_SKILLS in
+# scripts/sync_catalog.py — the gitignore alone does not stop the vendor step.
+liteharness/catalog/skills/ls-arch/
+liteharness/catalog/skills/ls-arch-fable/
+liteharness/catalog/skills/ls-arch-gen/
