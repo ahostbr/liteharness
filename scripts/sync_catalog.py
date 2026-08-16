@@ -54,6 +54,10 @@ PRIVATE_SKILLS: tuple[str, ...] = (
     "ls-streaming-sl-obs",
     "streaming-sl-obs",
     "ls-release-litesuite",
+    # Ryan, 2026-08-16: never ship. Removed from PUBLIC_SKILLS in the same edit —
+    # naming a skill in BOTH sets makes the sync ABORT by design, so a one-sided
+    # move here would have looked like a denylist working and been a broken gate.
+    "ls-arch-opus",
 )
 
 # The allowlist. A skill ships ONLY if it is named here — the inverse of the
@@ -68,7 +72,7 @@ PRIVATE_SKILLS: tuple[str, ...] = (
 # forced to a human at publish time instead of defaulting either way.
 PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-ao", "ls-arch", "ls-arch-fable",
-    "ls-arch-gen", "ls-arch-opus", "ls-canvas-design",
+    "ls-arch-gen", "ls-canvas-design",
     "ls-casestudy", "ls-caveman-mode", "ls-comfy-to-liteimage",
     "ls-compile-cli", "ls-consult", "ls-consult-polymaths",
     "ls-conversation-lookup", "ls-debug", "ls-design-huashu",

@@ -41,3 +41,9 @@ liteharness/catalog/skills/streaming-sl-obs/
 # Operator-internal release runbook — never vendor into the public catalog.
 # See PRIVATE_SKILLS in scripts/sync_catalog.py.
 liteharness/catalog/skills/ls-release-litesuite/
+
+# Operator-internal architecture reference — never vendor into the public catalog.
+# Ryan's ruling 2026-08-16. Also removed from PUBLIC_SKILLS and added to
+# PRIVATE_SKILLS in scripts/sync_catalog.py; the gitignore alone would not have
+# stopped the sync from vendoring it.
+liteharness/catalog/skills/ls-arch-opus/
