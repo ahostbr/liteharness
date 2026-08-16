@@ -192,7 +192,7 @@ Nav auto-discovers the new mockup from the registry. No manual nav edits needed.
 | Component      | Import                                 | Props                                                                              |
 | -------------- | -------------------------------------- | ---------------------------------------------------------------------------------- |
 | `ScrollReveal` | `@/components/animations/ScrollReveal` | `direction` (up/down/left/right/none), `delay`, `distance`, `duration`, `children` |
-| `CountUp`      | `@/components/animations/CountUp`      | `target` (number), `prefix`, `suffix`, `duration`                                  |
+| `CountUp`      | `@/components/animations/CountUp`      | **`end`** (number), `prefix`, `suffix`, `duration`, `className`                     |
 
 ### Shared UI
 
@@ -545,6 +545,16 @@ For markdown documents, research reports, structured data — create as a new mo
 Read the source file. Identify:
 
 - **Hero stats** — 3-5 most impactful numbers → `CountUp` components
+
+> 🪤 **`CountUp`'s prop is `end`, NOT `target`.** This table said `target` until 2026-08-16 and it is
+> the kind of error that produces a page which builds, serves **HTTP 200**, and renders
+> **`NaN`** where every headline number should be — because `undefined / steps` is `NaN`, and
+> nothing throws. Verified against the component source (`CountUp.tsx`), not from memory.
+>
+> ⭐ **A text scrape will not catch this.** `read_page` returns `"NaN"` as ordinary text and a
+> `curl | grep` for your copy passes. **Only a screenshot shows it.** Take one before calling any
+> visual page done — this is the same class as items rendering invisibly inside an opaque mesh:
+> every non-visual instrument agreed the page was fine.
 - **Sections** — each `##` heading becomes a visual section with `ScrollReveal`
 - **Tables** → Recharts bar charts, Nivo heatmaps, or styled comparison grids
 - **Lists** → animated card grids with staggered reveals

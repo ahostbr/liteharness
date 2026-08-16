@@ -186,6 +186,53 @@ send_input(handle, pane_id, "^c", auto_enter=False)  # Ctrl+C, no Enter
 
 All spawned agents default to `bypassPermissions` and receive bootstrap instructions to self-register and start their inbox monitor.
 
+### 🔴 SPAWNED AGENTS LOSE THEIR TRANSCRIPT UNLESS YOU FORCE PERSISTENCE
+
+**A spawning session almost always has `CLAUDE_CODE_CHILD_SESSION` set in its own environment. The
+child inherits it, and Claude Code then suppresses transcript persistence *for the child* while the
+parent keeps writing its own.** Nothing in the child's session reports this beyond one status-line
+warning, and the parent looks perfectly healthy — so the failure is invisible from the side that
+spawned it.
+
+**Measured 2026-08-16:** a spawned worker's session id resolved to a directory holding only
+`tool-results/` — **no `.jsonl` at all** — while the spawner's transcript was 903 MB and still
+growing.
+
+The predicate, read out of the shipped binary rather than from the warning text (it names the
+suppressed case `"persistence-suppressed"`):
+
+```js
+if (env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE) return false;   // ← not suppressed
+if (!(env.CLAUDE_CODE_CHILD_SESSION && ...))    return false;
+```
+
+Any truthy value short-circuits it; `1` is the documented spelling.
+
+✅ **`liteharness spawn` now sets `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` automatically** for both
+PTY and terminal spawns (it rides `context_env`, so one assignment covers every path). It only sets
+it when the caller has not already chosen a value, so deliberate suppression is still available.
+
+**Spawning by any other route — `wt` directly, a shell script, a hand-opened tab — you must set it
+yourself:**
+
+```bash
+CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude
+```
+
+⚠️ **Why this is worse than a missing log file.** The transcript is the recovery store of last
+resort. A file an agent wrote and then lost is reconstructable from its own `Write`/`Edit` chain —
+but *only if that chain was recorded*. A transcript-less agent's artifacts are the **only copy that
+will ever exist**, and it cannot tell you it is in that state. Treat any such seat as
+unique-copy: make it commit early and often, and never rely on being able to reconstruct its work
+after the fact.
+
+**To check a running agent:** its transcript should be a `.jsonl` file, not a directory.
+
+```bash
+ls ~/.claude/projects/<project-slug>/<session-id>.jsonl
+```
+A directory at that id instead of a file means the transcript is not being written.
+
 ## Agent Lifecycle — /clear vs /exit
 
 **Prefer `/clear` over `/exit` when reassigning an agent to a new task.**

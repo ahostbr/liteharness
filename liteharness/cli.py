@@ -1337,12 +1337,16 @@ def cmd_record_pattern(
     patterns_dir.mkdir(parents=True, exist_ok=True)
     patterns_path = patterns_dir / "patterns.jsonl"
 
-    # Read task description from stdin if not provided
+    # Read the task description from stdin ONLY when the caller opts in with `--task -`.
+    # This used to fire whenever --task was merely ABSENT, which deadlocked any caller that
+    # spawned us with an inherited stdin pipe it never wrote to and never closed: the read
+    # blocked until the parent's timeout killed us, yielding an empty stderr and an error at
+    # the call site that looked like a bridge failure rather than a hang. A missing --task
+    # now defaults quietly; `echo "task" | liteharness record-pattern --task -` still works.
+    if task_desc == "-":
+        task_desc = sys.stdin.read().strip()
     if not task_desc:
-        if not sys.stdin.isatty():
-            task_desc = sys.stdin.read().strip()
-        if not task_desc:
-            task_desc = "unspecified task"
+        task_desc = "unspecified task"
 
     # Get git diff summary if in a git repo
     git_summary = ""
@@ -1912,6 +1916,30 @@ def cmd_spawn(
     context_env["LITEHARNESS_TIER"] = resolved_tier
     if team:
         context_env["LITEHARNESS_TEAM"] = team
+
+    # Keep the child's transcript on disk. A spawning session almost always has
+    # CLAUDE_CODE_CHILD_SESSION set in its own environment, the child inherits it,
+    # and Claude Code then SUPPRESSES transcript persistence for that child while
+    # the parent keeps its own. Measured 2026-08-16: a spawned worker's session id
+    # resolved to a directory holding only tool-results/ — no .jsonl at all — while
+    # the spawner's transcript was still being written.
+    #
+    # The predicate, read out of the shipped binary rather than from the warning
+    # text (it names the suppression case "persistence-suppressed"):
+    #     if (env.CLAUDE_CODE_FORCE_SESSION_PERSISTENCE) return false;   // not suppressed
+    #     if (!(env.CLAUDE_CODE_CHILD_SESSION && ... )) return false;
+    # so ANY truthy value short-circuits it; "1" is the documented spelling.
+    #
+    # Why this matters more than a missing log: the transcript is the recovery
+    # store of last resort. A file a seat wrote and lost is reconstructable from
+    # its own Write/Edit chain — but only if that chain was recorded. A
+    # transcript-less agent's artifacts are the ONLY copy that will ever exist,
+    # and nothing in its session reports that it is in that state.
+    #
+    # Set it only when the caller has not already chosen a value, so an operator
+    # who deliberately wants the default suppression can still get it.
+    if not os.environ.get("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "").strip():
+        context_env["CLAUDE_CODE_FORCE_SESSION_PERSISTENCE"] = "1"
 
     # Who spawned this agent. Without it a worker has no way to find its leader —
     # it can only guess "the orchestrator", which is wrong in any fleet more than
@@ -3178,6 +3206,8 @@ def main() -> None:
         print("  record-pattern --outcome <success|failure|stuck|unknown> [--agent-id ID] [--task DESC]")
         print("                 [--supersedes task_id[,task_id...]]  # retire patterns this one corrects")
         print("                                 Record a task pattern")
+        print("                                 --task -  reads the description from stdin (opt-in;")
+        print("                                 omitting --task never reads stdin and never blocks)")
         print("  install --list                 List supported CLIs + auto-detection results")
         print("  install --cli <name> [--path PATH] [--dry-run]")
         print("                                 Install skills+agents into a CLI's canonical dir (opt-in)")

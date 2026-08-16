@@ -62,12 +62,22 @@ PRIVATE_SKILLS: tuple[str, ...] = (
     # doc filenames — so shipping them hands every end user a reference to a
     # codebase that is not theirs. The replacement is end-user arch docs
     # generated per project by that user's own Sentinel after assistant setup.
-    # Removed until that exists; ls-arch-gen goes too, by explicit ruling, even
-    # though it is the plausible seed for that work.
+    # Removed until that exists.
+    #
+    # 🔴 AMENDED by Ryan, 2026-08-16 (later the same day): "only arch-gen should ship",
+    # and "ls-arch-gen and ls-init-liteharness go together, they ship". So ls-arch-gen is
+    # now PUBLIC and the sentence that used to sit here — "ls-arch-gen goes too, by
+    # explicit ruling" — is WITHDRAWN. Do not re-apply it from the commit message of
+    # 508fb5f, which still carries the superseded wording.
+    #
+    # The distinction that makes the amendment coherent: the other three READ LiteSuite's
+    # own architecture docs and hardcode their contents. ls-arch-gen GENERATES docs for
+    # whatever project it is pointed at. Verified before shipping — its only two
+    # "LiteSuite" mentions are a provenance sentence and a generic conditional; zero port
+    # numbers, zero doc filenames, zero panel names (positive control: ls-arch-opus, 6 hits).
     "ls-arch-opus",
     "ls-arch",
     "ls-arch-fable",
-    "ls-arch-gen",
 )
 
 # The allowlist. A skill ships ONLY if it is named here — the inverse of the
@@ -87,6 +97,10 @@ PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-conversation-lookup", "ls-debug", "ls-design-huashu",
     "ls-devstral", "ls-dream-consolidate", "ls-eva",
     "ls-eval-gate", "ls-find-skills", "ls-gen-image-or-video",
+    # ls-arch-gen: PUBLIC by Ryan's amendment 2026-08-16 — it GENERATES arch docs for the
+    # user's own project rather than hardcoding LiteSuite's. Ships together with
+    # ls-init-liteharness; the pair is the end-user setup path the ls-arch* ban deferred to.
+    "ls-arch-gen",
     "ls-generative-ui", "ls-init-liteharness", "ls-insights-deep",
     "ls-k-find-app", "ls-leader", "ls-librarian",
     "ls-library", "ls-liteharness", "ls-litetui",
