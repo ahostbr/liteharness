@@ -25,15 +25,39 @@ Every agent MUST register on activation. Choose the inbox monitor path for the c
    ```
    Monitor({ description: "LiteHarness inbox", persistent: true, timeout_ms: 3600000, command: "python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>" })
    ```
-2. **Pi coding agent: use bash background watcher.** Pi does NOT have a Monitor tool. Instead, start the watcher as a background bash process:
-   ```bash
-   python -m liteharness.hooks watch --agent-id <YOUR-SESSION-ID> &
-   ```
-   Your session ID is in the system prompt (look for "Session ID: ..."). Also register:
+2. **Pi coding agent: DO NOT start a background watcher. The `inbox` extension already does it.**
+
+   🔴 **This section used to say "Pi does NOT have a Monitor tool — start the watcher as a
+   background bash process: `python -m liteharness.hooks watch --agent-id <ID> &`". That advice
+   was WRONG and it actively destroyed message delivery.** Both halves were false:
+
+   - **Pi DOES have the equivalent.** `resources/pi-extensions/inbox` is symlinked into
+     `~/.pi/agent/extensions/` and calls
+     `pi.sendUserMessage(..., { deliverAs: "steer" })` on a 1500 ms poll plus `turn_end`.
+     That is a real asynchronous wake — strictly better than stdout, because pi has no
+     Monitor tool to capture stdout with.
+   - **The backgrounded watcher is a SINK, not a delivery path.** It is a SECOND consumer on
+     the shared `~/.liteharness/inbox/new/` maildir. It *claims* each message (moving it out
+     of `new/`) and prints it to a stdout nothing is reading — so it does not merely fail to
+     deliver, **it consumes the delivery** and starves the extension that would have worked.
+
+   Measured live 2026-08-17: a pi agent ran both. Its status board read `Inbox watcher:
+   Running ✅ / My inbox: Clean, nothing pending` while two full messages sat in its watcher
+   log, unseen. **"Running" was the problem, and every diagnostic reported it as health.**
+
+   ⭐ **A watcher that is running is not a watcher that is delivering.** The only thing that
+   distinguishes them is a message someone confirms receiving.
+
+   Just register — the extension handles the rest:
    ```bash
    python -m liteharness.cli register --agent-id <YOUR-SESSION-ID> --cli pi --model <your-model>
    ```
-   To check for messages manually: `python -m liteharness.hooks check --agent-id <YOUR-SESSION-ID>`
+   Your session ID is in the system prompt (look for "Session ID: ..."). Use it verbatim: the
+   extension resolves identity from the pi session id, and an id from anywhere else — an
+   inherited `LITEHARNESS_AGENT_ID` above all — points it at somebody else's mailbox.
+
+   Manual check (diagnostics only, NOT a standing loop — it claims messages too):
+   `python -m liteharness.hooks check --agent-id <YOUR-SESSION-ID>`
    To send messages: `python -m liteharness.cli send <target-id> "message" --from <YOUR-SESSION-ID>`
 3. **Codex terminal sessions: use stdout delivery.** Start `~\.codex\skills\liteharness\scripts\liteharness_watcher_supervisor.py` in an attached terminal with `LITEHARNESS_AGENT_ID=<YOUR-AGENT-ID>`. The supervisor only runs `python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>` and streams stdout. There is no UIAutomation, clipboard paste, SendKeys, or pane injection in the Codex watcher stack.
 4. **Register with correct info:**

@@ -1950,6 +1950,29 @@ def cmd_spawn(
     if resolved_parent:
         context_env["LITEHARNESS_SPAWNED_BY"] = resolved_parent
 
+    # 🔴 AND THE CHILD MUST NOT INHERIT THE PARENT'S OWN ID.
+    #
+    # term_env is `{**os.environ, **context_env}`, so without this line the child
+    # silently receives the SPAWNER's LITEHARNESS_AGENT_ID and every consumer that
+    # trusts the env — config.get_agent_id(), the pi inbox extension, watch-auto —
+    # adopts an identity belonging to a different agent.
+    #
+    # Measured live 2026-08-17: a pi session started ~5 minutes after a sibling in
+    # the same shell inherited the SIBLING's id. Its inbox extension then polled
+    # that sibling's mailbox, correctly and healthily, at 1500ms, for its entire
+    # life. The sibling was already dead, so nothing was ever claimed and nothing
+    # was ever delivered, while every diagnostic reported a running watcher.
+    # Proven by a two-arm test: a message addressed to the sibling's id was
+    # claimed and steered into the victim's context; the identical message
+    # addressed to its own id was never touched.
+    #
+    # Blanked rather than deleted: the key must be PRESENT and empty so it
+    # overrides the inherited value in the merge above. Every reader treats "" as
+    # absent (config.py:175 `if explicit:`, extension.ts `|| ""`), so the child's
+    # SessionStart hook mints the id from its own session — which is the one
+    # identity that cannot belong to somebody else.
+    context_env["LITEHARNESS_AGENT_ID"] = ""
+
     # `--name` used to reach the agent only as an instruction inside the typed
     # bootstrap ("register with --name X") — which vanished whenever the
     # bootstrap did (3 confirmations, 2026-08-06). The SessionStart hook honors
