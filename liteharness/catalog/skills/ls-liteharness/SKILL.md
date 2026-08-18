@@ -29,36 +29,32 @@ Every agent MUST register on activation. Choose the inbox monitor path for the c
 
    🔴 **This section used to say "Pi does NOT have a Monitor tool — start the watcher as a
    background bash process: `python -m liteharness.hooks watch --agent-id <ID> &`". That advice
-   was WRONG and it actively destroyed message delivery.** Both halves were false:
-
+   was WRONG and it actively destroyed message delivery** (root-caused 2026-08-17). Both halves
+   were false:
    - **Pi DOES have the equivalent.** `resources/pi-extensions/inbox` is symlinked into
-     `~/.pi/agent/extensions/` and calls
-     `pi.sendUserMessage(..., { deliverAs: "steer" })` on a 1500 ms poll plus `turn_end`.
-     That is a real asynchronous wake — strictly better than stdout, because pi has no
-     Monitor tool to capture stdout with.
-   - **The backgrounded watcher is a SINK, not a delivery path.** It is a SECOND consumer on
-     the shared `~/.liteharness/inbox/new/` maildir. It *claims* each message (moving it out
-     of `new/`) and prints it to a stdout nothing is reading — so it does not merely fail to
-     deliver, **it consumes the delivery** and starves the extension that would have worked.
+     `~/.pi/agent/extensions/` and calls `pi.sendUserMessage(..., { deliverAs: "steer" })` on a
+     1500 ms poll plus `turn_end` — a real asynchronous wake.
+   - **The backgrounded watcher is a SINK.** It is a SECOND consumer on the shared
+     `~/.liteharness/inbox/new/` maildir: it _claims_ each message and prints it to a stdout
+     nothing reads. It does not fail to deliver — **it consumes the delivery** and starves the
+     extension that would have worked.
 
-   Measured live 2026-08-17: a pi agent ran both. Its status board read `Inbox watcher:
-   Running ✅ / My inbox: Clean, nothing pending` while two full messages sat in its watcher
-   log, unseen. **"Running" was the problem, and every diagnostic reported it as health.**
-
-   ⭐ **A watcher that is running is not a watcher that is delivering.** The only thing that
-   distinguishes them is a message someone confirms receiving.
+   Measured: an agent ran both. Its board read `Inbox watcher: Running ✅ / My inbox: Clean` while
+   two full messages sat unread in its log. ⭐ **A watcher that is running is not a watcher that is
+   delivering.**
 
    Just register — the extension handles the rest:
+
    ```bash
    python -m liteharness.cli register --agent-id <YOUR-SESSION-ID> --cli pi --model <your-model>
    ```
-   Your session ID is in the system prompt (look for "Session ID: ..."). Use it verbatim: the
-   extension resolves identity from the pi session id, and an id from anywhere else — an
-   inherited `LITEHARNESS_AGENT_ID` above all — points it at somebody else's mailbox.
+
+   Your session ID is in the system prompt (look for "Session ID: ..."). Use it verbatim.
 
    Manual check (diagnostics only, NOT a standing loop — it claims messages too):
    `python -m liteharness.hooks check --agent-id <YOUR-SESSION-ID>`
    To send messages: `python -m liteharness.cli send <target-id> "message" --from <YOUR-SESSION-ID>`
+
 3. **Codex terminal sessions: use stdout delivery.** Start `~\.codex\skills\liteharness\scripts\liteharness_watcher_supervisor.py` in an attached terminal with `LITEHARNESS_AGENT_ID=<YOUR-AGENT-ID>`. The supervisor only runs `python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>` and streams stdout. There is no UIAutomation, clipboard paste, SendKeys, or pane injection in the Codex watcher stack.
 4. **Register with correct info:**
    ```bash
@@ -213,7 +209,7 @@ All spawned agents default to `bypassPermissions` and receive bootstrap instruct
 ### 🔴 SPAWNED AGENTS LOSE THEIR TRANSCRIPT UNLESS YOU FORCE PERSISTENCE
 
 **A spawning session almost always has `CLAUDE_CODE_CHILD_SESSION` set in its own environment. The
-child inherits it, and Claude Code then suppresses transcript persistence *for the child* while the
+child inherits it, and Claude Code then suppresses transcript persistence _for the child_ while the
 parent keeps writing its own.** Nothing in the child's session reports this beyond one status-line
 warning, and the parent looks perfectly healthy — so the failure is invisible from the side that
 spawned it.
@@ -245,7 +241,7 @@ CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 claude
 
 ⚠️ **Why this is worse than a missing log file.** The transcript is the recovery store of last
 resort. A file an agent wrote and then lost is reconstructable from its own `Write`/`Edit` chain —
-but *only if that chain was recorded*. A transcript-less agent's artifacts are the **only copy that
+but _only if that chain was recorded_. A transcript-less agent's artifacts are the **only copy that
 will ever exist**, and it cannot tell you it is in that state. Treat any such seat as
 unique-copy: make it commit early and often, and never rely on being able to reconstruct its work
 after the fact.
@@ -255,6 +251,7 @@ after the fact.
 ```bash
 ls ~/.claude/projects/<project-slug>/<session-id>.jsonl
 ```
+
 A directory at that id instead of a file means the transcript is not being written.
 
 ## Agent Lifecycle — /clear vs /exit

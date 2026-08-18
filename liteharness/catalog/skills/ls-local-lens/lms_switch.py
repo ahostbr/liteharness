@@ -51,6 +51,16 @@ MODELS = {
     "qwen3.5-9b-claude-4.6-opus-reasoning-distilled": (16384, "opus-9b",       9.5),
     "mistralai/devstral-small-2-2512":                (32768, "devstral",     15.2),
     "gemma-3-12b-it-uncensored":                      (16384, "gemma-12b",    13.4),
+    # ── Qwen3.8 27B (Alibaba, Apache 2.0, released 2026-08-14) ──
+    # Artificial Analysis: Intelligence 52 (ties GPT-5.6 Luna), Agentic 51 (6th of 29),
+    # #1/135 in the open-weights 4B-40B class. Vision-capable. Sizes below INCLUDE the
+    # bundled mmproj (measured: 9.01 + 0.93 = 9.94).
+    # VRAM at load ~= weights + 0.0696 MiB/token of context + 2818 MiB compute buffer.
+    # Context ceilings below are MEASURED RUNNABLE limits on a 32 GB 5090, not load limits:
+    # Q3_K_M *loads* at 262k and then runs at 42 tok/s vs IQ2's 1310. Budget to ~90%.
+    "qwen/qwen3.8-27b@iq2_xxs":                       (262144, "qwen38-iq2",   9.9),
+    "qwen/qwen3.8-27b@q3_k_m":                        (196608, "qwen38-q3",   14.8),
+    "qwen/qwen3.8-27b@q4_k_m":                        (153600, "qwen38-q4",   19.4),
 }
 
 VRAM_BUDGET = 31.5  # Default: RTX 5090 — adjust to match your GPU's VRAM (run nvidia-smi to check)
@@ -64,6 +74,32 @@ PROFILES = {
     "reasoning": [("qwen3.5-0.8b", None), ("qwen3.5-9b-claude-4.6-opus-reasoning-distilled", None)],
     "maxpower":  [("mistralai/devstral-small-2-2512", 65536)],
     "coding":    [("mistralai/devstral-small-2-2512", 32768)],
+
+    # ── Qwen3.8 27B context ladder (Ryan, 2026-08-17) ────────────────────────
+    # One model, three quants, trading precision for context as a conversation grows.
+    # Swap AT a compaction boundary, never mid-turn: a reload destroys the KV cache and
+    # the whole context must be re-prefilled through the new quant.
+    #
+    #   rung-a  ->  short context, most precision      (start here, and after every compact)
+    #   rung-b  ->  mid context
+    #   rung-c  ->  max context, and the rung that PERFORMS the compaction
+    #
+    # Compaction is a summarisation task: it needs capacity to READ 260k, not precision to
+    # WRITE a summary — which is why the 2-bit rung is the right one to compact on. After
+    # the compact, drop straight back to rung-a.
+    #
+    # 🔴 UNPROVEN PREMISE: the ladder only pays if rung-a is measurably better than rung-c
+    # at short context. The 2026-08-17 five-arm eval found QUALITY FLAT across quants and
+    # its cost conclusions were retracted (Reasoning Effort confound + a self-inflicted
+    # answer leak). If the rerun confirms flat quality, this ladder collapses to rung-c
+    # alone and should be deleted rather than kept. Do not treat these rungs as validated.
+    "qwen38-rung-a": [("qwen/qwen3.8-27b@q4_k_m", 150000)],
+    "qwen38-rung-b": [("qwen/qwen3.8-27b@q3_k_m", 196608)],
+    "qwen38-rung-c": [("qwen/qwen3.8-27b@iq2_xxs", 262144)],
+    # Scout rig — what Ryan actually had loaded 2026-08-17: small context, 4 parallel
+    # slots, for fan-out lookups rather than one long conversation. NOTE: `parallel` is
+    # not expressible in this tuple format; set it in LM Studio or via `lms load --parallel 4`.
+    "qwen38-scout":  [("qwen/qwen3.8-27b@iq2_xxs", 50176)],
 }
 
 # Preset templates for different roles

@@ -192,7 +192,7 @@ Nav auto-discovers the new mockup from the registry. No manual nav edits needed.
 | Component      | Import                                 | Props                                                                              |
 | -------------- | -------------------------------------- | ---------------------------------------------------------------------------------- |
 | `ScrollReveal` | `@/components/animations/ScrollReveal` | `direction` (up/down/left/right/none), `delay`, `distance`, `duration`, `children` |
-| `CountUp`      | `@/components/animations/CountUp`      | **`end`** (number), `prefix`, `suffix`, `duration`, `className`                     |
+| `CountUp`      | `@/components/animations/CountUp`      | **`end`** (number), `prefix`, `suffix`, `duration`, `className`                    |
 
 ### Shared UI
 
@@ -555,6 +555,7 @@ Read the source file. Identify:
 > `curl | grep` for your copy passes. **Only a screenshot shows it.** Take one before calling any
 > visual page done — this is the same class as items rendering invisibly inside an opaque mesh:
 > every non-visual instrument agreed the page was fine.
+
 - **Sections** — each `##` heading becomes a visual section with `ScrollReveal`
 - **Tables** → Recharts bar charts, Nivo heatmaps, or styled comparison grids
 - **Lists** → animated card grids with staggered reveals

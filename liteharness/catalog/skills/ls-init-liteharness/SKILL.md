@@ -110,8 +110,8 @@ the next orchestrator. If a slot has no answer, delete the line or write the def
 ship the braces.
 
 ⚠️ **This rule used to be unsatisfiable, and "nothing checks" is no longer true.** The
-template's own opening blockquote reads *"This file is a TEMPLATE until you run
-`/ls-init-liteharness`. Every `{{SLOT}}` below is a question the interview answers."* That
+template's own opening blockquote reads _"This file is a TEMPLATE until you run
+`/ls-init-liteharness`. Every `{{SLOT}}` below is a question the interview answers."_ That
 `{{SLOT}}` is **prose about slots**, not a slot — there is nothing to substitute it with, so
 obeying the rule literally was impossible, and generated files kept either a placeholder or
 a notice telling their owner the interview had not been run. Scaffolding must be **deleted,

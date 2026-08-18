@@ -1,7 +1,7 @@
 {
   "source_repo": "ahostbr/liteharness-plugin",
   "source_path": "C:\\Projects\\LiteSuite\\resources\\liteharness-plugin",
-  "synced_at": "2026-08-16T21:16:21.448228+00:00",
+  "synced_at": "2026-08-18T16:26:24.094008+00:00",
   "subtrees": [
     "skills",
     "agents",
@@ -9,5 +9,5 @@
     "hooks"
   ],
   "file_count": 396,
-  "hash": "c351565e97e7"
+  "hash": "27e5d5257a76"
 }
