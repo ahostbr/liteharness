@@ -416,6 +416,12 @@
         "hooks": [
           {
             "type": "command",
+            "command": "python -m liteharness.hooks compact-backup",
+            "timeout": 180,
+            "async": true
+          },
+          {
+            "type": "command",
             "command": "python -m liteharness.hooks obs PreCompact",
             "timeout": 30,
             "async": true
@@ -426,6 +432,12 @@
     "PostCompact": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "python -m liteharness.hooks compact-log",
+            "timeout": 30,
+            "async": true
+          },
           {
             "type": "command",
             "command": "python -m liteharness.hooks obs PostCompact",

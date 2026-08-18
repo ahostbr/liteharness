@@ -194,6 +194,7 @@ KNOWN_ACTIONS: frozenset[str] = frozenset(
         "check", "register", "register-quiet", "heartbeat", "watch", "watch-auto",
         "deregister", "bridge", "stop-failure", "worktree-create", "worktree-remove",
         "task-created", "cwd-changed", "memory-nudge", "obs", "cleanup",
+        "compact-backup", "compact-log",
     }
 )
 
@@ -2001,6 +2002,126 @@ def _is_codex_hook_runtime() -> bool:
     )
 
 
+# ── compaction: transcript backup + summary log ───────────────────────────────
+#
+# Both of these ran for months as loose .py files wired only into one developer's
+# personal ~/.claude/settings.json, and therefore reached no user. That was not a
+# per-hook decision — the delivery mechanism IS `python -m liteharness.hooks <verb>`,
+# so a standalone script simply has no path to a user's box. Ported to verbs
+# 2026-08-18 so they ship like everything else.
+
+COMPACT_BACKUP_KEEP = 2
+"""Backups retained per session. Snapshots are byte-exact append-only PREFIXES of
+each other, so the newest contains every older one in full and the rest hold zero
+unique bytes — keeping 2 is lossless. Verified by prefix-hashing 33 sessions before
+the first bulk delete, which reclaimed 48.77 GB of a 56.23 GB store."""
+
+
+def _prune_compact_backups(target_dir, session_short: str, just_written) -> None:
+    """Delete this session's redundant backups, newest COMPACT_BACKUP_KEEP retained.
+
+    Scoped to ONE session — never touches another session's files. Refuses to delete
+    anything not strictly smaller than the smallest keeper, because "smaller" is what
+    makes a snapshot an earlier prefix; a file breaking that ordering is something
+    this function does not understand, so it is left alone.
+    """
+    if not just_written.exists() or just_written.stat().st_size == 0:
+        return  # the new copy did not land — delete nothing
+
+    backups = sorted(
+        (p for p in target_dir.glob(f"*_{session_short}.jsonl") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if len(backups) <= COMPACT_BACKUP_KEEP:
+        return
+
+    keep, drop = backups[:COMPACT_BACKUP_KEEP], backups[COMPACT_BACKUP_KEEP:]
+    if just_written not in keep:
+        return  # the file we just wrote is not among the keepers — bail out
+
+    floor = min(p.stat().st_size for p in keep)
+    for p in drop:
+        try:
+            if p.stat().st_size < floor:
+                p.unlink()
+        except OSError:
+            pass  # a locked or vanished file is not worth failing a compaction
+
+
+def compact_backup(hook_input: dict) -> None:
+    """PreCompact: copy the transcript to ~/.claude/compact-backups/, then prune.
+
+    Compaction discards; the .jsonl does not. This is the only complete record of a
+    session, and it is what turned a "confirmed unrecoverable" swept handoff into a
+    clean replay. A full copy is written on EVERY compaction, which is why the prune
+    exists — one 11-day session accreted 53 snapshots / 25.77 GB unattended.
+    """
+    import shutil
+
+    transcript_path = hook_input.get("transcript_path", "")
+    if not transcript_path:
+        return
+    src = Path(transcript_path)
+    if not src.exists():
+        return
+
+    trigger = hook_input.get("trigger", "unknown")
+    session_id = hook_input.get("session_id") or config.get_agent_id() or "unknown"
+    session_short = session_id[:8] if session_id else "unknown"
+
+    target_dir = Path.home() / ".claude" / "compact-backups"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{trigger}_{session_short}.jsonl"
+    dest = target_dir / filename
+
+    # Copy to a sidecar, then rename into place. An interrupted copy must never be
+    # VISIBLE as a backup — a truncated file would otherwise count as a keeper and
+    # get the real one pruned. The .tmp suffix keeps it out of the prune's glob.
+    tmp = dest.with_suffix(".jsonl.tmp")
+
+    # This hook runs async with a timeout. A copy killed mid-flight leaves a .tmp
+    # that nothing else collects — invisible to the prune by design, so it would
+    # accumulate silently. Sweep this session's orphans before writing a new one.
+    for stale in target_dir.glob(f"*_{session_short}.jsonl.tmp"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dest)
+
+    try:
+        _prune_compact_backups(target_dir, session_short, dest)
+    except Exception:
+        pass  # a failed prune must never cost us the backup we just made
+
+
+def compact_log(hook_input: dict) -> None:
+    """PostCompact: append one line per compaction to ~/.claude/compact-history.log.
+
+    The summary is the only artifact describing WHAT a compaction dropped; without
+    it a compacted session cannot say what it lost. Appended, never rewritten.
+    """
+    summary = hook_input.get("compact_summary", "")
+    if not summary:
+        return
+
+    trigger = hook_input.get("trigger", "unknown")
+    session_id = hook_input.get("session_id") or config.get_agent_id() or "unknown"
+    session_short = session_id[:8] if session_id else "unknown"
+
+    summary_line = " ".join(summary.split())[:500]
+    log_path = Path.home() / ".claude" / "compact-history.log"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(
+            f"[{datetime.now().isoformat()}] trigger={trigger} "
+            f"session={session_short} | {summary_line}\n"
+        )
+
+
 def main() -> None:
     """CLI entry point for hook scripts."""
     # Fix Windows cp1252 encoding — message bodies may contain unicode (arrows, emoji, etc.)
@@ -2191,6 +2312,10 @@ def main() -> None:
             sync_task_completed(hook_input)
         if event_type:
             emit_obs_event(hook_input, event_type)
+    elif action == "compact-backup":
+        compact_backup(hook_input)
+    elif action == "compact-log":
+        compact_log(hook_input)
     elif action == "cleanup":
         removed = inbox.cleanup()
         if removed:
