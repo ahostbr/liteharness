@@ -3296,9 +3296,18 @@ def main() -> None:
         print("  discover [count]               Discover active agents")
         print("  spawn [options]                Spawn a new Claude Code session")
         print("  sessions <cmd> [options]       Save/restore terminal agent sessions")
+        # 🔴 TWO HELP TEXTS FOR ONE COMMAND. Keep them equal to register's own
+        # usage line (search "Usage: liteharness register"), because they drift and
+        # THE FRIENDLIER ONE IS THE ONE PEOPLE READ. This block was missing
+        # --takeover, --session-pid and --canvas-session; an agent read it to learn
+        # the register flags and was told --session-pid does not exist, hours after
+        # it was added. Same family as a doc that describes the thing rather than
+        # being generated from it: the authoritative description and the thing
+        # itself, disagreeing, with the approachable one wrong.
         print("  register --agent-id ID [--cli CLI] [--model MODEL] [--name NAME] [--tier TIER] [--team TEAM]")
+        print("           [--takeover] [--session-pid PID]")
         print("           [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID]")
-        print("           [--workspace-id WID] [--project-id PID]")
+        print("           [--workspace-id WID] [--project-id PID] [--canvas-session CSID]")
         print("                                 Update agent presence info with spatial awareness data")
         print("  query-patterns [--top N] [--format text|json] [--query STR]")
         print("                                 Query task patterns (BM25)")
