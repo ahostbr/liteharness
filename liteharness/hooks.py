@@ -618,6 +618,15 @@ def check_inbox() -> None:
                 msg["_dir"] = directory.name
                 all_messages.append(msg)
 
+    # HOUSEKEEPING RUNS WHETHER OR NOT THERE IS MAIL.
+    # This call used to sit at the END of the reporting block, below the
+    # `if not all_messages: return` immediately after it -- so the "hourly"
+    # janitor only ran on a check that HAD mail to report. Measured
+    # 2026-08-19: last run 13.7h earlier against a 1.0h throttle, with five
+    # presence files idle 9-14h sitting unpurged. _maybe_cleanup carries its
+    # own hourly throttle, so calling it on every check costs a mtime read.
+    _maybe_cleanup()
+
     if not all_messages:
         return
 
@@ -664,8 +673,7 @@ def check_inbox() -> None:
             except OSError:
                 pass  # Already moved or locked
 
-    # Periodic cleanup: remove expired messages (once per hour)
-    _maybe_cleanup()
+    # (housekeeping moved above the no-mail early return -- see _maybe_cleanup call site)
 
 
 def _maybe_cleanup() -> None:
@@ -839,6 +847,22 @@ def _purge_stale_agents() -> int:
 
             seen_ts = datetime.fromisoformat(last_seen).timestamp()
             idle_seconds = now - seen_ts
+
+            # A PROVABLY DEAD OWNER IS DEAD NOW, NOT IN AN HOUR.
+            # Closing a terminal window kills the session outright: no Stop,
+            # no SessionEnd, no deregister -- you cannot hook an event that
+            # never fires, so for the common exit path the reaper IS the
+            # mechanism, not a safety net. Heartbeat age alone is the wrong
+            # instrument because the WATCHER writes last_seen, not the agent,
+            # so a surviving watcher keeps a corpse looking fresh.
+            session_pid = data.get("session_pid")
+            if session_pid and not _pid_alive(session_pid):
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+                continue
 
             # Fast-path: agent recapped and has been idle > RECAP_STALE_SECONDS
             recap_at = data.get("recap_at")

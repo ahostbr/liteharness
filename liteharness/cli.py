@@ -2864,6 +2864,45 @@ def cmd_pty_kill(agent_id: str) -> None:
         sys.exit(1)
 
 
+def _dedupe_by_session_pid(agents: list) -> tuple:
+    """Collapse rows that describe ONE process. Returns (kept, superseded).
+
+    `/resume` boots with a throwaway session id, SessionStart registers it, then
+    the resume adopts the real id and registers AGAIN -- two rows, one process,
+    ~13 seconds apart (measured 2026-08-19: pid 61112 GrimShard 14:56:31 then
+    Sentinel 14:56:45; pid 269264 LongRivet 14:56:08 then OpenBolt 14:56:20).
+
+    The existing liveness check cannot catch this: BOTH rows carry the same
+    LIVE pid, so `_pid_alive` is correctly True for each. A filter that asks
+    "is this dead?" can never collapse two rows that are both alive.
+
+    The LATER registration wins -- that is the id the session actually adopted;
+    the earlier one is the throwaway it booted with.
+
+    Rows with no session_pid are NEVER grouped. They would all collapse into a
+    single bucket and the roster would lose every agent whose owner is unknown,
+    which is the opposite failure and a worse one.
+    """
+    by_pid: dict = {}
+    kept: list = []
+    for a in agents:
+        pid = a.get("session_pid")
+        if not pid:
+            kept.append(a)          # unknown owner: never grouped
+            continue
+        prev = by_pid.get(pid)
+        if prev is None:
+            by_pid[pid] = a
+            continue
+        # keep the later registration; the earlier is the resume throwaway
+        if str(a.get("registered_at") or "") > str(prev.get("registered_at") or ""):
+            by_pid[pid] = a
+    superseded = [a for a in agents
+                  if a.get("session_pid") and by_pid.get(a["session_pid"]) is not a]
+    kept.extend(by_pid.values())
+    return kept, superseded
+
+
 def cmd_discover(count: int = 100, include_all: bool = False) -> None:
     """Discover live agents.
 
@@ -2931,6 +2970,13 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
     agents.sort(key=lambda a: a.get("_age_seconds", float("inf")))
     if not include_all:
         agents = [a for a in agents if _is_live(a)]
+    # Collapse /resume double-registrations. NOT silent: a dropped row that
+    # nothing reports is how a roster gets quietly "fixed" into being wrong
+    # in a new way.
+    superseded: list = []
+    if not include_all:
+        agents, superseded = _dedupe_by_session_pid(agents)
+        agents.sort(key=lambda a: a.get("_age_seconds", float("inf")))
     agents = agents[:count]
 
     if unreadable:
@@ -2973,6 +3019,11 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
 
     header = "Agents" if include_all else "Active agents"
     print(f"{header} ({len(agents)}):")
+    if superseded:
+        from . import naming as _naming
+        print(f"  ({len(superseded)} superseded by a later registration on the same PID:",
+              ", ".join(f"{_naming.get_name(a.get('agent_id',''))}/{a.get('session_pid')}"
+                        for a in superseded) + ")")
     for a in agents:
         age = int(a.get("_age_seconds", 0))
         if age < 60:
