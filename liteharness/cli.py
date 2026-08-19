@@ -860,6 +860,7 @@ def cmd_register(
     project_id: str | None = None,
     canvas_session: str | None = None,
     takeover: bool = False,
+    session_pid: int | None = None,
 ) -> None:
     """Update an agent's presence file with correct CLI/model/name/tier/team and spatial info."""
     from . import naming
@@ -875,6 +876,34 @@ def cmd_register(
             presence = {}
     else:
         presence = {"agent_id": agent_id, "started_at": datetime.now(timezone.utc).isoformat()}
+
+    # The OWNING process, so liveness is a fact about a pid rather than a guess
+    # from a heartbeat someone else writes.
+    #
+    # 🔴 WITHOUT THIS, A CLI-REGISTERED AGENT IS PERMANENTLY INDISTINGUISHABLE
+    # FROM A CORPSE. Two things read presence.session_pid and both treat a falsy
+    # one as "not live": _agent_record_live (so --takeover will steal the name
+    # from a RUNNING agent) and the janitor's dead-owner purge (so the row can
+    # never be reaped by pid and simply accumulates). Measured 2026-08-19 on the
+    # live roster: six rows for one LiteTUI seat, four of them dead, and two live
+    # probes in which the second took the name from the first.
+    #
+    # hooks.py has always recorded this; `liteharness register` never did, so
+    # every non-hook caller was invisible to both mechanisms.
+    #
+    # OPT-IN ON PURPOSE. The caller passes its OWN pid; we do not infer one from
+    # os.getppid(), because for a caller wrapped in a shell the parent is a
+    # transient process and recording it would make the row reapable while the
+    # agent is still alive -- trading an accumulation bug for a disappearance
+    # bug. A caller that passes nothing behaves exactly as before.
+    if session_pid:
+        from .hooks import _pid_alive
+        if _pid_alive(session_pid):
+            presence["session_pid"] = int(session_pid)
+        else:
+            # Recording a dead pid would mark the row reapable the instant it is
+            # written. Refuse it and say so rather than silently accepting.
+            print(f"    Warning: --session-pid {session_pid} is not a live process; not recorded.")
 
     if cli:
         presence["cli"] = cli
@@ -3470,11 +3499,20 @@ def main() -> None:
         reg_project_id = None
         reg_canvas_session = None
         reg_takeover = False
+        reg_session_pid = None
         i = 2
         while i < len(sys.argv):
             if sys.argv[i] == "--takeover":
                 reg_takeover = True
                 i += 1
+                continue
+            if sys.argv[i] == "--session-pid" and i + 1 < len(sys.argv):
+                try:
+                    reg_session_pid = int(sys.argv[i + 1])
+                except ValueError:
+                    print(f"Error: --session-pid must be an integer, got {sys.argv[i + 1]!r}")
+                    sys.exit(1)
+                i += 2
                 continue
             if sys.argv[i] == "--agent-id" and i + 1 < len(sys.argv):
                 reg_agent_id = sys.argv[i + 1]
@@ -3518,9 +3556,9 @@ def main() -> None:
             else:
                 i += 1
         if not reg_agent_id:
-            print("Usage: liteharness register --agent-id ID [--cli CLI] [--model MODEL] [--name NAME] [--tier TIER] [--team TEAM] [--takeover] [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID] [--workspace-id WID] [--project-id PID] [--canvas-session CSID]")
+            print("Usage: liteharness register --agent-id ID [--cli CLI] [--model MODEL] [--name NAME] [--tier TIER] [--team TEAM] [--takeover] [--session-pid PID] [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID] [--workspace-id WID] [--project-id PID] [--canvas-session CSID]")
             sys.exit(1)
-        cmd_register(reg_agent_id, reg_cli, reg_model, reg_name, reg_tier, reg_team, reg_pane_id, reg_leaf_id, reg_session_id, reg_thread_id, reg_workspace_id, reg_project_id, canvas_session=reg_canvas_session, takeover=reg_takeover)
+        cmd_register(reg_agent_id, reg_cli, reg_model, reg_name, reg_tier, reg_team, reg_pane_id, reg_leaf_id, reg_session_id, reg_thread_id, reg_workspace_id, reg_project_id, canvas_session=reg_canvas_session, takeover=reg_takeover, session_pid=reg_session_pid)
     elif cmd == "pty-daemon":
         from . import pty_daemon
         daemon = pty_daemon.PtyDaemon()
