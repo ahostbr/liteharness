@@ -225,8 +225,19 @@ class MemoryNudgeTests(unittest.TestCase):
         payload = buf.getvalue().strip()
         # fired
         self.assertNotEqual(payload, "")
-        # tiny — a pointer, not injected content
-        self.assertLess(len(payload), 400)
+        # A pointer, not injected content. Pinned to the SINGLE source of truth
+        # rather than to a magic number: the payload must be exactly what
+        # _memory_checkin_text() renders and nothing appended. A literal bound
+        # cannot express this — 6736b4e grew the text from ~390 to 841 chars on
+        # purpose (it added the 200-line / 25KB cap language, which is Claude
+        # Code's actual loader behaviour, not advice) and broke this assertion in
+        # the same commit. The red then shipped through 0.3.7 AND 0.3.8, because a
+        # threshold nobody can justify is a threshold nobody updates.
+        self.assertEqual(payload, hooks._memory_checkin_text(expected_path).strip())
+        # Backstop for the property the number was reaching for: MEMORY.md is
+        # ~384KB here, so any real content-injection blows past this by orders of
+        # magnitude while the deliberate template stays far under it.
+        self.assertLess(len(payload), 4000)
         # names the MEMORY.md index path
         self.assertIn("MEMORY.md", payload)
         self.assertIn(expected_path, payload)

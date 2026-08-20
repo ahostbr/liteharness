@@ -44,12 +44,24 @@ session that does not exist, while still exiting 0.
 
 ```bash
 python -m liteharness.cli register --agent-id <YOUR-SESSION-ID> --cli claude-code \
-  --model <YOUR-MODEL> --tier orchestrator --name "{{ORCHESTRATOR_NAME}}" --takeover
+  --model <YOUR-MODEL> --tier orchestrator --name "{{ORCHESTRATOR_NAME}}" --takeover \
+  --session-pid <PID-OF-THE-PROCESS-THAT-IS-THIS-SESSION>
 ```
 
 `--takeover` claims the name from a dead ghost holder (stale heartbeat or dead
 `session_pid`), evicting it recoverably. It **refuses** when the holder is genuinely live —
 it never steals from a running agent.
+
+🔴 **`--session-pid` is what makes that refusal true of YOU.** Both the takeover guard and
+the janitor's dead-owner purge read `presence.session_pid`, and **both treat a missing value
+as "already dead"** — so a registration without it is *simultaneously* unreapable by the
+janitor and unprotected against takeover. Measured 2026-08-19: two live probes registered
+without it, and the second took the name from the first while the first was still running.
+
+Pass the pid of the process that **is** the session — not the pid of the shell running this
+command. A CLI-driven agent uses its own `os.getpid()`; an agent started by Claude Code
+already has it written by the `SessionStart` hook, which has always set this field. Only the
+`register` path could omit it, which is why the CLI-registered seats were the ones that broke.
 
 ## Step 3 — Watch your inbox
 
