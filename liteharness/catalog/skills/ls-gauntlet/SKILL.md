@@ -1,13 +1,21 @@
 ---
 name: ls-gauntlet
-description: Turns any goal into one paste-ready gauntlet prompt - concrete artifact as the quality bar, builder/critic pairs per piece, full-context critics who must measure their own side, /goal as the stop-gate and /loop as the re-entry, run on LiteSuite systems. Triggers on 'gauntlet', 'gauntlet loop', 'gauntlet this', 'loop until it beats X', 'grind until it wins'.
+description: A specialization of the orchestrator protocol - turns any goal into one paste-ready gauntlet prompt with a concrete FETCHABLE artifact as the quality bar, builder/critic pairs per piece, full-context critics who must measure their own side, /goal as the stop-gate and /loop as the re-entry, run on LiteSuite systems. Triggers on 'gauntlet', 'gauntlet loop', 'gauntlet this', 'loop until it beats X', 'grind until it wins'.
 ---
 
 # Gauntlet — full-context edition
 
 The user gives a goal. You hand back ONE short paste-ready prompt plus ONE `/goal` line, and offer to run it. You are not doing the work — you are writing the prompt that makes another agent grind until the work beats a real reference.
 
-Modeled on `robonuggets/gauntlet-loop`. **Diverges from it in three places, all by ruling:** critics are never blind, the no-finish-line is enforced by `/goal` rather than requested by prose, and the run rides on LiteSuite — real terminal agents in panes, the kanban as the loop's state machine, Lite* apps for generation. The original prompt asks one agent to imagine this machinery; this house already built it.
+**This is a SPECIALIZATION of the orchestrator protocol, not a parallel doctrine.** Ryan's flowchart maps ~1:1 onto the orchestrator flow — 21 of 23 nodes (mapping table: `docs/plans/2026-08-22-gauntlet-loop/flow.md`; doctrine: `prompts/orchestrator-role.md` Phases 1–6, which ships in the same plugin artifact as this skill, so the pointers resolve for end users). This file therefore carries ONLY what genuinely diverges, plus the LiteSuite wiring. For everything else, follow the doctrine — cite it, never requote it; a second copy is how it drifts.
+
+**The three divergences — the gauntlet's actual content:**
+
+1. **The referent.** Written PRD acceptance criteria become a FETCHABLE real-world exemplar — the bar. (PRD structure otherwise per `prompts/protocols/prd-template.md`.)
+2. **The verdict form.** APPROVE / REQUEST-CHANGES / BLOCK (`prompts/protocols/review-verdicts.md`) becomes binary **OURS / BAR**, with **UNEVALUABLE as BLOCK's honest cousin** — a verdict that refuses to be a verdict, stated as such.
+3. **The enforcement.** Convergence-by-doctrine (`prompts/protocols/convergence-signals.md`) gains a harness-native gate: `/goal` blocks stopping, dynamic `/loop` re-enters. The no-finish-line lives in the CLI, not in prose.
+
+Modeled originally on `robonuggets/gauntlet-loop`; its blind critics are rejected by ruling (below).
 
 > Every integration claim below carries a `file:line` citation, verified 2026-08-22. Lines drift — **cite the symbol, keep the line as a hint** — but a claim with no anchor is not a claim.
 
@@ -46,12 +54,14 @@ goal + examples + rules -> figure out what GREAT actually looks like    <- re-pl
          time/budget ran out  -> STOP HONESTLY AND REPORT WHY
 ```
 
-What the shape buys, in one line each:
-- **The outer gauntlet is the guard against per-piece green with an unowned join** — pieces that each pass can still assemble into an inert whole.
-- **Flaw-finder and bar-judge are different seats**: one asks *what is wrong with this*, the other asks *does it beat the reference*. Collapsing them loses the flaws the bar never tests.
-- **The experience pass comes first**: a critic who has not used the thing critiques a diff, not a product.
-- **Failure attribution routes to the CAUSE** — one failed join re-enters one build loop, never a restart of the world; a failed PLAN re-enters at "what does great look like", never at a piece.
-- **Honest exhaustion is a first-class terminal**, distinct from success — and success itself is *finished with proof*, not finished.
+"Figure out what great looks like" INCLUDES `lst run pattern action=query query="<goal>"` — Phase 1 doctrine; a run that skips it starts amnesiac.
+
+What the shape buys, each with its doctrine home:
+- **The outer gauntlet guards against per-piece green with an unowned join** — Phase 5 aggregate-and-gate + closure gates on the merged result.
+- **Flaw-finder and bar-judge are different seats** — T5 polymathic review vs the Issue↔Plan↔Implementation↔Review comparison. Collapsing them loses the flaws the bar never tests.
+- **The experience pass comes first** — the E2E "app must demonstrably work" gate: run it as a user before critiquing it as a reviewer.
+- **Failure attribution routes to the CAUSE** — escalation routing; one failed join re-enters one build loop, a failed PLAN re-enters at "what does great look like" (STUCK→change-approach / Andon Cord).
+- **Honest exhaustion is a first-class terminal** — the budget-exhaustion hard stop: pause, summarize spent/remaining, notify the human. Success itself is *finished with proof* — the workers-cannot-declare-DONE-without-evidence law, verbatim.
 
 ## The bar is the whole trick
 
@@ -79,7 +89,7 @@ The original skill blinds its critics — output only, labels stripped, never th
 
 So independence is bought differently here, and it costs the critic work, not information:
 
-- **Two seats per piece, not one.** The FLAW-FINDER critiques absolutely — no bar in view, just *what is wrong* — after an experience pass where it runs the piece the way a user would. The BAR-JUDGE is a second, distinct seat that only compares against the examples. Different failure modes, different questions, different agents (`liteharness spawn --model <m>` makes the second seat a different model when the run warrants it).
+- **Two seats per piece, not one.** The FLAW-FINDER critiques absolutely — no bar in view, just *what is wrong* — after an experience pass where it runs the piece the way a user would (that seat is T5 polymathic review). The BAR-JUDGE is a second, distinct seat that only compares against the examples (the Canonical Loop's Issue↔Plan↔Implementation↔Review comparison, retargeted at the exemplar). Different failure modes, different questions, different agents — `liteharness spawn --model <m>` makes the second seat a different model when the run warrants it.
 - **Fresh context, full evidence.** Neither seat inherits the builder's conversation — but each is handed the output, the code, the reasoning, AND (for the bar-judge) the bar.
 - **It must measure its own side.** Re-run the thing, re-screenshot both at the same viewport, re-fetch the bar itself. A builder's claim the critic did not check is not evidence — endorsing an unmeasured claim is sympathy no matter how little the critic saw.
 - **Binary verdict.** Ours or the bar, plus the single biggest remaining gap. Never scores — an agent left to grade itself calls its own work done (a cited study: 54 loop cycles, improvement claimed in all 54, more than half actually worse or flat), and scores out of 10 drift upward every round.
@@ -102,6 +112,7 @@ When the run happens on a LiteSuite box, the gauntlet's abstract roles map onto 
 | Gauntlet role | LiteSuite system | Verified anchor |
 |---|---|---|
 | Lead agent | you, the session running this skill | — |
+| **Casting** | Every seat is cast from the SHIPPED cognitive-architecture roster — 91 files under `prompts/cognitive-architectures/` (14 workers · 12 thinkers · 5 reviewers · 11 leaders · 47 pure · orchestrator). Builders from `workers/`+`pure/` by piece domain (`prompts/agent-pool-guide.md` is the routing table); the flaw-finder from `thinkers/`+pure investigators; the bar-judge from `reviewers/`+pure taste; integration seats fresh from the same pools. Spawn idiom: *Read `<prompts>/cognitive-architectures/<tier>/<name>.md`, adopt it, then the brief.* 🔴 RESOLVE `<prompts>` at runtime — `liteharness.prompts.resolve_prompts_dir()` (`prompts.py:93`: env override → repo → sibling → packaged → plugin cache) — never hardcode one station. The roster rides the same plugin artifact as this skill, so end-user gauntlets get the identical cast with zero private dependencies | roster counted on disk 2026-08-22 |
 | Builder / critic fan-out | `liteharness spawn` — a real terminal agent per seat, fresh context by construction; canvas pane inside LiteSuite, PTY daemon (`--pty`, :7460) or Windows Terminal otherwise | spawn branch `cli.py:3758`; mode table in 05-LiteHarness |
 | Per-piece state | `lst run tasks` kanban. **Seven columns:** `queued → thinking → building → reviewing → fixing → merging → done` (`task_store.py:18` VALID_STATUSES; CHECK constraint `:37`). **Nine actions:** `list, claim, complete, unclaim, create, update, heartbeat, sweep, help` (`tasks.py:22`). `claim` moves queued→thinking; move a piece with `update status=building/reviewing/fixing`; `complete` lands it in done. `merging` exists for the lead's integration step — a piece that needs no merge skips it. The human watches this live; an unmoved card is invisible work | `packages/litesuite-tools/litesuite_tools/tools/{task_store,tasks}.py` |
 | Verdict transport | inbox (`lst run inbox` / `liteharness.cli send`). Verdict format: `OURS` / `BAR` / `UNEVALUABLE` + the single biggest gap. 🔴 Prove delivery by your own message appearing in the maildir, never by the send command returning — a hung send exits silently having delivered nothing, and unknown flags are DROPPED silently (hand-rolled `sys.argv` scan, no argparse) | `cli.py` spawn-branch flag scan; maildir `~/.liteharness/inbox/` |
@@ -139,9 +150,10 @@ The `litesuite-tools` registry holds **36 tools** (count derived from `NAME` exp
 
 ### Paths, git, and worktrees — prereqs every spawned builder inherits
 
-- **Structure.** Apps live at `C:\Projects\<app>`. Quick scripts go to `<root>/scripts`, E2E tests and their artifacts to `<root>/e2e/` (always `bail=1`), temp files to the session scratchpad — never `/tmp`, because a POSIX path handed to a Windows writer forks the file into `C:\tmp` while reporting success.
-- **Toolchains.** `pnpm` everywhere except LiteSuite and LiteEditor, which use Bun. `python`, never `python3`.
-- **Git.** Gitflow: `master` / `develop` / `feature/*` / `hotfix/*` / `release` already exist — day-to-day work goes on `develop`, and nobody invents new branches. Builders commit only inside their own worktree branch; the lead merges. Trailers on every commit: `Task-id` / `Agent-Tier` / `Agent-Name` / `Agent-ID` / `Complexity`. **Never `Co-Authored-By`.** 🔴 **The push is Ryan's trigger, always** — and litesuite.dev deploys on push, so an unauthorized push there is an unauthorized deploy.
+Branching, trailers, worker/leader commit discipline, and the kanban contract are DOCTRINE — `prompts/bootstrap-harness.md` + `prompts/protocols/github-issue-protocol.md`. Follow them; do not re-learn them from this file. What stays inline is only what ships nowhere else:
+
+- **Structure.** Apps live at `C:\Projects\<app>`; scripts → `<root>/scripts`; E2E + artifacts → `<root>/e2e/` (always `bail=1`); temp → the session scratchpad, never `/tmp` (a POSIX path handed to a Windows writer forks the file into `C:\tmp` while reporting success). `pnpm` everywhere except LiteSuite/LiteEditor (Bun). `python`, never `python3`.
+- **The human gate.** 🔴 **The push is Ryan's trigger, always** — and litesuite.dev deploys on push, so an unauthorized push there is an unauthorized deploy. HITL merge survives even though the flowchart has no node for it.
 - **Worktrees.** Parallel builders get isolated worktrees under `<root>\.worktrees\`. 🔴 **Before ANY worktree removal, scan for junctions** — `git worktree remove --force` FOLLOWS Windows junctions and has already destroyed 264 GB of models here. This workspace junctions `bin/`, `node_modules/`, `lite-ui` into worktrees BY DESIGN, and a suspiciously small worktree is a junction tell. A refused non-force remove is a warning to investigate, never a license to escalate:
   ```powershell
   Get-ChildItem <worktree> -Recurse -Depth 3 -Force | Where-Object { $_.LinkType } | Select FullName, LinkType, Target
