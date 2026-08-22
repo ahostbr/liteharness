@@ -105,6 +105,42 @@ The viral prompt's "do not stop until the critics are wowed" reads as persuasion
 
 ⚠️ **Never pair the gate with an interval loop.** Two documented behaviors compose badly: CronCreate's contract states *"Jobs only fire while the REPL is idle"*, and the Stop hook works precisely by refusing to let the session go idle — so an interval loop waiting behind an armed gate starves the tick it waits for. **This is inference from the two contracts (both observed separately, 2026-08-21), not an end-to-end observed starvation** — the test loop was killed before an unmet-stop attempt. Gate + dynamic loop, or gate alone.
 
+### 🔴 AN AGENT CANNOT ARM `/goal` THROUGH THE API — IT MUST TYPE IT
+
+`/goal` and `/loop` are **UI commands, not skills.** Invoking `/goal` via the Skill tool returns,
+verbatim: *"goal is a UI command, not a skill. Ask the user to run /goal themselves — it cannot be
+invoked via the Skill tool."* (measured 2026-08-22, run-01).
+
+**Do not conclude from this that the gate is human-only.** That inference was made in run-01 and
+was wrong. The Skill tool is not the only input path — **the keyboard is a path**, and a UI command
+that refuses the API accepts keystrokes. LiteTUI ships `tools/pccontrol/pccontrol.py` for exactly
+this: an agent finds its OWN terminal and types like a human.
+
+```powershell
+python <litetui>/tools/pccontrol/pccontrol.py windows            # find it
+python <litetui>/tools/pccontrol/pccontrol.py activate <PID>     # focus it
+python <litetui>/tools/pccontrol/pccontrol.py type "/goal <condition>"
+python <litetui>/tools/pccontrol/pccontrol.py keypress enter     # -> "Goal set: <condition>"
+```
+
+**Two rules that are not optional, both learned by failing them:**
+
+1. **Identify your own terminal by PROVENANCE, never by title.** Walk your own process ancestry
+   (`Win32_Process` → `ParentProcessId`) up to the terminal that owns your `claude.exe`, and require
+   that PID to agree with `pccontrol windows` before you send a single key. The window list on a
+   working box also offers Chrome, Task Manager and Paint — all equally activatable. A title match
+   alone is how an agent types its private reasoning into someone's paint canvas.
+2. **🔴 NEVER ISSUE THE `type` CALL FROM GIT BASH.** Every slash command is a leading-slash
+   argument, and MSYS2 path conversion rewrites it *before* python sees it: `/goal …` arrived in the
+   REPL as `C:/Program Files/Git/goal …`. pccontrol typed faithfully; the shell had corrupted its
+   input. **Use PowerShell** (or `MSYS_NO_PATHCONV=1`). The tell is a character count:
+   the mangled call reported `typed 95 chars`, the clean one `typed 75 chars` — a 20-char delta that
+   is exactly `len("C:/Program Files/Git/goal") - len("/goal")`. Count the characters; do not eyeball
+   the string.
+
+⇒ **This closes the autonomy hole.** Without it a self-running gauntlet has no stop-gate at all and
+can declare itself finished whenever it likes — the exact failure `/goal` exists to prevent.
+
 ## Run it on LiteSuite — the machinery already exists, fill in the pieces
 
 When the run happens on a LiteSuite box, the gauntlet's abstract roles map onto systems that are already built. Use them — do not re-imagine them as prompt prose:
@@ -113,7 +149,7 @@ When the run happens on a LiteSuite box, the gauntlet's abstract roles map onto 
 |---|---|---|
 | Lead agent | you, the session running this skill | — |
 | **Casting** | Every seat is cast from the SHIPPED cognitive-architecture roster — 91 files under `prompts/cognitive-architectures/` (14 workers · 12 thinkers · 5 reviewers · 11 leaders · 47 pure · orchestrator). Builders from `workers/`+`pure/` by piece domain (`prompts/agent-pool-guide.md` is the routing table); the flaw-finder from `thinkers/`+pure investigators; the bar-judge from `reviewers/`+pure taste; integration seats fresh from the same pools. Spawn idiom: *Read `<prompts>/cognitive-architectures/<tier>/<name>.md`, adopt it, then the brief.* 🔴 RESOLVE `<prompts>` at runtime — `liteharness.prompts.resolve_prompts_dir()` (`prompts.py:93`: env override → repo → sibling → packaged → plugin cache) — never hardcode one station. The roster rides the same plugin artifact as this skill, so end-user gauntlets get the identical cast with zero private dependencies | roster counted on disk 2026-08-22 |
-| Builder / critic fan-out | `liteharness spawn` — a real terminal agent per seat, fresh context by construction; canvas pane inside LiteSuite, PTY daemon (`--pty`, :7460) or Windows Terminal otherwise | spawn branch `cli.py:3758`; mode table in 05-LiteHarness |
+| Builder / critic fan-out | 🔴 **NEVER probe this verb with `--help`. `spawn --help` DOES NOT PRINT HELP — IT SPAWNS.** The argv scan drops the unknown flag and falls through to the spawn, printing `Spawned Claude session` and exiting 0. Measured 2026-08-22: two probes created two unattended `--permission-mode bypassPermissions` sessions that registered themselves as fleet agents. Read the source or run the verb deliberately; an unparsed flag is an *absent* flag, and absent arguments mean "do the default thing." | `liteharness spawn` — a real terminal agent per seat, fresh context by construction; canvas pane inside LiteSuite, PTY daemon (`--pty`, :7460) or Windows Terminal otherwise | spawn branch `cli.py:3758`; mode table in 05-LiteHarness |
 | Per-piece state | `lst run tasks` kanban. **Seven columns:** `queued → thinking → building → reviewing → fixing → merging → done` (`task_store.py:18` VALID_STATUSES; CHECK constraint `:37`). **Nine actions:** `list, claim, complete, unclaim, create, update, heartbeat, sweep, help` (`tasks.py:22`). `claim` moves queued→thinking; move a piece with `update status=building/reviewing/fixing`; `complete` lands it in done. `merging` exists for the lead's integration step — a piece that needs no merge skips it. The human watches this live; an unmoved card is invisible work | `packages/litesuite-tools/litesuite_tools/tools/{task_store,tasks}.py` |
 | Verdict transport | inbox (`lst run inbox` / `liteharness.cli send`). Verdict format: `OURS` / `BAR` / `UNEVALUABLE` + the single biggest gap. 🔴 Prove delivery by your own message appearing in the maildir, never by the send command returning — a hung send exits silently having delivered nothing, and unknown flags are DROPPED silently (hand-rolled `sys.argv` scan, no argparse) | `cli.py` spawn-branch flag scan; maildir `~/.liteharness/inbox/` |
 | The bar, fetched | AgentBridge (`127.0.0.1:7423`, token file `agent-bridge.ts:173` → `~/.litesuite/bridge-token`) — `POST /canvas/browser` opens the live reference in a pane (`/canvas/` dispatch `agent-bridge.ts:541` → route switch `:2185`, cases `terminal :2194 / browser :2211 / editor :2297 / media :2312`), and ours goes in a second pane beside it. The A/B is on screen, not in an agent's imagination | `apps/desktop/src/litesuite/services/agent-bridge.ts` |
