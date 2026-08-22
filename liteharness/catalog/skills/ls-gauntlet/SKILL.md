@@ -169,6 +169,123 @@ python <litetui>/tools/pccontrol/pccontrol.py keypress enter     # -> "Goal set:
 ⇒ **This closes the autonomy hole.** Without it a self-running gauntlet has no stop-gate at all and
 can declare itself finished whenever it likes — the exact failure `/goal` exists to prevent.
 
+## 🔴 THE ARTIFACT IS ALLOWED TO CONTAIN GENERATED ASSETS — CALL THE LITE* APPS
+
+**Run-01's second structural gap.** Its bar-judge marked ours down against `linear.app` partly for
+having **no imagery**, and the brief had written *"no photography"* in as a constraint. **LiteImage
+was running on `:7426` the entire time and was never called once.**
+
+🔴 **The constraint was never in tension with generated imagery.** `POST /generate` **returns
+base64** (`api-server.ts:262`) — so a generated asset embeds as a `data:` URI and the page still
+issues **zero external requests**. *"We have no images"* was a failure of reach, not a budget.
+
+⭐ **The general trap: a constraint inherited from the bar's medium is not a constraint on ours.**
+A team without a photographer writes "no photography" into the spec and every downstream seat
+treats it as physics. **Before accepting any absence as a constraint, ask which Lite* app produces
+that asset class.**
+
+| Need | App / surface | Anchor |
+|---|---|---|
+| Stills, hero art, textures, icons, backgrounds | **LiteImage** REST `:7426` — `POST /generate` (base64 out) | `api-server.ts:209`, base64 `:262` |
+| Upscale an accepted asset | `POST /upscale` | `api-server.ts:410` |
+| Motion, loops, background video | `POST /video/generate` · readiness `GET /video/readiness` | `:476` / `:470` |
+| Multi-step asset pipeline / batch variants | `POST /pipeline` · `POST /pipeline/batch` | `:686` / `:741` |
+| Which checkpoints & LoRAs are actually loadable | `GET /models` · `GET /loras` | `:142` / `:438` |
+| Face work on generated people | `POST /faceswap` · `/faceswap/video` | `:582` / `:628` |
+| Narration, voice-over, an audible progress channel | **LiteSound / voice** `:7438` `/v1/tts/speak` | `sound.py:26`, `:240` |
+| 3D / model assets | **LiteModeler** — NO HTTP; spawns `litemodeler-cli.mjs` | `model.py:174`, probe order `:224` |
+| Head-to-head scoring of N candidate artifacts | **LiteBench arena** — ELO, `BENCH_COMPLETE` inbox signal | `bench` tool |
+| The registry itself — enumerate, never hardcode | 38 tools incl. `image`, `sound`, `model`, `bench`, `render_widget`, `vault`, `rag`, `lens` | `litesuite_tools/tools/*.py` |
+
+### How generation enters the gauntlet
+
+**Generated assets are PIECES and they go through the same gauntlet as code.** Do not let an image
+skip the loop because it came from a model:
+
+1. **Decompose asset needs alongside code needs.** *"Hero image"* is a piece with a builder, a
+   flaw-finder and a bar-judge, exactly like *"hero markup."*
+2. **Generate several, then judge — do not accept the first.** `POST /pipeline/batch` produces the
+   candidate set in one call; **LiteBench arena** scores candidates head-to-head when the choice is
+   genuinely close. A single generation accepted unexamined is the image-shaped version of a critic
+   that praised its own builder.
+3. **The bar applies to assets too.** If the reference page has photography, the bar-judge compares
+   OUR generated asset against THEIR asset — same viewport, same crop.
+4. **Embed as `data:` URI** so the zero-external-requests rule survives, and re-run the measurable
+   half afterwards: generated assets move the byte count, and a 4 MB hero is a real defect.
+5. **Never fabricate through generation.** An image of a UI that does not exist is the same lie as
+   an invented testimonial. Generate atmosphere, texture, illustration, diagrams — **not evidence.**
+
+📌 **Sound has a second use beyond assets:** `sound` is an out-of-band channel to the human. A long
+gauntlet can speak the verdict at the gate rather than burying it in a terminal nobody is watching.
+
+## 🔴 CASTING IS NOT `subagent_type`. READ THE ROSTER FILE AND INJECT IT.
+
+**This is the rule run-01 broke, and the author of this skill is the one who broke it.** Read this
+before dispatching a single seat.
+
+### The failure, exactly
+
+Run-01 cast every seat as `Agent(subagent_type: "liteharness:polymathic-ive")` and similar. That is
+a **Claude Code plugin subagent definition**. It is not the LiteHarness roster, and the difference
+is not cosmetic:
+
+| | plugin `subagent_type` (what run-01 used) | roster file (what this skill requires) |
+|---|---|---|
+| path | `~/.claude/plugins/.../agents/polymathic-<name>.md` | `<prompts>/cognitive-architectures/<tier>/<name>.md` |
+| carries the cognitive method | ✅ yes | ✅ yes |
+| **kanban mandate** (`lst run tasks` at every transition) | ❌ **absent** | ✅ present |
+| **inbox protocol** (report to leader, `from=` on every send) | ❌ **absent** | ✅ present |
+| **worktree discipline** (isolated branch, never merge) | ❌ **absent** | ✅ present |
+| **commit trailers** (`Task-id`/`Agent-Tier`/`Agent-Name`/`Agent-ID`) | ❌ **absent** | ✅ present |
+| **tier composition** | ❌ one flat file per polymath | ✅ `pure/` + tier preamble, per tier |
+
+**Measured on disk 2026-08-22:** `pure/ogilvy.md` = 20,417 B. `workers/ogilvy.md` = **30,356 B** —
+the same method plus ~10 KB of worker-tier operational glue, and the two files differ by 271 diff
+lines. The roster is **tier-composed**; the plugin agent file is not.
+
+### What it cost, measured
+
+In run-01 **not one seat touched the kanban, reported through the inbox, held a worktree, or
+committed anything with trailers.** The lead did all of it centrally, by hand. The fan-out was
+**Claude Code's subagent machinery wearing a polymath's method** — not LiteHarness agents. The run
+still produced real findings, because the *cognitive architectures* were genuine; but every claim
+that the gauntlet "runs on LiteHarness infrastructure" was, for that run, false.
+
+⚠️ **The instruction was already in this file** — buried mid-sentence inside a wide table cell. It
+was not wrong, it was **unreadable at the moment of use**, which is the same as absent. That is why
+it now has its own section and a worked example.
+
+### The correct dispatch
+
+```bash
+# 1. RESOLVE the prompts root at runtime — NEVER hardcode a station.
+python -c "from liteharness.prompts import resolve_prompts_dir; print(resolve_prompts_dir())"
+#    (prompts.py:93 — env override -> repo -> sibling -> packaged -> plugin cache)
+
+# 2. READ the tier-correct roster file. Tier is chosen by the SEAT'S JOB, not the polymath:
+#      builder      -> workers/<name>.md   (or pure/<name>.md if absent at that tier)
+#      flaw-finder  -> thinkers/<name>.md
+#      bar-judge    -> reviewers/<name>.md
+#      lead         -> orchestrator/
+#    Routing table for WHICH polymath: prompts/agent-pool-guide.md
+
+# 3. INJECT ITS CONTENTS into the seat, then the brief.
+liteharness spawn --name "<Seat>" --prompt "$(cat <prompts>/cognitive-architectures/workers/ogilvy.md)
+
+YOUR TASK: <the brief>"
+```
+
+🔴 **The VOID CLAUSE governs re-tiering, and it ships at the top of every tier-composed file:** if
+you hand a seat a file whose default tier is not the tier you are assigning, **only the
+`# POLYMATHIC …` section onward is adopted** — tier, tool access and kanban/git duties come from the
+spawn brief, never from the file. Say the assigned tier explicitly in the brief; a seat that infers
+its tier from the file it was handed will follow the wrong preamble.
+
+⇒ **If a seat cannot be spawned through LiteHarness** (no harness, in-process agents only, as in
+run-01), that is a **documented degradation, not a substitute**. Say so in the report: *"seats were
+in-process agents carrying the roster file's content; no kanban/inbox/worktree/trailer duties were
+exercised."* Never let `subagent_type` stand in silently for the roster.
+
 ## Run it on LiteSuite — the machinery already exists, fill in the pieces
 
 When the run happens on a LiteSuite box, the gauntlet's abstract roles map onto systems that are already built. Use them — do not re-imagine them as prompt prose:
@@ -226,6 +343,44 @@ Branching, trailers, worker/leader commit discipline, and the kanban contract ar
 - **Processes.** Spawned agents and any app they launch run detached, never attached to a console. Count inbox consumers for your id before starting a watcher, never after.
 
 **Bridge down / no LiteSuite running?** Degrade honestly: Agent-tool subagents, artifacts as files on disk, verdicts in the transcript — and say that is what happened. A pane that was never opened is not a progress surface that "worked anyway."
+
+## Does this skill use ALL of LiteSuite / LiteHarness? — the honest coverage audit
+
+**Ryan's question, 2026-08-22, and the answer is NO.** Recorded here so no reader mistakes the
+wiring table above for coverage. Naming a system is not driving one, and the table above is a map
+of what is *reachable*, not a claim about what has been *exercised*.
+
+**Registry census: 38 tools** (`litesuite_tools/tools/*.py`, counted on disk — enumerate it, never
+trust this number). Run-01 drove **five**, and two of those only from the lead's seat.
+
+| Status | Systems |
+|---|---|
+| ✅ **DRIVEN in run-01** | `tasks` kanban (all 7 columns, 9 actions) · `pattern` (recorded + retrieved, with a nonsense-query negative control) · `inbox` · `pccontrol` (typed `/goal` into the lead's own terminal) · `web_fetch` (for the bar) |
+| ⚠️ **DRIVEN BY THE LEAD ONLY — not by the seats** | `tasks` and `inbox`. **No seat moved a card, reported through the maildir, held a worktree, or committed with trailers.** The lead did it centrally, which is exactly the casting failure above |
+| ❌ **NAMED IN THIS FILE, NEVER EXERCISED** | `spawn` (seats were in-process agents) · **AgentBridge `:7423` entirely** — canvas/browser/editor/media panes, the side-by-side A/B the bar discipline is built on · `image` / **LiteImage `:7426`** · `sound` / voice `:7438` · `model` / LiteModeler · `bench` / LiteBench arena · `terminal` · `editor` · `browser` · `render_widget` · `ui_render` · `vault` · `rag` · `lcm` · `memory` · `lens` · `evolution` · `repo_intel` · `sandbox` · `halt` · `inject` · `reassign` · `chronicle` · `project_state` · `youtube` · `web_search` |
+
+**≈32 of 38 tools untouched**, and the two largest surfaces — **the canvas panes and the generation
+apps** — are the two the skill talks about most.
+
+### Why that matters more than a checklist
+
+- **The canvas is where the bar discipline is supposed to live.** *"The A/B is on screen, not in an
+  agent's imagination"* is this skill's own line, and run-01 never put anything on a screen —
+  LiteSuite was down, and the seats compared by fetching markdown. The verdicts still stand, but
+  they were reached by the weaker method the skill exists to replace.
+- **The generation apps were not merely unused — their absence was written into the spec as a
+  constraint** (*"no photography"*) and then counted against us by a bar-judge. See the section
+  above.
+- **A seat that cannot move a kanban card is invisible to the human watching the board.** The
+  human-facing half of the harness — the War Room view — showed one agent working, not eight.
+
+### The rule this earns
+
+🔴 **Before a run, enumerate the registry and state which systems this gauntlet WILL drive and which
+it will not — then report the same list afterwards with what actually fired.** A gauntlet that
+silently degrades from spawned panes to in-process agents, or from generated assets to a
+"constraint", produces real findings about a *weaker* machine than the one it claims to be.
+**Degradation is acceptable; undeclared degradation is not.**
 
 ## Output template
 
