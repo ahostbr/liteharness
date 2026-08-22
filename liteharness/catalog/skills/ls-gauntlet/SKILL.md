@@ -99,6 +99,28 @@ So independence is bought differently here, and it costs the critic work, not in
 - 🔴 **ONE SEAT MUST AUDIT THE SPEC AGAINST ITS OWN CITED SOURCE.** Every critic brief points at the ARTIFACT, so nothing is aimed at the brief itself — and a defect in the bar or the spec propagates into every piece, where no per-artifact critique will ever reach it. **Measured in run-01:** the brief called LiteHarness a *"five-tier"* system and a package shipping *"a bundled wheel"*, while ordering builders to source every claim from a README containing **zero** occurrences of `tier`, `five`, or `wheel`. Both builders correctly declined to propagate either. Both flaw-finders caught both — **but only when asked directly afterwards**; neither raised it in the dispatched work, and both said so plainly. One of the two the lead did not know it had written, which is why this is a real finding and not a confirmation. ⇒ Give the flaw-finder an explicit instruction: *check the spec's own claims against the source the spec designates, and report UNSOURCED (true elsewhere, absent here) separately from CONTRADICTED (the source disagrees)* — different findings, different fixes. This is what feeds the flowchart's **"the overall plan failed → re-derive what great looks like"** edge, which otherwise has nothing feeding it.
 - **Non-verdicts stay non-verdicts.** A critic that could not fetch the bar or could not run the output returns UNEVALUABLE and the reason. That is not a loss and not a win, and collapsing it into either invents a result nobody produced. This is the structural cure for hallucinated comparisons — no bar in hand, no judgment.
 
+### 🔴 NOBODY REVIEWS THE LEAD — so require builders to argue back
+
+Builders are judged by critics; critics are judged by the lead; **the lead is judged by nobody.**
+Every seat's brief points at the ARTIFACT, so the lead's own output — the brief, the bar, the join
+analysis, the assembly, the repair rulings — is the one class of document nothing is aimed at.
+
+**Run-01 produced five lead-authored defects.** A brief carrying two premises absent from the source
+it designated. A join analysis that scored two imperceptible differences as real. An assembly built
+from unfinished pieces. A document shell that did not exist. And a repair ruling that would have
+moved a defect and called it fixed — *"the same defect, moved rather than removed."* **Four were
+caught by seats whose briefs pointed elsewhere; none by a seat assigned to look.**
+
+The one that caught the bad ruling was **a builder that treated an instruction as arguable**: it
+executed the ruling's INTENT (remove the duplicated moment) while refusing its literal content, and
+said so plainly rather than quietly doing something else.
+
+⇒ **Tell every builder, in its brief:** *if you can show an instruction is wrong, say so and say why
+— execute the intent, not the letter, and never substitute silently.* A seat instructed only to
+comply will comply, and the machine loses its only check on its least-reviewed author. This is the
+no-blind-critics ruling pointed upward instead of sideways: **independence is bought by requiring
+judgement, not by removing information.**
+
 ## The stop-gate is `/goal`, the re-entry is `/loop`
 
 The viral prompt's "do not stop until the critics are wowed" reads as persuasion. The actual machine is enforcement — two native Claude Code commands the explainer videos never name:
