@@ -1247,6 +1247,30 @@ def register_presence() -> None:
     bridge_token = os.environ.get("LITESUITE_BRIDGE_TOKEN")
 
     if bridge_token:
+        # Name-on-tab: the agent renames ITS OWN terminal tab the moment its
+        # final name exists (covers spawn names, takeover renames, generated
+        # names alike — registration is the one place the name is settled).
+        # canvas_session_id carries never-downgrade, so resumes re-assert the
+        # name too. Best-effort with a tight timeout: a rename must never
+        # slow or break a boot.
+        _tab_session = presence.get("canvas_session_id")
+        _tab_name = presence.get("name")
+        if _tab_session and _tab_name:
+            try:
+                import urllib.request as _url_req
+                _rn = _url_req.Request(
+                    f"{_bridge_url()}/canvas/rename-terminal",
+                    data=json.dumps({"sessionId": _tab_session, "title": _tab_name}).encode(),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {bridge_token}",
+                    },
+                    method="POST",
+                )
+                with _url_req.urlopen(_rn, timeout=0.5):
+                    pass
+            except Exception:
+                pass  # older app build without the route, or bridge busy — cosmetic
         # Block A: Spatial identity + API cheatsheet (env-gated, no HTTP required)
         bridge_url = _bridge_url()
         print(f"""

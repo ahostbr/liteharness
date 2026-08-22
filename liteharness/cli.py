@@ -2110,6 +2110,17 @@ def cmd_spawn(
                 env_delivery["LITEHARNESS_SPAWN_BRIEF"] = str(brief_path)
                 brief_via_env = True
             spawned_leaf_id = new_leaf
+            if name:
+                # Optimistic name-on-tab: the tab shows the agent's name the
+                # instant the split exists, seconds before the agent boots and
+                # its registration re-asserts it (hooks.register_presence).
+                try:
+                    _bridge_request("POST", "/canvas/rename-terminal", {
+                        "sessionId": str(new_session),
+                        "title": name,
+                    })
+                except Exception:
+                    pass  # cosmetic — never let a rename fail a spawn
             env_sets = "; ".join(
                 f"$env:{k}='{str(v).replace(chr(39), chr(39) * 2)}'"
                 for k, v in env_delivery.items()
