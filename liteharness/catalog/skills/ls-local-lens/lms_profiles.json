@@ -1,0 +1,71 @@
+{
+  "_README": "USER DATA, not a recommendation. lms_switch.py ships with NO built-in model lineup: every key here is validated against LM Studio's live /api/v0/models before anything loads, and an unknown key is reported, never guessed. Edit freely; delete entries that no longer exist on disk. Absent file = no profiles, which is a fully working state.",
+  "_notes": {
+    "qwen38 ladder": "Qwen3.8 27B context ladder (Ryan, 2026-08-17). One model, three quants, trading precision for context as a conversation grows. Swap AT a compaction boundary, never mid-turn: a reload destroys the KV cache and the whole context must be re-prefilled. rung-a = short ctx / most precision (start here and after every compact); rung-b = mid; rung-c = max ctx and the rung that PERFORMS the compaction, because compaction needs capacity to READ 260k, not precision to WRITE. UNPROVEN PREMISE: the ladder only pays if rung-a is measurably better than rung-c at short context. The 2026-08-17 five-arm eval found QUALITY FLAT across quants and its cost conclusions were RETRACTED (Reasoning Effort confound + a self-inflicted answer leak). If a rerun confirms flat quality this ladder collapses to rung-c alone and should be DELETED rather than kept. Do not treat these rungs as validated."
+  },
+  "profiles": {
+    "default": [
+      {
+        "model": "qwen3.5-0.8b"
+      }
+    ],
+    "litespeak": [
+      {
+        "model": "qwen3.5-0.8b",
+        "context": 4096
+      }
+    ],
+    "duo": [
+      {
+        "model": "qwen3.5-0.8b"
+      },
+      {
+        "model": "mistralai/devstral-small-2-2512"
+      }
+    ],
+    "reasoning": [
+      {
+        "model": "qwen3.5-0.8b"
+      },
+      {
+        "model": "qwen3.5-9b-claude-4.6-opus-reasoning-distilled"
+      }
+    ],
+    "maxpower": [
+      {
+        "model": "mistralai/devstral-small-2-2512",
+        "context": 65536
+      }
+    ],
+    "coding": [
+      {
+        "model": "mistralai/devstral-small-2-2512",
+        "context": 32768
+      }
+    ],
+    "qwen38-rung-a": [
+      {
+        "model": "qwen/qwen3.8-27b@q4_k_m",
+        "context": 150000
+      }
+    ],
+    "qwen38-rung-b": [
+      {
+        "model": "qwen/qwen3.8-27b@q3_k_m",
+        "context": 196608
+      }
+    ],
+    "qwen38-rung-c": [
+      {
+        "model": "qwen/qwen3.8-27b@iq2_xxs",
+        "context": 262144
+      }
+    ],
+    "qwen38-scout": [
+      {
+        "model": "qwen/qwen3.8-27b@iq2_xxs",
+        "context": 50176
+      }
+    ]
+  }
+}

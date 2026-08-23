@@ -1,444 +1,244 @@
 ---
 name: ls-local-lens
-description: Use when you need to process, summarize, or extract information from large content without bloating context. Triggers on 'summarize this', 'describe this screenshot', 'compress context', 'offload to local model', 'local-lens'. Routes through local LM Studio models. For planning use /plan-w-quizmaster, for expert analysis use /consult-polymaths.
-allowed-tools: Bash
+description: Preprocess bulk content through a LOCAL LM Studio model to save your context window. Discovers what is installed at runtime and asks which model and context to use — it never assumes a lineup.
 ---
 
-# Local Lens — LM Studio Model Manager & Context Compressor
+# Local Lens — run bulk work through a local model
 
-> **Requirements:**
+> **Requirements**
 >
-> - **LM Studio** must be installed and running locally. Download from https://lmstudio.ai.
-> - The `lms` CLI must be available at `%USERPROFILE%\.lmstudio\bin\lms.exe` (installed automatically with LM Studio).
-> - At least one model must be downloaded inside LM Studio before loading.
-> - VRAM estimates assume a high-end GPU. Run `nvidia-smi` to check yours. If LM Studio is offline, fall back gracefully — do the task yourself and note Local Lens was unavailable.
+> - **LM Studio** running locally (https://lmstudio.ai), with at least one model downloaded.
+> - The `lms` CLI at `%USERPROFILE%\.lmstudio\bin\lms.exe` (ships with LM Studio).
+> - If LM Studio is offline, **fall back gracefully** — do the task yourself and say Local Lens was unavailable.
 
-You are using Local Lens to preprocess content through local models AND dynamically manage which models are loaded. This saves your context window for reasoning, not raw data.
+Your context window is expensive and finite. A local model turns 15,000 tokens of raw
+transcript, log, or scrape into a few hundred tokens of structured summary. Use it for
+bulk reading; keep your own context for reasoning.
 
-## Why Use This
+---
 
-- Your context window is expensive and finite
-- The local 0.8B model runs in ~100ms on a modern GPU (e.g., RTX 4090/5090)
-- Devstral 24B handles complex coding/RAG tasks locally in seconds
-- 15,000 tokens of raw content becomes 300-500 tokens of structured summary
-- You can load/unload models on demand — no need to ask the user
+## 🔴 THE ONE RULE: DISCOVER, THEN ASK. NEVER ASSUME A LINEUP.
 
-## Model Inventory
+**This file names no model as "the best", "the default", or "the heavy tier", and it
+must never start.** Ruling, Ryan 2026-08-23:
 
-These models are installed on disk and available to load:
+> _"keep it open ended ... just ask me what model and context i want at the time ...
+> dont hardcode models"_
 
-| Model Key                                        | Params | Quant  | VRAM     | Role                                          |
-| ------------------------------------------------ | ------ | ------ | -------- | --------------------------------------------- |
-| `qwen3.5-0.8b`                                   | 0.8B   | BF16   | ~2 GB    | Fast summarizer, TTS companion, preprocessing |
-| `huihui-qwen3.5-0.8b-abliterated`                | 0.8B   | F16    | ~2 GB    | Uncensored variant of above                   |
-| `qwen3.5-0.8b-uncensored-opus-distill`           | 0.8B   | Q4_K_M | ~0.5 GB  | Opus-distilled, uncensored                    |
-| `gemma-3-4b-it`                                  | 4B     | Q4_K_S | ~2.4 GB  | Mid-tier general purpose                      |
-| `qwen3.5-4b-claude-4.6-opus-reasoning-distilled` | 4B     | Q8_0   | ~4.5 GB  | Opus-distilled reasoning                      |
-| `qwen/qwen3.5-9b`                                | 9B     | Q8_0   | ~10.5 GB | Strong general purpose                        |
-| `qwen3.5-9b-claude-4.6-opus-reasoning-distilled` | 9B     | Q8_0   | ~9.5 GB  | Best local reasoning                          |
-| `mistralai/devstral-small-2-2512`                | 24B    | Q4_K_M | ~15.2 GB | Coding, RAG, complex analysis                 |
-| `gemma-3-12b-it-uncensored`                      | 12B    | Q8_0   | ~13.4 GB | Uncensored mid-large                          |
+**Why the rule exists, concretely.** An earlier version of this skill shipped a model
+inventory table and a routing table built when one 24B coding model was the strongest
+thing on the box. Months later that was simply false — a newer 27B beat it at any
+quant — but the file still read as a current, confident routing decision, because
+**prose that names a ranking carries no expiry date.** On 2026-08-23 an agent following
+it was about to `unload --all` the user's live, in-use seat to load a worse model,
+mid-task.
 
-**VRAM budget note:** The table above lists approximate VRAM usage for an RTX 5090 (31.5 GB). Run `nvidia-smi` to check your GPU's available VRAM and adjust which models you load accordingly. Multiple small models can coexist. Large models may auto-evict smaller ones.
+⭐ **A model table is a snapshot that keeps presenting itself as a decision.** The
+inventory rots at the speed of the field; the *mechanism* below does not. So this skill
+keeps the mechanism and gets the inventory **at runtime, every time.**
 
-## Python Switcher Script (Recommended)
+---
 
-The `lms_switch.py` script at `${CLAUDE_SKILL_DIR}/lms_switch.py` wraps all model management with VRAM safety checks, named profiles, and role presets.
+## Step 1 — Discover what is actually there
 
-```bash
-# Check current status
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" status
-
-# Switch profiles (safely unloads first, checks VRAM budget)
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" load default      # 0.8B @ 8k
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" load litespeak    # 0.8B @ 4k (dictation/voice cleanup)
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" load duo          # 0.8B @ 8k + Devstral @ 32k
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" load reasoning    # 0.8B @ 8k + Opus 9B @ 16k
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" load maxpower     # Devstral solo @ 65k
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" load coding       # Devstral solo @ 32k
-
-# Load a specific model only if not already loaded (VRAM-safe)
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" ensure "mistralai/devstral-small-2-2512"
-
-# Unload
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" unload --all
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" unload devstral
-
-# Install/list role presets (system prompts + temperature + stop strings)
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" presets
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" preset summarizer
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" preset rag-strict
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" preset tts
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" preset coder
-python "${CLAUDE_SKILL_DIR}/lms_switch.py" preset extractor
-```
-
-**ALWAYS prefer the Python script over raw CLI commands** — it handles VRAM math, safe unloading, and identifier assignment automatically.
-
-## Raw CLI: Model Management (Low-Level)
-
-The `lms` CLI at `$USERPROFILE/.lmstudio/bin/lms.exe` manages models directly.
-
-### Check what's loaded
+Never open with a load. Open with a look.
 
 ```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" ps
+LMS="$USERPROFILE/.lmstudio/bin/lms.exe"
+
+"$LMS" ps          # what is LOADED right now — identifier, context, size, TTL
+"$LMS" ls          # what is on disk and available to load
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv    # real headroom
 ```
 
-### Load a model
-
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "<model-key>" -y -c <context_length> --gpu max --identifier "<short-name>"
-```
-
-- `-y` auto-confirms prompts (required for non-interactive use)
-- `-c` sets context window (use 4096-8192 for 0.8B, 16384 for 9B, 32768 for Devstral)
-- `--gpu max` uses full GPU offload
-- `--identifier` sets the API name (use this to reference the model in API calls)
-- `--ttl <seconds>` optional auto-unload after idle (e.g., `--ttl 300` = 5 min)
-
-### Unload a model
-
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" unload <identifier>
-```
-
-Note: `unload` does NOT support `-y`. Just pass the identifier directly.
-
-### Unload all models
-
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" unload --all
-```
-
-### Check available models on disk
-
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" ls
-```
-
-### Detailed model info (v0 API)
+Richer view, including per-model context and whether a model does vision:
 
 ```bash
 curl -s http://localhost:1234/api/v0/models | python -c "
 import json,sys
 for m in json.load(sys.stdin)['data']:
-    print(f\"{m['id']:55s} state={m['state']:12s} quant={m.get('quantization','?'):8s} ctx={m.get('loaded_context_length', m.get('max_context_length','?'))}\")
+    if m.get('state') != 'not-loaded':
+        print(f\"LOADED  {m['id']:50s} type={m.get('type','?'):5s} ctx={m.get('loaded_context_length','?')}\")
 "
 ```
 
-## Load Profiles
+`type` is `vlm` for vision-capable models and `llm` otherwise — **check it rather than
+remembering which models see images.**
 
-Pre-configured combos for common scenarios:
+## Step 2 — If something suitable is already loaded, USE IT
 
-### Profile: Always-On (default)
+A resident seat is the cheapest correct answer and it is usually there on purpose.
+Loading over the top of it costs the user their working state and a model load.
 
-Just the 0.8B @ 8k — fast preprocessing, minimal VRAM.
+**Only if nothing suitable is loaded, or the task genuinely needs something else, go to
+Step 3.**
 
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "qwen3.5-0.8b" -y -c 8192 --gpu max
-```
+## Step 3 — ASK which model and context
 
-VRAM: ~1.8 GB. Leaves room for everything else.
+Use `AskUserQuestion`. Offer what `lms ls` actually returned — never a remembered list.
 
-### Profile: Dictation (voice/dictation cleanup)
+Ask for both, because they are one decision:
 
-0.8B @ 4k — absolute minimum for dictation cleanup. Fastest possible.
+- **Which model** — from the discovered list.
+- **What context length** — this is not a detail. It sets VRAM, and it decides whether
+  anything else fits beside it (see below).
 
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "qwen3.5-0.8b" -y -c 4096 --gpu max
-```
+If the user has already told you in this session which seat to use, **do not ask
+again** — that is what "at the time" means, not "every call".
 
-VRAM: ~1.5 GB. Dictation inputs are short sentences, 4k is plenty.
+---
 
-### Profile: Summarizer + Heavy Hitter (duo)
+## 🔴 VRAM: `lms ps` SIZE IS WEIGHTS, NOT RESIDENCY
 
-0.8B @ 8k + Devstral @ 32k for complex analysis. Both fit simultaneously.
+**The single most expensive mistake this skill can cause.** `lms ps` reports the
+weights. The real footprint is weights **plus** the KV cache, which scales with
+**context length × parallel slots**.
 
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "qwen3.5-0.8b" -y -c 8192 --gpu max
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "mistralai/devstral-small-2-2512" -y -c 32768 --gpu max --identifier "devstral"
-```
+> Measured on a 32 GB card: a 27B seat showed **SIZE 17.74 GB** in `lms ps` while its
+> true residency at 120k context × parallel 4 was **~29 GB of 31.5**. Reading SIZE and
+> concluding "17.7 + 2.4 < 32, it fits" nearly OOM'd the workstation.
 
-VRAM: ~17 GB combined.
+**Therefore:**
 
-### Profile: Reasoning Stack
-
-0.8B @ 8k + Opus-distilled 9B @ 16k for best local reasoning.
-
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "qwen3.5-0.8b" -y -c 8192 --gpu max
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "qwen3.5-9b-claude-4.6-opus-reasoning-distilled" -y -c 16384 --gpu max --identifier "opus-9b"
-```
-
-VRAM: ~11 GB combined.
-
-### Profile: Max Power (Devstral solo)
-
-Full VRAM to Devstral @ 65k for heavy coding/RAG.
+1. **Trust `nvidia-smi`, not `lms ps` SIZE**, for what is free.
+2. **Never JIT a second model beside a large seat at full context.** Lower the seat's
+   context first, or do not load.
+3. **Context length is the knob that creates room.** The same seat that leaves nothing
+   spare at 120k may leave several GB at 50–60k — enough for a small model to run
+   alongside as a sub-agent. Ask the user before making that trade; it changes the
+   behaviour of a tool they are using.
+4. **Unload explicitly before loading heavy.** Do not rely on auto-eviction.
+5. **Verify after loading** with `lms ps` — see what actually survived.
 
 ```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" unload --all
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "mistralai/devstral-small-2-2512" -y -c 65536 --gpu max --identifier "devstral"
+# Explicit swap, when the user has asked for one
+"$LMS" unload --all
+"$LMS" load "<model-key-from-lms-ls>" -y -c <context> --gpu max --identifier "<short>"
+"$LMS" ps            # confirm
 ```
 
-VRAM: ~15-20 GB depending on context.
+Flags: `-y` auto-confirms (required non-interactively) · `-c` context length ·
+`--gpu max` full offload · `--identifier` the name you will call in the API ·
+`--ttl <seconds>` auto-unload when idle. `unload` takes the identifier and does **not**
+accept `-y`.
 
-## Model Management Protocol
+**Restore what you displaced.** If you evicted the user's seat for a one-off task, put
+it back when you are done.
 
-**CRITICAL VRAM SAFETY RULE: ALWAYS unload before loading heavy models.**
+---
 
-The example VRAM budget is 31.5 GB (RTX 5090) — check yours with `nvidia-smi`. These combos will OOM or degrade performance:
+## 🧠 REASONING MODELS: BUDGET FOR THE THINKING, OR GET AN EMPTY ANSWER
 
-- Devstral (15 GB) + any 9B (10 GB) = 25 GB + context overhead = OOM risk
-- Devstral (15 GB) + 12B Gemma (13 GB) = absolutely not
-- Two 9B models simultaneously = marginal, avoid
+**Many current local models emit reasoning before answering, and the API returns it in a
+SEPARATE field.** `choices[0].message.reasoning_content` is not `content`.
 
-**Safe combos:**
+🔴 **When the token budget is spent thinking, `content` comes back `""` with HTTP 200
+and `finish_reason: "length"`. There is no error.** A script that writes the result
+straight to disk produces a file containing a header and nothing else — which is
+indistinguishable from a summary nobody read.
 
-- 0.8B (~2 GB) + anything else = always fine
-- 0.8B + 4B (~4.5 GB) = fine (~6.5 GB)
-- 0.8B + 9B (~10 GB) = fine (~12 GB)
-- 0.8B + Devstral (~15 GB) = fine (~17 GB)
-- Devstral alone = fine
-- 9B alone or 9B + 0.8B = fine
+Measured 2026-08-23 on a 27B reasoning seat, 14,150-token prompt:
 
-**BEFORE using a model, always:**
+| `max_tokens` | outcome |
+| --- | --- |
+| 3,000 | `content` **empty**, `finish_reason=length` |
+| 14,000 | `content` **empty** — **49,645 characters** of `reasoning_content` |
+| 100,000 | full answer |
 
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" ps 2>&1
-```
+**So:**
 
-**If the model you need is NOT loaded:**
-
-1. Check what's currently loaded and its VRAM usage
-2. **UNLOAD models that conflict** before loading — do NOT rely on auto-eviction
-3. Load the model you need with appropriate context length
-4. Verify with `lms ps` after loading
-
-**Standard unload-then-load pattern:**
-
-```bash
-# Example: switching to Devstral — unload everything first
-"$USERPROFILE/.lmstudio/bin/lms.exe" unload --all
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "mistralai/devstral-small-2-2512" -y -c 32000 --gpu max --identifier "devstral"
-```
-
-**Load times** (approximate, high-end GPU such as RTX 5090 — slower on lesser hardware):
-
-- 0.8B models: ~2 seconds
-- 4B models: ~4 seconds
-- 9B models: ~8 seconds
-- Devstral 24B: ~12 seconds
-
-**After heavy work, always restore the default 0.8B:**
-
-```bash
-"$USERPROFILE/.lmstudio/bin/lms.exe" unload --all
-"$USERPROFILE/.lmstudio/bin/lms.exe" load "qwen3.5-0.8b" -y -c 8192 --gpu max
-```
-
-## API Usage
-
-### Configuration
-
-```
-LM_STUDIO_URL=http://localhost:1234/v1
-LMS_CLI="$USERPROFILE/.lmstudio/bin/lms.exe"
-```
-
-### Mode 1: Summarize Text (0.8B)
-
-For long text, transcripts, documents, or any content over ~500 words. Ensure `qwen3.5-0.8b` is loaded.
-
-```bash
-curl -s http://localhost:1234/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3.5-0.8b",
-    "messages": [
-      {"role": "system", "content": "You are a precision summarizer. Extract ALL key facts, names, numbers, decisions, and actionable items. Be thorough but concise. Use bullet points. Never fabricate information not in the source text."},
-      {"role": "user", "content": "Summarize the following content:\n\n<CONTENT_HERE>"}
-    ],
-    "max_tokens": 800,
-    "temperature": 0.1
-  }'
-```
-
-### Mode 2: Targeted Extraction (0.8B)
-
-When you need specific information from a large body of content.
-
-```bash
-curl -s http://localhost:1234/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3.5-0.8b",
-    "messages": [
-      {"role": "system", "content": "Extract ONLY the information requested. Be precise. If the information is not present, say so. Do not guess."},
-      {"role": "user", "content": "From the following content, extract: <WHAT_YOU_NEED>\n\n<CONTENT_HERE>"}
-    ],
-    "max_tokens": 500,
-    "temperature": 0.1
-  }'
-```
-
-### Mode 3: Describe Image/Screenshot (Vision)
-
-Only models with `type: "vlm"` in the v0 API support vision. Use the OpenAI vision format with base64-encoded images.
-
-**VLM models (support vision):** qwen3.5-0.8b, huihui-qwen3.5-0.8b-abliterated, qwen/qwen3.5-9b, mistralai/devstral-small-2-2512, gemma-3-12b-it-uncensored
-**NOT VLM (no vision):** gemma-3-4b-it, all opus-distilled models
-
-**Which vision model to use:**
-
-| Task                                | Model     | Why                                               |
-| ----------------------------------- | --------- | ------------------------------------------------- |
-| Quick screenshot summary            | qwen-0.8b | 2.3s, 1.8 GB — fast enough for continuous loops   |
-| UI/layout description               | qwen-0.8b | Good detail, minimal VRAM, already loaded         |
-| Detailed art/photo analysis         | devstral  | Most technical precision, best for complex scenes |
-| Natural/conversational descriptions | gemma-12b | Warmest tone, most human-like output              |
-| Deep structured analysis            | qwen-9b   | Most thorough but slowest (10s+)                  |
-
-**Default to 0.8B for vision** — it's shockingly good for its size and usually already loaded.
+- **Be generous with `max_tokens`.** The prompt was 14k of a 120k window; the room was
+  always there. Under-budgeting fails silently, so err high.
+- **ALWAYS guard the empty case.** Never write or report a result without checking.
 
 ```python
-# Python vision helper (works with any VLM model)
-import json, urllib.request, base64
-
-with open('image.png', 'rb') as f:
-    b64 = base64.b64encode(f.read()).decode()
-
-payload = json.dumps({
-    'model': 'qwen-0.8b',  # or devstral, gemma-12b, qwen-9b
-    'messages': [{
-        'role': 'user',
-        'content': [
-            {'type': 'text', 'text': 'Describe this image in detail.'},
-            {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{b64}'}}
-        ]
-    }],
-    'max_tokens': 500,
-    'temperature': 0.1
-}).encode()
-
-req = urllib.request.Request('http://localhost:1234/v1/chat/completions',
-    data=payload, headers={'Content-Type': 'application/json'})
-resp = json.loads(urllib.request.urlopen(req, timeout=60).read())
-print(resp['choices'][0]['message']['content'])
+msg = resp["choices"][0]["message"]
+text = (msg.get("content") or "").strip()
+if not text:
+    reasoning = msg.get("reasoning_content") or ""
+    raise SystemExit(
+        f"EMPTY CONTENT — finish_reason={resp['choices'][0].get('finish_reason')}, "
+        f"reasoning={len(reasoning)} chars. Raise max_tokens. Refusing to write."
+    )
 ```
 
-### Mode 4: Detailed Analysis (Devstral)
+That guard is the only reason the table above could be measured instead of guessed.
 
-When accuracy matters — RAG queries, factual extraction, code analysis, anything where 0.8B might hallucinate. **Load Devstral first if not already loaded.**
+---
+
+## API usage — organised by TASK, not by model
+
+Endpoint `http://localhost:1234/v1/chat/completions`. Set `"model"` to the identifier
+you discovered or the user chose. **Low `temperature` (0.1–0.2) for extraction work.**
+
+### Summarize / compress
+
+```json
+{
+  "model": "<chosen-identifier>",
+  "messages": [
+    {"role": "system", "content": "You are a precision summarizer. Extract ALL key facts, names, numbers, decisions and actionable items. Be thorough but concise. Never fabricate information not in the source."},
+    {"role": "user", "content": "Summarize the following:\n\n<CONTENT>"}
+  ],
+  "max_tokens": 8000,
+  "temperature": 0.1
+}
+```
+
+### Targeted extraction
+
+Same shape; system prompt becomes *"Extract ONLY what is requested. If it is not
+present, say so. Do not guess."*
+
+### Vision
+
+Only models reporting `type: "vlm"` (Step 1). Standard OpenAI vision format:
+
+```python
+{"role": "user", "content": [
+    {"type": "text", "text": "Describe this image in detail."},
+    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+]}
+```
+
+### Content that is awkward to escape
+
+Long or quote-heavy content breaks bash quoting. Write a small Python file and run it —
+build the payload with `json.dumps`, never string interpolation.
+
+**If the content exceeds the seat's context**, chunk it and summarise per chunk, then
+summarise the summaries. Say in your report that you chunked, and how.
+
+---
+
+## `lms_switch.py`
+
+`${CLAUDE_SKILL_DIR}/lms_switch.py` wraps load/unload with VRAM math and named profiles.
 
 ```bash
-# Ensure Devstral is loaded
-"$USERPROFILE/.lmstudio/bin/lms.exe" ps 2>&1 | grep -q devstral || \
-  "$USERPROFILE/.lmstudio/bin/lms.exe" load "mistralai/devstral-small-2-2512" -y -c 32000 --gpu max --identifier "devstral"
-
-# Query it
-curl -s http://localhost:1234/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "devstral",
-    "messages": [
-      {"role": "system", "content": "You are a precise analyst. Answer ONLY from the provided content. If something is not in the content, say so explicitly. Answer directly. Do not use any tools."},
-      {"role": "user", "content": "<QUERY>\n\nContent:\n<CONTENT_HERE>"}
-    ],
-    "max_tokens": 1000,
-    "temperature": 0.1
-  }'
+python "${CLAUDE_SKILL_DIR}/lms_switch.py" status
+python "${CLAUDE_SKILL_DIR}/lms_switch.py" ensure "<model-key>"
+python "${CLAUDE_SKILL_DIR}/lms_switch.py" unload --all
 ```
 
-**IMPORTANT for Devstral:** Always include "Do not use any tools." in the system prompt — it's a coding agent model and will try `[TOOL_CALLS]` otherwise.
+⚠️ **Its named profiles (`default`, `duo`, `reasoning`, `coding`, …) hardcode a model
+lineup and carry the same staleness this file was rewritten to remove.** Prefer
+`status` / `ensure <explicit-key>` with a key from `lms ls`. Treat a profile name as a
+suggestion to verify, never as a current routing decision.
 
-### Mode 5: Local Reasoning (Opus-Distilled 9B)
+---
 
-For tasks needing stronger reasoning than 0.8B but where you want to stay local. **Load the 9B first if not already loaded.**
+## Caveats
 
-```bash
-# Ensure opus-9b is loaded
-"$USERPROFILE/.lmstudio/bin/lms.exe" ps 2>&1 | grep -q opus || \
-  "$USERPROFILE/.lmstudio/bin/lms.exe" load "qwen3.5-9b-claude-4.6-opus-reasoning-distilled" -y -c 32000 --gpu max --identifier "opus-9b"
-
-curl -s http://localhost:1234/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "opus-9b",
-    "messages": [
-      {"role": "system", "content": "<SYSTEM_PROMPT>"},
-      {"role": "user", "content": "<USER_PROMPT>"}
-    ],
-    "max_tokens": 1000,
-    "temperature": 0.3
-  }'
-```
-
-## Routing Rules
-
-| Task                               | Model        | Load if needed?              |
-| ---------------------------------- | ------------ | ---------------------------- |
-| General summarization              | qwen3.5-0.8b | Usually already loaded       |
-| Quick gist / TL;DR                 | qwen3.5-0.8b | Usually already loaded       |
-| Factual extraction                 | devstral     | Yes — load on demand         |
-| Code summarization / review        | devstral     | Yes — load on demand         |
-| RAG-style Q&A over content         | devstral     | Yes — load on demand         |
-| Complex reasoning                  | opus-9b      | Yes — load on demand         |
-| Quick screenshot/image description | qwen3.5-0.8b | Usually already loaded (VLM) |
-| Detailed image analysis            | devstral     | Yes — load on demand (VLM)   |
-| Natural image descriptions         | gemma-12b    | Yes — load on demand (VLM)   |
-| TTS-friendly text generation       | qwen3.5-0.8b | Usually already loaded       |
-
-## Smart Loading Strategy
-
-1. **Keep 0.8B always loaded** — it's tiny (~2 GB) and handles 80% of preprocessing tasks
-2. **Load heavy models on demand** — Devstral/9B only when you actually need them
-3. **Use `--ttl`** for temporary loads — e.g., `--ttl 300` auto-unloads after 5 min idle
-4. **Check before loading** — don't reload what's already there
-5. **Restore 0.8B after heavy work** — if a big model evicted it, reload when done
-
-## Implementation Steps
-
-1. **Check what's loaded**: `lms ps`
-2. **Load needed model** if not present (see Load Profiles above)
-3. **Prepare content**: Escape for JSON. For large content (>30k chars), truncate or chunk.
-4. **Send to local model**: Use the appropriate mode above.
-5. **Parse response**: Extract `choices[0].message.content`. Check for errors.
-6. **Restore default state**: If you loaded a heavy model temporarily, consider unloading it and restoring the 0.8B.
-
-## Python Helper for Complex Content
-
-For content that's hard to escape in bash (quotes, special chars, multiline):
-
-```bash
-python -c "
-import json, urllib.request
-
-content = open('/path/to/file').read()
-payload = json.dumps({
-    'model': 'qwen3.5-0.8b',
-    'messages': [
-        {'role': 'system', 'content': 'You are a precision summarizer. Extract ALL key facts, names, numbers, decisions, and actionable items. Be thorough but concise. Use bullet points.'},
-        {'role': 'user', 'content': f'Summarize:\n\n{content}'}
-    ],
-    'max_tokens': 800,
-    'temperature': 0.1
-}).encode()
-
-req = urllib.request.Request('http://localhost:1234/v1/chat/completions',
-    data=payload, headers={'Content-Type': 'application/json'})
-resp = json.loads(urllib.request.urlopen(req, timeout=30).read())
-print(resp['choices'][0]['message']['content'])
-"
-```
-
-## Important Caveats
-
-- The 0.8B model **will lose nuance**. For legal text, exact numbers, or subtle meaning, read the raw content yourself.
-- The 0.8B model **may hallucinate** details not in the source. For critical facts, use Devstral or verify yourself.
-- If LM Studio is offline, **fall back gracefully** — just do the work yourself and note that Local Lens was unavailable.
-- **Never present the local model's summary as your own analysis.** Say "Based on local preprocessing..." or similar.
-- Content with special characters needs proper JSON escaping. Use the Python helper above.
-- **Devstral will try tool calls** if you don't explicitly tell it not to. Always include "Do not use any tools." in its system prompt.
-- **Loading large models evicts small ones.** Always check `lms ps` after loading to see what survived.
+- **Small models lose nuance and will invent details.** For exact figures, legal text,
+  or anything load-bearing, read the source yourself or use a stronger seat.
+- **Never present a local model's output as your own analysis.** Say it came from local
+  preprocessing, and name the model you used.
+- **Transcripts and OCR carry garbled proper nouns.** A faithful summary of a mangled
+  source is still mangled — flag names and figures as unverified when the input is ASR
+  or OCR.
+- **Coding-agent models may emit tool calls** instead of answering. If you see
+  `[TOOL_CALLS]` or a `tool_calls` field, add *"Do not use any tools."* to the system
+  prompt and retry.
+- **Report what you actually ran** — model identifier, context, and whether you chunked.
+  A summary whose provenance is unstated cannot be checked later.
