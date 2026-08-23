@@ -1911,6 +1911,118 @@ def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> N
     _LAST_PRESENCE = dict(presence)
 
 
+# Transport limits, MEASURED 2026-08-23 (see compose_notification for the method
+# and the evidence). Kept slightly under the observed values so a small drift in
+# the transport does not silently reopen the hole these numbers exist to close.
+NOTIFY_LINE_LIMIT = 480      # transport cuts a line at 500 chars of content
+NOTIFY_TOTAL_BUDGET = 2800   # transport cuts the whole notification at 3000
+
+
+def _wrap_preserving_newlines(text: str, width: int) -> list[str]:
+    """Hard-wrap to `width`, preserving the author's own line breaks.
+
+    Deliberately NOT ``textwrap.fill``: that reflows paragraphs and collapses
+    whitespace, which would silently rewrite commands, shas and indented blocks —
+    exactly the content agents copy and re-run. Splitting mid-word is ugly and
+    honest; reflowing a command line is neither.
+    """
+    out: list[str] = []
+    for raw in text.split("\n"):
+        if len(raw) <= width:
+            out.append(raw)
+            continue
+        for i in range(0, len(raw), width):
+            out.append(raw[i:i + width])
+    return out
+
+
+def compose_notification(
+    *,
+    sender: str,
+    body: str,
+    agent_id: str,
+    msg_id: str = "",
+    msg_type: str = "notification",
+    prefix: str = "",
+    thread: str = "",
+    project: str = "",
+) -> str:
+    """Build the inbox notification text, bounded so the transport cannot cut it.
+
+    THE PROBLEM THIS SOLVES. The transport (Claude Code's Monitor surfacing)
+    truncates SILENTLY, and until 2026-08-23 the only defence was a trailing
+    end-marker: "if you cannot see this line, you were cut". That was HALF a
+    defence, because there are TWO mechanisms and the marker only detects one.
+
+    Both measured with a self-locating probe — 100 lines, each naming its own
+    byte offset, sent by a SECOND agent because a self-addressed probe is skipped
+    by design and so can never test your own watcher:
+
+      PER-LINE, at 500 chars of content (leading indent excluded).
+        The long line is cut, "...(truncated)" is appended, and THE REST OF THE
+        MESSAGE PRINTS NORMALLY — end-marker included. The guard reads GREEN on a
+        real loss. Seen three times in one hour losing 3.7%, 4.5% and 94% of three
+        bodies, with nothing in the presentation telling the 94% case apart from
+        the 3.7% one. Evidence: a 530-char line cut at 500; a 631-char line with a
+        3-space indent cut at 503; 306- and 275-char lines intact.
+
+      WHOLE-NOTIFICATION, at 3000 chars, hard tail cut.
+        Everything after the cut is gone INCLUDING the end-marker, so here the
+        marker works exactly as intended. Evidence: a 3999-char probe arrived as
+        header(132) + newline + 71 whole lines(2840) + a 27-char partial = 3000.
+
+    THE FIX. The end-marker was never the wrong idea — it was aimed at the LOUD
+    mechanism while the SILENT one went undetected. So rather than add a second
+    detector, remove the transport's opportunity: keep every line under the
+    per-line limit and the whole notification under the total, and truncate HERE,
+    explicitly, when a body will not fit. A producer that truncates on purpose can
+    say so. A transport that truncates cannot.
+    """
+    head = (
+        f"[LITEHARNESS] {prefix}Message from {sender} "
+        f"({msg_type}, {len(body)} chars, id {msg_id or '?'}):"
+    )
+    tail: list[str] = [
+        "TO REPLY (use this exact command — do NOT reply to your own ID):",
+        f"python -m liteharness.cli send {sender} \"your reply\" --from {agent_id}",
+    ]
+    if thread:
+        tail.append(f"Thread: {thread}")
+    if project:
+        tail.append(f"Project: {project}")
+    tail.append(
+        f"[END OF MESSAGE {msg_id or '?'} — if this line is missing, the notification "
+        f"was TRUNCATED in transit: read the full body with "
+        f"`python -m liteharness.cli inbox` before acting]"
+    )
+
+    cut_notice = (
+        f"[... BODY TRUNCATED BY THE PRODUCER — {len(body)} chars did not fit. "
+        f"This notice is INSIDE the budget, so it always prints. Read the complete "
+        f"body: python -m liteharness.cli inbox]"
+    )
+
+    # Measure the envelope rather than estimating it: its length moves with the
+    # sender id, the thread and the project.
+    envelope = len(head) + 1 + sum(len(t) + 1 for t in tail)
+    body_budget = NOTIFY_TOTAL_BUDGET - envelope
+
+    wrapped = _wrap_preserving_newlines(body, NOTIFY_LINE_LIMIT)
+    if sum(len(w) + 1 for w in wrapped) <= body_budget:
+        body_lines = wrapped
+    else:
+        room = body_budget - (len(cut_notice) + 1)
+        body_lines, used = [], 0
+        for w in wrapped:
+            if used + len(w) + 1 > room:
+                break
+            body_lines.append(w)
+            used += len(w) + 1
+        body_lines.append(cut_notice)
+
+    return "\n".join([head, *body_lines, *tail])
+
+
 def watch_inbox(override_agent_id: str = None, ignore_senders: set[str] | None = None) -> None:
     """
     Long-running inbox watcher — event-driven, not timer-based.
@@ -1997,29 +2109,20 @@ def watch_inbox(override_agent_id: str = None, ignore_senders: set[str] | None =
 
                 prefix = "[URGENT] " if priority == "urgent" else ""
 
-                # Tamper-evident envelope: the transport (Claude Code's Monitor
-                # surfacing) truncates long notifications SILENTLY — a 9-item
-                # brief arrived cut mid-item-3 and the worker had no way to know
-                # (2026-08-06). The transport's limit isn't ours to control, so
-                # the header declares the body length and the FINAL line is an
-                # end-marker: an agent that cannot see it knows the notification
-                # was cut and the maildir holds the truth.
-                lines = [f"[LITEHARNESS] {prefix}Message from {sender} ({msg_type}, {len(body)} chars, id {msg_id or '?'}):"]
-                lines.append(f"{body}")
-                lines.append(f"TO REPLY (use this exact command — do NOT reply to your own ID):")
-                lines.append(f"python -m liteharness.cli send {sender} \"your reply\" --from {agent_id}")
-                if thread:
-                    lines.append(f"Thread: {thread}")
-                if project:
-                    lines.append(f"Project: {project}")
-                lines.append(
-                    f"[END OF MESSAGE {msg_id or '?'} — if this line is missing, the notification "
-                    f"was TRUNCATED in transit: read the full body with "
-                    f"`python -m liteharness.cli inbox` before acting]"
+                text = compose_notification(
+                    sender=sender,
+                    body=body,
+                    agent_id=agent_id,
+                    msg_id=msg_id or "",
+                    msg_type=msg_type,
+                    prefix=prefix,
+                    thread=thread or "",
+                    project=project or "",
                 )
 
-                # Print all lines together so Monitor batches them
-                print("\n".join(lines), flush=True)
+                # One print so Monitor batches it as a single event.
+                print(text, flush=True)
+
 
                 # Move to done/ after reporting
                 inbox.INBOX_DONE.mkdir(parents=True, exist_ok=True)
