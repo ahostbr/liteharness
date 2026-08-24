@@ -551,9 +551,10 @@ def _memory_checkin_text(memory_path) -> str:
         f"  HARD CAP: only the first 200 LINES or 25KB of MEMORY.md is ever loaded; the "
         f"rest is dropped silently. So a long index line does not merely cost tokens — "
         f"it EVICTS other memories.\n"
-        f"  NEVER delete, merge, or summarise existing entries to make room. Park long "
-        f"prose in <!-- --> instead: block-level HTML comments are stripped BEFORE the "
-        f"cap is measured, so the text stays on disk at zero cost.\n"
+        f"  NEVER delete, merge, or summarise existing entries to make room — and NEVER "
+        f"park index lines in <!-- -->. Comment-stripped text is NOT LOADED, so parking "
+        f"silently removes an entry from ambient recall. An over-cap index costs a "
+        f"truncated BROWSE; parking costs the ENTRY. Those are not the same price.\n"
         f"  RECALL by searching, not scanning: "
         f"find_conversation.py --search \"<query>\" --mode memory"
     )
@@ -1060,8 +1061,9 @@ def register_presence() -> None:
     this workspace: 209 entries, median index line 1,010 chars, 7 loaded and 202 invisible.
     - DETAIL -> a topic file (uncapped, read on demand). INDEX -> one line, under 200 chars.
     - A long index line EVICTS other memories. It is not a style preference.
-    - NEVER delete, merge, or summarise entries to make room. Park prose in <!-- -->, which
-      is stripped before the cap is measured, so the bytes survive at zero cost.
+    - NEVER delete, merge, or summarise entries to make room — and NEVER park index lines in
+      <!-- -->. Comment-stripped text is NOT LOADED, so parking silently removes an entry from
+      ambient recall. An over-cap index costs a truncated BROWSE; parking costs the ENTRY.
     - SEARCH, DON'T SCAN: find_conversation.py --search "<query>" --mode memory
 
   WRITE SHORT — TO THE HUMAN AND TO EACH OTHER. Lead with the answer, then the evidence
