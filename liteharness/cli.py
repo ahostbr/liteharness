@@ -3680,6 +3680,7 @@ def main() -> None:
         print("  verify-pattern --pattern-id ID --level human|judgement|gauntlet --actor WHO")
         print("                 --evidence-ref|--delegation-ref|--run-id EVIDENCE  # per level, required")
         print("  revoke-pattern --pattern-id ID --reason WHY --prior-attestation-id AID --actor WHO")
+        print("  librarian-tick --job-id ID     Closed-app librarian runner (occurrence-ledger arbitrated)")
         print("                                 Record a task pattern")
         print("                                 --task -  reads the description from stdin (opt-in;")
         print("                                 omitting --task never reads stdin and never blocks)")
@@ -4350,6 +4351,21 @@ def main() -> None:
             actor=rv["--actor"],
             project=rv["--project"],
         )
+    elif cmd == "librarian-tick":
+        lt_job_id = None
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--job-id" and i + 1 < len(sys.argv):
+                lt_job_id = sys.argv[i + 1]
+                i += 2
+            else:
+                print(f"[librarian-tick] unknown argument: {sys.argv[i]}", file=sys.stderr)
+                sys.exit(2)
+        if not lt_job_id:
+            print("Usage: liteharness librarian-tick --job-id <id>", file=sys.stderr)
+            sys.exit(2)
+        from .librarian_tick import run_tick
+        sys.exit(run_tick(lt_job_id))
     elif cmd == "rag":
         cmd_rag()
     elif cmd == "install":
