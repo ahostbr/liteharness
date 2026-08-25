@@ -118,6 +118,57 @@ class LibrarianChecksTests(unittest.TestCase):
         self.assertEqual(by_line[3]["status"], "verified")
         self.assertEqual(by_line[3]["parts"][0]["resolved_by"], "note-context")
 
+    def test_real_sha_under_wrong_context_is_unverifiable(self) -> None:
+        # First live sweep (workspace commit 5a6320c): vault notes put pathless
+        # shas under contexts resolving to a DIFFERENT repo — 108/117 refutes
+        # were false. A note-context miss downgrades; only an explicit path
+        # earns a refute.
+        wrong = self.base / "wrong"
+        _make_repo(wrong)
+        home = self.base / "home"
+        _make_repo(home)
+        # A second, content-unique commit: two _make_repo calls in the same
+        # second produce IDENTICAL shas (same tree/author/message/timestamp),
+        # which would make `wrong` genuinely contain the sha.
+        (home / "unique.md").write_text("wrong-context fixture\n", encoding="utf-8")
+        _git(home, "add", "unique.md")
+        _git(home, "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "commit", "-q", "-m", "unique")
+        sha = _git(home, "rev-parse", "HEAD")
+        self._write_note(
+            f"working in {wrong / 'readme.md'} today\n"
+            f"later: the other seat landed {sha}\n"
+        )
+
+        result = self._run()
+        by_line = {c["line"]: c for c in result["claims"]}
+        self.assertEqual(by_line[2]["status"], "unverifiable")
+        part = by_line[2]["parts"][0]
+        self.assertEqual(part["resolved_by"], "note-context")
+        self.assertIn(str(wrong), part["detail"])
+
+    def test_repo_name_in_line_resolves_the_sha(self) -> None:
+        ws = self.base / "ws"
+        _make_repo(ws)
+        beta = ws / "beta"
+        _make_repo(beta)
+        (beta / "unique.md").write_text("repo-name fixture\n", encoding="utf-8")
+        _git(beta, "add", "unique.md")
+        _git(beta, "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "commit", "-q", "-m", "unique")
+        sha = _git(beta, "rev-parse", "HEAD")
+        self._write_note(
+            f"working in {ws / 'readme.md'} today\n"
+            f"the beta seat landed {sha}\n"
+        )
+
+        result = self._run()
+        by_line = {c["line"]: c for c in result["claims"]}
+        self.assertEqual(by_line[2]["status"], "verified")
+        part = by_line[2]["parts"][0]
+        self.assertEqual(part["resolved_by"], "repo-name")
+        self.assertEqual(part["repo"], str(beta))
+
     def test_behavioral_without_attestation_awaits(self) -> None:
         repo = self.base / "repoA"
         sha = _make_repo(repo)

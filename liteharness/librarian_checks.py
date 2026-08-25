@@ -132,6 +132,29 @@ def _resolve_line_repo(line: str, context_root: Path | None) -> tuple[Path | Non
     return None, "unresolved"
 
 
+def _repo_name_candidates(line: str, anchor: Path) -> list[Path]:
+    """Git repos named BARE in the line (no path), resolved against the
+    workspace: the outermost git ancestor of ``anchor``, plus its immediate
+    child repos whose directory name appears as a word in the line. A name
+    in prose can VERIFY a sha the named repo contains; it never refutes one.
+    """
+    ws = anchor
+    parent_root = _git_root_of(ws.parent)
+    while parent_root is not None and parent_root != ws:
+        ws = parent_root
+        parent_root = _git_root_of(ws.parent)
+    tokens = {t.lower() for t in re.findall(r"[\w.-]+", line)}
+    out: list[Path] = []
+    try:
+        children = [p for p in ws.iterdir() if p.is_dir()]
+    except OSError:
+        children = []
+    for child in children:
+        if child.name.lower() in tokens and (child / ".git").exists():
+            out.append(child)
+    return out
+
+
 def check_notes(notes_glob: str, days: int | None = 2) -> dict:
     """Extract and check every claim in the matched notes. Pure function of
     the filesystem — no LLM, no guessing; ambiguity is a stated result."""
@@ -168,6 +191,7 @@ def check_notes(notes_glob: str, days: int | None = 2) -> dict:
                 continue  # no checkable claim on this line
 
             parts: list[dict] = []
+            name_candidates: list[Path] | None = None
             for sha in shas:
                 if line_root is None:
                     parts.append({
@@ -177,16 +201,44 @@ def check_notes(notes_glob: str, days: int | None = 2) -> dict:
                                   "an unqualified check from the wrong root "
                                   "would refute a valid sha",
                     })
-                elif _sha_exists(line_root, sha):
+                    continue
+                if _sha_exists(line_root, sha):
                     parts.append({
                         "kind": "sha", "value": sha, "status": "verified",
                         "repo": str(line_root), "resolved_by": how,
                     })
-                else:
+                    continue
+                # Miss in the resolved repo. A repo NAMED bare in the line can
+                # still verify the sha (first live sweep, workspace 5a6320c:
+                # vault lines name their repo in prose far more often than by
+                # path). Names verify; they never refute.
+                if name_candidates is None:
+                    name_candidates = _repo_name_candidates(stripped, line_root)
+                named = next(
+                    (c for c in name_candidates if _sha_exists(c, sha)), None,
+                )
+                if named is not None:
+                    parts.append({
+                        "kind": "sha", "value": sha, "status": "verified",
+                        "repo": str(named), "resolved_by": "repo-name",
+                    })
+                elif how == "explicit-path":
                     parts.append({
                         "kind": "sha", "value": sha, "status": "refuted",
                         "repo": str(line_root), "resolved_by": how,
                         "detail": "git cat-file -e failed in the resolved repo",
+                    })
+                else:
+                    # note-context resolution is too weak to carry a refute:
+                    # 108/117 refutes in the first live sweep were valid shas
+                    # under a wrong context. Only an explicit path decides.
+                    parts.append({
+                        "kind": "sha", "value": sha, "status": "unverifiable",
+                        "repo": str(line_root), "resolved_by": how,
+                        "detail": f"git cat-file -e missed in {line_root}, but "
+                                  "that root came from note context, not this "
+                                  "line — refusing to refute; qualify the claim "
+                                  "with an explicit path to decide it",
                     })
 
             for raw_path, _lineref in tick_paths:
