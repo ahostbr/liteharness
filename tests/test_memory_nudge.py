@@ -170,7 +170,12 @@ class MemoryNudgeTests(unittest.TestCase):
         result = json.loads(buf.getvalue())
         specific = result["hookSpecificOutput"]
         self.assertEqual(specific["hookEventName"], "UserPromptSubmit")
-        self.assertIn("MEMORY.md", specific["additionalContext"])
+        ctx = specific["additionalContext"]
+        # The nudge no longer names a memory file (git-as-memory v2 WS1). Assert
+        # BOTH halves: the old target is gone AND the new doctrine arrived. Dropping
+        # the assertion instead would leave this test passing on an empty string.
+        self.assertNotIn("MEMORY.md", ctx)
+        self.assertIn("lst run pattern", ctx)
 
     # ---- payload contract: tiny pointer, MEMORY.md never opened --------
 
@@ -233,14 +238,26 @@ class MemoryNudgeTests(unittest.TestCase):
         # Code's actual loader behaviour, not advice) and broke this assertion in
         # the same commit. The red then shipped through 0.3.7 AND 0.3.8, because a
         # threshold nobody can justify is a threshold nobody updates.
-        self.assertEqual(payload, hooks._memory_checkin_text(expected_path).strip())
+        # Still pinned to the SINGLE source of truth rather than a literal, and now
+        # mirrors the call site exactly: memory_nudge() renders
+        # _memory_checkin_text(_resolve_tier()), so the test must resolve the tier the
+        # same way instead of hardcoding one. Hardcoding "worker" here would go green
+        # while an orchestrator got the wrong text.
+        self.assertEqual(
+            payload, hooks._memory_checkin_text(hooks._resolve_tier()).strip()
+        )
         # Backstop for the property the number was reaching for: MEMORY.md is
         # ~384KB here, so any real content-injection blows past this by orders of
         # magnitude while the deliberate template stays far under it.
         self.assertLess(len(payload), 4000)
-        # names the MEMORY.md index path
-        self.assertIn("MEMORY.md", payload)
-        self.assertIn(expected_path, payload)
+        # INVERTED by git-as-memory v2 WS1: the nudge must no longer name the memory
+        # file OR its path. This is the load-bearing assertion of the retarget — it is
+        # what stops the old instruction coming back in a later edit.
+        self.assertNotIn("MEMORY.md", payload)
+        self.assertNotIn(expected_path, payload)
+        # And the positive half, so "absent" cannot be satisfied by an empty payload:
+        self.assertIn("lst run pattern", payload)
+        self.assertIn("HANDOFF", payload)
 
         # POSITIVE CONTROL: the tracker must have actually observed file I/O,
         # otherwise the MEMORY.md check below is vacuous (an empty list always

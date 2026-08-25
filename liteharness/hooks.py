@@ -528,35 +528,76 @@ def memory_nudge() -> None:
     if current % cadence != 0:
         return
 
-    print(_memory_checkin_text(_resolve_memory_index_path()))
+    print(_memory_checkin_text(_resolve_tier()))
 
 
-def _memory_checkin_text(memory_path) -> str:
-    """The memory check-in nudge. ONE definition — it is emitted from two call sites,
-    and two copies of one string drift apart silently (measured 2026-08-14).
+def _resolve_tier() -> str:
+    """This agent's tier, resolved EXACTLY as register() does: env, then the
+    presence file, then "worker". Deliberately not re-derived inline anywhere —
+    two copies of one resolution drift apart silently, which is the same defect
+    the old nudge docstring was written about."""
+    tier = os.environ.get("LITEHARNESS_TIER")
+    if tier:
+        return tier
+    path = config.get_root() / "agents" / f"{config.get_agent_id()}.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("tier") or "worker"
+    except (json.JSONDecodeError, OSError, AttributeError):
+        return "worker"
 
-    The cap numbers are not advice, they are Claude Code's loader:
-    https://code.claude.com/docs/en/memory — "The first 200 lines of MEMORY.md, or the
-    first 25KB, whichever comes first, are loaded at the start of every conversation.
-    Content beyond that threshold is not loaded at session start."
 
-    Measured on C--Projects the same day: 209 entries, median index line 1,010 chars,
-    only 8 of 209 under the stated 200-char convention -> 7 entries loaded, 202 silently
-    invisible. Verbosity in the INDEX is not a style problem, it is data loss."""
-    return (
-        f"[LITEHARNESS] Memory check-in: durable knowledge this turn (a decision, "
-        f"root-cause, reusable pattern, or preference)? DETAIL goes in a TOPIC FILE "
-        f"beside {memory_path} — topic files are uncapped and load on demand. The INDEX "
-        f"gets ONE line, under 200 chars. Skip if nothing durable happened.\n"
-        f"  HARD CAP: only the first 200 LINES or 25KB of MEMORY.md is ever loaded; the "
-        f"rest is dropped silently. So a long index line does not merely cost tokens — "
-        f"it EVICTS other memories.\n"
-        f"  NEVER delete, merge, or summarise existing entries to make room — and NEVER "
-        f"park index lines in <!-- -->. Comment-stripped text is NOT LOADED, so parking "
-        f"silently removes an entry from ambient recall. An over-cap index costs a "
-        f"truncated BROWSE; parking costs the ENTRY. Those are not the same price.\n"
-        f"  RECALL by searching, not scanning: "
-        f"find_conversation.py --search \"<query>\" --mode memory"
+def _memory_checkin_text(tier: str) -> str:
+    """The durable-knowledge nudge. ONE definition, one call site.
+
+    WHY THE TARGET MOVED (git-as-memory v2, WS1 —
+    Docs/Plans/git-as-memory-v2/sub-ws1-hook-retarget.md):
+
+    This hook is the only ACTIVE trigger in the memory system. For four months it
+    told every agent, every other turn, to write Claude Code's MEMORY.md, and the
+    passive doctrine that memory stores are execution aids lost to it — an active
+    per-turn instruction beats a document nobody re-reads. The fix was never to
+    delete the trigger; a trigger pointed at the right target is the enforcement
+    the doctrine never had.
+
+    The previous docstring documented the 25KB loader cap as the reason for index
+    discipline. That rationale is now HISTORY, not current guidance: the archive
+    is frozen and read-only, so there is no index to keep under a cap. It is
+    recorded here rather than deleted because a documented defect gets inherited,
+    and a stale rationale left in place reads as current advice.
+
+    Durable knowledge now goes where it can be found by the tools that already
+    index it: patterns, commit bodies, handoffs."""
+    common = (
+        "[LITEHARNESS] Durable knowledge this turn? IT GOES IN GIT — there is no "
+        "memory file.\n"
+        "  task outcome / root cause / reusable pattern -> lst run pattern action=record ...\n"
+        "      (born verified:\"unverified\" — that is a SCHEMA Fact, not a modifier you choose)\n"
+        "  why this change, what you rejected           -> the COMMIT BODY (with your trailers)\n"
+        "  state a compacting seat will need            -> your HANDOFF; every row names a\n"
+        "      sha, a symbol, or a re-runnable query — never a bare state\n"
+        "  NEVER record DONE/finished/working as fact. Until a human has verified it end-to-end\n"
+        "  it is open, unverified functionality — record it as such.\n"
+        "  NEVER write CLAUDE.md or docs/architecture/** — CLAUDE.md is human-gated; arch docs\n"
+        "  are the Librarian's output, fed nightly from verified patterns and the daily notes.\n"
+        "  RECALL: git log, the arch docs, and the code are the sources of truth."
+    )
+    if tier != "orchestrator":
+        return common
+
+    # The archive is this machine's history and ships with nobody. Gate the
+    # pointer on it actually existing: a pointer a stranger cannot dereference is
+    # worse than no pointer, because it reads as a capability they are missing.
+    try:
+        has_archive = Path(_resolve_memory_index_path()).exists()
+    except Exception:
+        has_archive = False
+    if not has_archive:
+        return common
+
+    return common + (
+        "\n  ARCHIVE (orchestrator only, READ-ONLY): find_conversation.py --search \"<q>\" --mode all\n"
+        "  A recalled claim may shape your QUESTION. It may NEVER supply your PREMISE — verify\n"
+        "  against code before you dispatch on it."
     )
 
 
