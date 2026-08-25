@@ -982,6 +982,8 @@ def cmd_register(
 # Bump when the `patterns` FTS5 column set changes. The table is a pure cache
 # rebuilt from patterns.jsonl, so a mismatch is resolved by dropping it — never
 # by migrating. v2 added `supersedes` and started populating `id` from task_id.
+# The v3 ranking change (BM25-first ORDER BY) needed no bump: rankings are
+# computed per query, not stored, and the column set did not change.
 _PATTERN_DB_SCHEMA = "2"
 
 
@@ -1026,6 +1028,46 @@ def _pattern_db_open(db_path: Path):
     return conn
 
 
+def _load_pattern_entries(patterns_path: Path) -> list[dict]:
+    """Load pattern rows from a JSONL, POSITIVELY validated.
+
+    A line is a pattern iff it is a JSON object with no ``type`` field (or
+    ``type == "pattern"``) carrying both ``task_id`` and ``description``.
+    Anything else — an event line, a fragment, junk — is counted and surfaced
+    on stderr, never inserted: a non-pattern line loaded as a pattern becomes
+    a ghost row (empty description, real-looking id, newest timestamp) that
+    tops every bare recency query. Both callers (FTS5 sync and the JSONL
+    fallback) share this loader so their validation cannot drift apart.
+    """
+    entries: list[dict] = []
+    unparseable = 0
+    nonpattern = 0
+    for line in patterns_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            unparseable += 1
+            continue
+        if (
+            not isinstance(obj, dict)
+            or obj.get("type") not in (None, "pattern")
+            or not (obj.get("task_id") and obj.get("description"))
+        ):
+            nonpattern += 1
+            continue
+        entries.append(obj)
+    if unparseable or nonpattern:
+        print(
+            f"[pattern-sync] skipped {nonpattern} non-pattern line(s) and "
+            f"{unparseable} unparseable line(s) in {patterns_path}",
+            file=sys.stderr,
+        )
+    return entries
+
+
 def _pattern_db_sync(conn, patterns_path: Path) -> None:
     """Sync JSONL write-ahead log into FTS5. Skips re-index when file is unchanged."""
     import sqlite3
@@ -1045,15 +1087,7 @@ def _pattern_db_sync(conn, patterns_path: Path) -> None:
     if cached_mtime == mtime_str and cached_size == size_str:
         return  # nothing changed
 
-    entries = []
-    for line in patterns_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    entries = _load_pattern_entries(patterns_path)
 
     conn.execute("DELETE FROM patterns")
     conn.executemany(
@@ -1122,7 +1156,12 @@ def _superseded_task_ids(conn) -> set[str]:
 
 
 def _pattern_fts5_query(conn, query: str | None, top: int) -> list[dict]:
-    """Run FTS5 query (or full scan when query is None). Returns dicts sorted by recency.
+    """Run FTS5 query (or full scan when query is None).
+
+    Queried results rank by BM25 relevance (lower is better), with recency only
+    as the tiebreak — a query's best match must not lose to whatever was
+    recorded last. The full scan stays recency-first: with no query there is
+    no relevance signal, so newest-first is correct.
 
     Patterns named in another pattern's `supersedes` array are dropped: a retired
     record and the correction that replaced it describe the same subject in the
@@ -1139,7 +1178,7 @@ def _pattern_fts5_query(conn, query: str | None, top: int) -> list[dict]:
             return []
         rows = conn.execute(
             f"SELECT {cols} FROM patterns WHERE patterns MATCH ? "
-            "ORDER BY timestamp DESC LIMIT ?",
+            "ORDER BY bm25(patterns) ASC, timestamp DESC LIMIT ?",
             (safe_q, fetch),
         ).fetchall()
     else:
@@ -1246,16 +1285,10 @@ def cmd_query_patterns(
     except Exception as exc:
         print(f"[query-patterns] unexpected FTS5 error, falling back to JSONL: {exc!r}", file=sys.stderr)
 
-    # JSONL fallback — substring scan (used when sqlite3 / FTS5 unavailable)
-    entries = []
-    for line in patterns_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+    # JSONL fallback — substring scan (used when sqlite3 / FTS5 unavailable).
+    # Same validated loader as the FTS5 path; only the ranking differs (no
+    # BM25 without FTS5 — the substring scan stays recency-sorted).
+    entries = _load_pattern_entries(patterns_path)
 
     if query:
         lower_q = query.lower()
