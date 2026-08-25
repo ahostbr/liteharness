@@ -217,15 +217,41 @@ def main():
             continue
         if any(s in ("/" + rel) for s in ALLOW_SUBSTR):
             continue
-        if Path(rel).name == "check_pii.py":  # the guard holds the denylist literals
+        # The guard and its own regression test legitimately hold denylist
+        # literals (the selftest and the staged-blob tests plant them).
+        if Path(rel).name in ("check_pii.py", "test_check_pii_staged_blob.py"):
             continue
-        p = Path(rel)
-        if not p.is_file():
-            continue
-        try:
-            text = p.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, PermissionError):
-            continue
+        if mode == "staged":
+            # 🔴 STAGED MODE MUST READ THE INDEX BLOB, NOT THE WORKTREE FILE.
+            # On 2026-08-25 this read Path.read_text(): a blocked commit was
+            # fixed in the WORKTREE but never re-staged, so the retry scanned
+            # the sanitized file, printed "clean", and committed the dirty
+            # index — private data reached the public repo behind a green
+            # gate. The fix-and-retry cycle is the ONLY flow where worktree
+            # and index routinely differ, and it is exactly the flow every
+            # blocked commit funnels the author into. Scan the bytes the
+            # commit SHIPS: `git show :<path>`. (This also covers a file that
+            # was staged then deleted from disk — the blob still ships, so
+            # there is no is_file() skip on this branch.)
+            proc = subprocess.run(["git", "show", f":{rel}"], capture_output=True)
+            if proc.returncode != 0:
+                print("ERROR: cannot read the staged blob for %s — %s" % (
+                    rel, (proc.stderr or b"").decode("utf-8", "replace").strip()[:200] or "no stderr"))
+                print("The guard did NOT scan the bytes this commit ships. "
+                      "This is not a pass; fix the index read and re-commit.")
+                return 2
+            try:
+                text = proc.stdout.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        else:
+            p = Path(rel)
+            if not p.is_file():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, PermissionError):
+                continue
         scanned += 1
         for i, line in enumerate(text.splitlines(), 1):
             for m in USERNAME_RE.finditer(line):
