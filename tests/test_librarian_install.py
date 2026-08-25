@@ -138,6 +138,45 @@ class AppModeTests(unittest.TestCase):
             self.assertIn("dream-sweep", ids)
             self.assertIn(li.LIBRARIAN_JOB_ID, ids)
 
+    def _written_job(self) -> dict:
+        with TemporaryDirectory() as td:
+            home = Path(td)
+            path = _seed_store(home)
+            db = home / "occ.sqlite"
+            rc = li.install("app", home=home, emit=lambda _m: None, db_path=db)
+            self.assertEqual(rc, 0)
+            jobs = json.loads(path.read_text(encoding="utf-8"))["jobs"]
+            return next(j for j in jobs if j.get("id") == li.LIBRARIAN_JOB_ID)
+
+    def test_written_action_type_is_in_the_engines_union(self) -> None:
+        # The engine's JobAction union is prompt|script|team (desktop
+        # types.ts). An action.type outside it LOADS fine (storage raw-parses),
+        # computes nextRun off its valid cron, passes a schedule-shape gate —
+        # and executeJobAction silently returns undefined: a success no-op
+        # every night, with notifyOnError structurally unable to fire. The
+        # first dogfood install (2026-08-25) shipped exactly that as "cli".
+        job = self._written_job()
+        self.assertIn(job["action"]["type"], li.ENGINE_JOB_ACTION_TYPES)
+
+    def test_written_job_is_t4_verbatim(self) -> None:
+        job = self._written_job()
+        self.assertEqual(job["name"], "Nightly Librarian")
+        action = job["action"]
+        self.assertEqual(action["type"], "prompt")
+        self.assertEqual(action["prompt"], "/ls-librarian")
+        self.assertEqual(action["workdir"], "C:\\Projects")
+        self.assertEqual(action["permissionMode"], "bypassPermissions")
+        self.assertEqual(action["timeoutMinutes"], 45)
+        self.assertEqual(action["maxTurns"], 80)
+        self.assertEqual(
+            job["schedule"], {"type": "cron", "expression": "30 3 * * *"}
+        )
+        self.assertTrue(job["enabled"])
+        # Store idiom: epoch millis like every app-written job — the store's
+        # other rows carry ints, and a mixed-type column is a sort/display trap.
+        self.assertIsInstance(job["createdAt"], int)
+        self.assertIsInstance(job["updatedAt"], int)
+
     def test_releases_the_lock_so_the_app_is_not_locked_out(self) -> None:
         # release() landed after this module was drafted (oss 6961d7b). Before
         # it, a CLI install held the config row for the REST OF THE TTL — a

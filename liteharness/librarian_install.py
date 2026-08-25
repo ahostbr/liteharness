@@ -58,6 +58,14 @@ TASK_NAME = r"LiteSuite\librarian"
 LIBRARIAN_CRON = "30 3 * * *"
 _TASK_TIME = "03:30"
 
+#: The engine's JobAction union (desktop types.ts, JobAction). An action.type
+#: outside it loads anyway — the store raw-parses — computes nextRun off its
+#: valid cron, passes a schedule-shape gate, and then executeJobAction silently
+#: returns undefined: a success no-op every fire, with notifyOnError
+#: structurally unable to trigger. The first dogfood install (2026-08-25)
+#: shipped exactly that as {"type": "cli"}. Writes are gated on this set.
+ENGINE_JOB_ACTION_TYPES = frozenset({"prompt", "script", "team"})
+
 Emit = Callable[[str], None]
 Runner = Callable[[list[str]], int]
 
@@ -73,6 +81,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _now_ms() -> int:
+    """Epoch milliseconds — the store's timestamp idiom for job rows."""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
 def schedules_path(home: Path) -> Path:
     return home / ".litesuite" / "agent" / "config" / "schedules.json"
 
@@ -84,17 +97,28 @@ def librarian_job() -> dict:
     edit it like any other job — an entry the app cannot render is a job the
     user cannot turn off.
     """
-    now = _now_iso()
+    now = _now_ms()
     return {
         "id": LIBRARIAN_JOB_ID,
-        "name": "Librarian",
+        "name": "Nightly Librarian",
         "description": (
-            "Promotes verified patterns into the architecture docs. "
+            "Verify docs against code; promote verified claims from daily "
+            "notes + human-verified patterns into arch docs. "
             "Installed by `liteharness librarian-install`."
         ),
         "enabled": True,
         "schedule": {"type": "cron", "expression": LIBRARIAN_CRON},
-        "action": {"type": "cli", "command": "liteharness librarian-tick"},
+        # The APP path runs the skill as a PromptAction — `liteharness
+        # librarian-tick` is the CLOSED-APP (schtasks, --mode os) runner, not
+        # an action type the engine can execute.
+        "action": {
+            "type": "prompt",
+            "prompt": "/ls-librarian",
+            "workdir": "C:\\Projects",
+            "permissionMode": "bypassPermissions",
+            "timeoutMinutes": 45,
+            "maxTurns": 80,
+        },
         "tags": ["liteharness", "librarian"],
         "status": "idle",
         "history": [],
@@ -168,7 +192,17 @@ def _install_app(home: Path, emit: Emit, db_path: Path | None) -> int:
             emit("The librarian job is already installed — nothing to do.")
             return 0
 
-        jobs.append(librarian_job())
+        job = librarian_job()
+        if job["action"]["type"] not in ENGINE_JOB_ACTION_TYPES:
+            # Writer-side gate: an action the engine cannot dispatch becomes a
+            # nightly success no-op, invisible to every schedule-shape check.
+            emit(
+                f"Refusing to write: action type {job['action']['type']!r} is "
+                f"not one the engine executes ({sorted(ENGINE_JOB_ACTION_TYPES)})."
+            )
+            return 7
+
+        jobs.append(job)
         data["jobs"] = jobs
 
         # Backup BEFORE the replace. The store holds every schedule the user
