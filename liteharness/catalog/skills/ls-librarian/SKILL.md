@@ -39,13 +39,34 @@ Spawn all 4 in parallel using the Agent tool with `model: "haiku"`. Each scout i
 
 > "You are a read-only scout for the Librarian. Glob for all SKILL.md files, agent .md files, and command .md files across the project. If a library.yaml exists, read it and compare. Report new items (on disk but not in catalog), stale items (in catalog but deleted from disk), and changed items (description mismatch). Return a JSON array: [{name, status: 'new'|'stale'|'changed', path, details}]. If the domain is clean, return an empty array. Do NOT edit any files."
 
-**Scout 3 — Memory Verifier (The Chronographer):**
+**Scout 3 — Vault Scout (The Chronographer):**
 
-> "You are a read-only scout for the Librarian. Find and read MEMORY.md (check .claude/projects/\*/memory/MEMORY.md and project root). For each index entry, verify the linked .md file exists. Read each memory file and check if file paths mentioned in its content still exist on disk. Return a JSON array: [{entry, status: 'valid'|'stale_ref'|'dead_file'|'outdated_claim', details}]. If the domain is clean, return an empty array. Do NOT edit any files."
+Daily notes are a CLAIM LIST, not a source. The scout runs the shared
+deterministic checker and only relays its verdicts:
+
+> "You are a read-only scout for the Librarian. Run
+> `python -m liteharness.librarian_checks --notes <glob> --days 2` and work ONLY from the JSON it
+> emits. You never run your own checks and never override a result upward. Behavioral parts
+> lacking an attestation are "awaiting-human". A claim the checker could not qualify is
+> "unverifiable", never "verified"."
+
+`<glob>` comes from the `librarian.notes_glob` config key (shipped default
+`.liteharness/notes/*.md`; a user config may point anywhere).
 
 **Scout 4 — Dead Reference Hunter (The Sieve):**
 
 > "You are a read-only scout for the Librarian. Glob all .md files in the project. For each, regex extract markdown links [text](path) and backtick-wrapped file paths. Verify each target exists on the filesystem. Return a JSON array of ONLY dead links: [{source_file, link, status: 'dead', line_number}]. If no dead links found, return an empty array. Do NOT edit any files."
+
+### 2.5. THE PLANTED-CLAIM GATE — prove the sieve before trusting it
+
+```bash
+python tests/librarian_selftest.py
+```
+
+Three claims are planted (a fabricated sha, a dead file:line, a false
+behavioral claim on a REAL sha) and must come back refused. **Exit 1 =
+STOP THE SWEEP** — a librarian that cannot refuse a plant cannot be trusted
+with a real note. Do not continue past a red gate.
 
 ### 3. TRIANGULATE — Synthesize the Measurements
 
@@ -70,11 +91,25 @@ Apply all fixes yourself. Only the Librarian writes.
 
 **Architecture doc format:** Path + one-liner. Not prose. The Pinakes was a finding aid, not a textbook.
 
-**Memory consolidation:**
+**The archive is READ-ONLY:**
 
-- Update status claims (IN PROGRESS → SHIPPED where code confirms)
-- Remove facts contradicted by filesystem
-- Prune MEMORY.md entries whose files no longer exist
+The MEMORY.md tree (`~/.claude/projects/*/memory/`) is a FROZEN ARCHIVE:
+read-only, never edited, never pruned, never "consolidated". It is committed
+to git (dotclaude); your write surface is `docs/architecture/**` and library
+catalogs ONLY.
+
+**Vault-claim promotion (what the checker's verdicts become):**
+
+- **Structural facts** (commit X touches Y; module Z exists) → fold into the
+  owning arch doc (via `docs/architecture/INDEX.md` lookup), promoting ONLY
+  the exact proposition the check proved — never the whole prose claim.
+- **Behavioral claims** ("fixed", "works") → NEVER auto-promoted: they land in
+  the report's "awaiting human confirmation" list; the human's confirmation
+  mints an attestation (`liteharness verify-pattern --level human …`), which
+  promotes them the NEXT night.
+- **Refuted** → report only. **Unverifiable** → the OPEN list.
+- Patterns whose effective verification became `human` since the last run
+  promote the same way as structural facts.
 
 Log each delta:
 
@@ -105,19 +140,23 @@ Output a structured summary:
 ### Measurements (Scout Findings)
 - Architecture: N findings
 - Catalog: N findings
-- Memory: N findings
+- Vault claims: N verified / N refuted / N unverifiable / N awaiting-human
 - Dead References: N findings
 
 ### Corrections Applied
 - [file]: what changed (type)
+
+### Awaiting Human Confirmation
+- [claim]: behavioral, unattested — confirmation mints the attestation
 
 ### Collection Health
 | Dimension | Status |
 |-----------|--------|
 | Architecture docs | N verified, N drifted |
 | Catalog entries | N matched, N stale, N new |
-| Memory files | N valid, N pruned |
+| Vault claims | N promoted (structural), N awaiting, N refused |
 | Cross-references | N live, N dead removed |
+| Archive | READ-ONLY, untouched (always) |
 
 ### Deltas Logged: N
 ### Open Questions: [anything requiring human judgment]

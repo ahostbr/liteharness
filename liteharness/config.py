@@ -260,6 +260,21 @@ def get_memory_nudge() -> dict:
     return defaults
 
 
+def get_librarian() -> dict:
+    """Librarian settings, merged over defaults.
+
+    `notes_glob` is where the Vault Scout's checker
+    (`liteharness.librarian_checks`) reads daily notes — a CLAIM LIST, not a
+    source. The shipped default is project-local and machine-neutral; a user
+    config (e.g. an Obsidian vault's Daily folder) overrides it.
+    """
+    defaults = {"notes_glob": ".liteharness/notes/*.md"}
+    stored = load().get("librarian")
+    if isinstance(stored, dict):
+        defaults.update(stored)
+    return defaults
+
+
 def detect_installed_clis() -> list[str]:
     """Detect which AI coding CLIs are installed."""
     import shutil
