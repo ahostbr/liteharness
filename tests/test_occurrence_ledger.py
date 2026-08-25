@@ -192,6 +192,15 @@ class TickTests(unittest.TestCase):
         spawns = self.marker.read_text(encoding="utf-8").count("spawn")
         self.assertEqual(spawns, 1, "a completed slot was re-run by a later tick")
 
+    def test_disabled_job_is_a_no_op(self) -> None:
+        """A stale schtasks entry firing after a disable must do nothing —
+        the task registration is never the authority on whether a job runs."""
+        data = json.loads(self.schedules.read_text(encoding="utf-8"))
+        data["jobs"][0]["enabled"] = False
+        self.schedules.write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(self._tick(), 0)
+        self.assertFalse(self.marker.exists(), "a disabled job was executed")
+
     def test_non_daily_cron_is_refused(self) -> None:
         data = json.loads(self.schedules.read_text(encoding="utf-8"))
         data["jobs"][0]["schedule"]["expression"] = "*/5 * * * *"

@@ -96,6 +96,13 @@ def run_tick(
         print(f"[librarian-tick] job '{job_id}' not found in {schedules_path}", file=sys.stderr)
         return 2
 
+    # A stale OS task can outlive the job's enabled state (sync failed, or
+    # the disable raced the fire). The tick re-checks at fire time so the
+    # task registration is never the authority on whether a job runs.
+    if not job.get("enabled", True):
+        print(f"[librarian-tick] job '{job_id}' is disabled — nothing to do")
+        return 0
+
     schedule = job.get("schedule") or {}
     if schedule.get("type") != "cron":
         print(f"[librarian-tick] job '{job_id}' has schedule type "
