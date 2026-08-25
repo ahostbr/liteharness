@@ -141,5 +141,78 @@ class PatternSupersedesTests(unittest.TestCase):
         self.assertNotIn(stale, ids)
 
 
+class BareStringSupersedesTests(unittest.TestCase):
+    """A string where a list belongs must NOT be iterated character-wise.
+
+    🔴 THE LIVE INCIDENT THIS PINS. LiteSuite/.liteharness/patterns.jsonl line 28
+    stored supersedes as 47 single characters — list("ac965cc1-...-1787681416").
+    The caller passed a bare string; `",".join(a_string)` produced
+    "a,c,9,6,..." and the CLI's comma split turned that into one entry per
+    character. Nothing raised. The supersession therefore named 47 ids that do
+    not exist and retired NOTHING, so the corrected verdict and the wrong one
+    both stayed live in query results.
+
+    ⭐ The failure is silent in BOTH directions: no error on write, and on read
+    a supersession that matches nothing is indistinguishable from a pattern that
+    never superseded anything. That is why this needs an instrument.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / ".liteharness").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _entries(self) -> list[dict]:
+        return [
+            json.loads(ln)
+            for ln in (self.root / ".liteharness" / "patterns.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if ln.strip()
+        ]
+
+    def test_a_bare_string_is_stored_as_one_element(self) -> None:
+        stale = _record(self.root, "a1", "Northwind retainer is 4000 per month")
+        _record(self.root, "a2", "Northwind retainer is 9500 per month", supersedes=stale)
+
+        rec = self._entries()[-1]
+        self.assertEqual(
+            rec["supersedes"], [stale],
+            "a bare string was exploded into characters instead of wrapped",
+        )
+
+    def test_a_bare_string_actually_retires_the_pattern(self) -> None:
+        """Storage shape is only half of it — the edge must still apply.
+
+        Asserting the stored list alone would pass on a fix that wrapped the
+        string but broke retrieval.
+        """
+        stale = _record(self.root, "a1", "Northwind retainer is 4000 per month")
+        _record(self.root, "a2", "Northwind retainer is 9500 per month", supersedes=stale)
+
+        ids = {p["task_id"] for p in _query(self.root, "Northwind retainer")}
+        self.assertNotIn(stale, ids, "bare-string supersession did not retire anything")
+
+    def test_a_list_of_strings_still_works(self) -> None:
+        """Control: the coercion must not disturb the documented shape."""
+        stale = _record(self.root, "a1", "Northwind retainer is 4000 per month")
+        _record(self.root, "a2", "Northwind retainer is 9500 per month", supersedes=[stale])
+        self.assertEqual(self._entries()[-1]["supersedes"], [stale])
+
+    def test_a_nonsense_supersedes_refuses_loudly(self) -> None:
+        """Neither str nor list-of-str: refuse rather than store something odd.
+
+        Silently coercing an int or a dict is how the next caller learns nothing
+        from being wrong.
+        """
+        for bad in (17, {"id": "x"}, [1, 2], [None]):
+            with self.subTest(bad=bad):
+                with self.assertRaises((TypeError, ValueError, SystemExit)):
+                    _record(self.root, "a3", "whatever", supersedes=bad)
+
+
 if __name__ == "__main__":
     unittest.main()

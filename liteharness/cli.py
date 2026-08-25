@@ -1541,6 +1541,49 @@ def cmd_embed_query(
         print(f"  [{marker}] {ts} ({complexity}) {desc}")
 
 
+def _coerce_id_list(value: object, field: str) -> list[str]:
+    """Accept a bare id, require a list of ids, refuse anything else LOUDLY.
+
+    🔴 WHY THIS EXISTS — a real, silent, live corruption. A caller passed a bare
+    string where this array belongs. Nothing validated it, so the id travelled
+    to a `",".join(...)` in the MCP tool layer, which iterates a string
+    CHARACTER-WISE: "ac96..." became "a,c,9,6,..." and the CLI's comma split
+    stored 47 one-character ids. The supersession then named 47 ids that do not
+    exist and retired NOTHING, while reading back as a perfectly well-formed
+    list. The corrected verdict and the verdict it was meant to retire both
+    stayed live in query results for anyone who asked.
+
+    ⭐ THE SHAPE: a string IS iterable, so every list-shaped operation "succeeds"
+    on one. `join`, `extend`, `list()`, `in` — none of them raise, and the
+    damage is only visible if you look at the element WIDTH. Type hints do not
+    check anything at runtime; this does.
+
+    A single id is accepted and wrapped because that is what callers plainly
+    mean, and refusing it would only push them toward the string that broke.
+    Everything else raises: silently coercing an int or a dict teaches the next
+    caller nothing.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        v = value.strip()
+        return [v] if v else []
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for i, item in enumerate(value):
+            if not isinstance(item, str):
+                raise TypeError(
+                    f"{field}[{i}] must be a string id, got {type(item).__name__}: {item!r}"
+                )
+            if item.strip():
+                out.append(item.strip())
+        return out
+    raise TypeError(
+        f"{field} must be a string id or a list of string ids, "
+        f"got {type(value).__name__}: {value!r}"
+    )
+
+
 def cmd_record_pattern(
     outcome: str = "unknown",
     agent_id: str | None = None,
@@ -1564,6 +1607,8 @@ def cmd_record_pattern(
     """
     import subprocess
     import uuid
+
+    supersedes = _coerce_id_list(supersedes, "supersedes")
 
     project_root = project or os.getcwd()
     patterns_dir = Path(project_root) / ".liteharness"
