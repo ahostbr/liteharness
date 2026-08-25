@@ -1923,6 +1923,11 @@ def cmd_bootstrap(project_path: str) -> None:
     if not lst_path:
         print("  WARNING: lst not on PATH — install litesuite-tools")
     print("=" * 50)
+    # The librarian is OFFERED, never installed here. A bootstrap that silently
+    # registers OS scheduled tasks is exactly the surprise git-as-memory exists
+    # to remove, so this prints an invitation and changes nothing.
+    print("  Optional: nightly librarian (promotes verified patterns into your")
+    print("  architecture docs) — see `liteharness librarian-install --mode print`")
 
 
 # Short aliases → current model IDs. Full IDs are always accepted verbatim
@@ -3681,6 +3686,8 @@ def main() -> None:
         print("                 --evidence-ref|--delegation-ref|--run-id EVIDENCE  # per level, required")
         print("  revoke-pattern --pattern-id ID --reason WHY --prior-attestation-id AID --actor WHO")
         print("  librarian-tick --job-id ID     Closed-app librarian runner (occurrence-ledger arbitrated)")
+        print("  librarian-install --mode app|os|print [--remove]")
+        print("                                 Offer the librarian as a mechanism; print does nothing")
         print("                                 Record a task pattern")
         print("                                 --task -  reads the description from stdin (opt-in;")
         print("                                 omitting --task never reads stdin and never blocks)")
@@ -4366,6 +4373,28 @@ def main() -> None:
             sys.exit(2)
         from .librarian_tick import run_tick
         sys.exit(run_tick(lt_job_id))
+    elif cmd == "librarian-install":
+        li_mode = None
+        li_remove = False
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] == "--mode" and i + 1 < len(sys.argv):
+                li_mode = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--remove":
+                li_remove = True
+                i += 1
+            else:
+                print(f"[librarian-install] unknown argument: {sys.argv[i]}", file=sys.stderr)
+                sys.exit(2)
+        if not li_mode:
+            print(
+                "Usage: liteharness librarian-install --mode app|os|print [--remove]",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        from .librarian_install import install as _librarian_install
+        sys.exit(_librarian_install(li_mode, remove=li_remove))
     elif cmd == "rag":
         cmd_rag()
     elif cmd == "install":
