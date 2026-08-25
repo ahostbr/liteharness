@@ -508,6 +508,11 @@ def _load_items(memory_dir: pathlib.Path) -> list[tuple[str, str]]:
 
     MEMORY.md is the human-facing index, not an item — it is skipped. Dotfiles
     and non-markdown files are ignored.
+
+    frozen archive — read-only. Under git-as-memory v2 nothing writes this tree
+    any more; durable knowledge goes to patterns, commit bodies and handoffs.
+    This module stays FUNCTIONAL for whoever still has an archive on disk, and
+    stops being advertised as the place knowledge goes.
     """
     items: list[tuple[str, str]] = []
     for path in sorted(memory_dir.glob("*.md")):
