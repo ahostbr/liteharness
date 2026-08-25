@@ -220,6 +220,36 @@ def complete(
     return {"completed": done}
 
 
+def release(
+    conn: sqlite3.Connection,
+    job_id: str,
+    scheduled_at: str,
+    owner_token: str,
+    db_path: Path | str = DEFAULT_DB,
+) -> dict:
+    """ABANDON an unfinished claim — the row is deleted and immediately
+    re-acquirable. Owner-matched and never-completed only: a completed
+    occurrence is history and stays forever.
+
+    For LIFETIME LOCKS (e.g. the scheduler-config sentinel slot): complete()
+    would BURN the slot permanently (takeover requires completed_at IS NULL
+    and nothing clears it), so a lock holder releases on clean shutdown and
+    lets TTL lapse cover crashes. For EXECUTED WORK this is the WRONG verb:
+    work that ran must complete() — releasing after running re-opens the
+    slot for a duplicate run.
+    """
+    cur = conn.execute(
+        "DELETE FROM occurrences "
+        "WHERE job_id=? AND scheduled_at=? AND owner_token=? AND completed_at IS NULL",
+        (job_id, scheduled_at, owner_token),
+    )
+    released = cur.rowcount == 1
+    if released:
+        _receipt(db_path, {"event": "release", "job_id": job_id,
+                           "scheduled_at": scheduled_at, "owner_token": owner_token})
+    return {"released": released}
+
+
 def status(conn: sqlite3.Connection, job_id: str, scheduled_at: str) -> dict | None:
     row = conn.execute(
         "SELECT job_id, scheduled_at, owner_token, acquired_at, heartbeat_at, "
@@ -236,7 +266,7 @@ def status(conn: sqlite3.Connection, job_id: str, scheduled_at: str) -> dict | N
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="liteharness.occurrences")
-    parser.add_argument("op", choices=["acquire", "heartbeat", "complete", "status"])
+    parser.add_argument("op", choices=["acquire", "heartbeat", "complete", "release", "status"])
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--job", required=True)
     parser.add_argument("--slot", required=True)
@@ -253,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
             out = heartbeat(conn, args.job, args.slot, args.owner, args.ttl)
         elif args.op == "complete":
             out = complete(conn, args.job, args.slot, args.owner, args.outcome, db_path=args.db)
+        elif args.op == "release":
+            out = release(conn, args.job, args.slot, args.owner, db_path=args.db)
         else:
             out = {"row": status(conn, args.job, args.slot)}
     finally:

@@ -120,6 +120,46 @@ class LedgerProtocolTests(unittest.TestCase):
             self.assertEqual(got["reason"], "completed")
 
 
+class ReleaseTests(unittest.TestCase):
+    """release() ABANDONS an unfinished claim (the lifetime-lock pattern —
+    complete() on a lock would burn the slot forever). Owner-matched and
+    never-completed only; executed work must still complete()."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self._tmp.name) / "occurrences.sqlite"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_release_reopens_the_slot_immediately(self) -> None:
+        conn = occ.open_ledger(self.db)
+        occ.acquire(conn, "lock", "lifetime", "holder", 300.0, db_path=self.db)
+        self.assertTrue(
+            occ.release(conn, "lock", "lifetime", "holder", db_path=self.db)["released"]
+        )
+        # No TTL wait: the next contender claims at once.
+        got = occ.acquire(conn, "lock", "lifetime", "next-holder", 300.0, db_path=self.db)
+        conn.close()
+        self.assertTrue(got["won"])
+        self.assertEqual(got["reason"], "claimed")
+
+    def test_release_refuses_non_owner_and_completed(self) -> None:
+        conn = occ.open_ledger(self.db)
+        occ.acquire(conn, "job-1", "2026-08-25T03:30", "winner", 300.0, db_path=self.db)
+        self.assertFalse(
+            occ.release(conn, "job-1", "2026-08-25T03:30", "impostor", db_path=self.db)["released"]
+        )
+        occ.complete(conn, "job-1", "2026-08-25T03:30", "winner", "success", db_path=self.db)
+        self.assertFalse(
+            occ.release(conn, "job-1", "2026-08-25T03:30", "winner", db_path=self.db)["released"],
+            "a completed occurrence is history and must never be deleted",
+        )
+        got = occ.acquire(conn, "job-1", "2026-08-25T03:30", "late", 300.0, db_path=self.db)
+        conn.close()
+        self.assertFalse(got["won"], "completed-never-reruns must survive release attempts")
+
+
 class TickTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
