@@ -95,7 +95,7 @@ PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-casestudy", "ls-caveman-mode", "ls-comfy-to-liteimage",
     "ls-compile-cli", "ls-consult", "ls-consult-polymaths",
     "ls-conversation-lookup", "ls-debug", "ls-design-huashu",
-    "ls-devstral", "ls-dream-consolidate", "ls-eva",
+    "ls-devstral", "ls-eva",
     "ls-eval-gate", "ls-find-skills", "ls-gen-image-or-video",
     # ls-arch-gen: PUBLIC by Ryan's amendment 2026-08-16 — it GENERATES arch docs for the
     # user's own project rather than hardcoding LiteSuite's. Ships together with
