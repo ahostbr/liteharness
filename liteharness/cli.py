@@ -982,9 +982,10 @@ def cmd_register(
 # Bump when the `patterns` FTS5 column set changes. The table is a pure cache
 # rebuilt from patterns.jsonl, so a mismatch is resolved by dropping it — never
 # by migrating. v2 added `supersedes` and started populating `id` from task_id.
-# The v3 ranking change (BM25-first ORDER BY) needed no bump: rankings are
-# computed per query, not stored, and the column set did not change.
-_PATTERN_DB_SCHEMA = "2"
+# The BM25-first ORDER BY needed no bump (rankings are computed per query, not
+# stored). v3 added `verified` + `pattern_id` and the attestation join; the
+# rebuild it forces also applies the positive row validation everywhere.
+_PATTERN_DB_SCHEMA = "3"
 
 
 def _pattern_db_open(db_path: Path):
@@ -1021,6 +1022,8 @@ def _pattern_db_open(db_path: Path):
             outcome UNINDEXED,
             complexity UNINDEXED,
             supersedes UNINDEXED,
+            verified UNINDEXED,
+            pattern_id UNINDEXED,
             tokenize="unicode61"
         )
     """)
@@ -1068,31 +1071,162 @@ def _load_pattern_entries(patterns_path: Path) -> list[dict]:
     return entries
 
 
+# Attestations live in a SEPARATE append-only file — patterns.jsonl stays
+# pattern-only forever. Old readers never see an event line at all (they
+# degrade to showing every pattern as unverified); new readers JOIN the two
+# logs. That makes mixed-version compatibility structural, not sequenced.
+_PATTERN_ATTESTATIONS_FILENAME = "pattern-attestations.jsonl"
+
+# level -> the evidence field that level REQUIRES. A verification without its
+# evidence is refused: the exception carries its own authorization instead of
+# being self-assertable.
+_PATTERN_VERIFY_LEVELS = {
+    "human": "evidence_ref",
+    "judgement": "delegation_ref",
+    "gauntlet": "run_id",
+}
+
+_PATTERN_VERIFIED_LABELS = {
+    "human": "VERIFIED",
+    "judgement": "JUDGEMENT",
+    "gauntlet": "GAUNTLET",
+}
+
+
+def _pattern_content_id(entry: dict) -> str:
+    """Deterministic, checkout-stable, content-addressed id for a legacy row.
+
+    `legacy:<sha256(canonical)>` where canonical is the record with derived
+    fields (`pattern_id`) excluded, dumped with sorted keys, compact
+    separators, and raw UTF-8 — which matches RFC 8785 JCS for records whose
+    values are strings, ints, arrays and objects (every pattern record; JCS
+    float serialization would differ, but no pattern field is a float).
+
+    Deliberately NO path, repo, or ordinal component: the same committed JSONL
+    must yield the same ids in every worktree and clone, or attestations made
+    from one checkout would orphan in another. Exact duplicate records SHARE
+    one identity — they are indistinguishable statements of the same fact, so
+    attesting one attests the fact.
+    """
+    import hashlib
+
+    body = {k: v for k, v in entry.items() if k != "pattern_id"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "legacy:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _pattern_effective_id(entry: dict) -> str:
+    """A record's immutable identity: its own pattern_id, else derived."""
+    return entry.get("pattern_id") or _pattern_content_id(entry)
+
+
+def _load_attestation_events(attest_path: Path) -> list[dict]:
+    """Load valid attestation events in file order; surface anything else.
+
+    Valid: `{"type":"verification", pattern_id, level in the enum}` or
+    `{"type":"revocation", pattern_id}`. An unknown event type causes ZERO
+    state changes and is counted out loud — never guessed at.
+    """
+    events: list[dict] = []
+    unknown = 0
+    if not attest_path.exists():
+        return events
+    for line in attest_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            unknown += 1
+            continue
+        if not isinstance(obj, dict) or not obj.get("pattern_id"):
+            unknown += 1
+        elif obj.get("type") == "verification" and obj.get("level") in _PATTERN_VERIFY_LEVELS:
+            events.append(obj)
+        elif obj.get("type") == "revocation":
+            events.append(obj)
+        else:
+            unknown += 1
+    if unknown:
+        print(
+            f"[pattern-sync] {unknown} unknown/invalid event line(s) in "
+            f"{attest_path.name} caused no state change",
+            file=sys.stderr,
+        )
+    return events
+
+
+def _effective_verified_map(entries: list[dict], attest_path: Path) -> dict[str, str]:
+    """Fold the attestation log into effective state, keyed by pattern_id.
+
+    Duplicate attestations on one pattern: last-wins by file order
+    (deliberate). An attestation resolving to no known pattern_id is an ERROR
+    surfaced by id — never a silent no-op; fail-closed means it also never
+    promotes anything else.
+    """
+    known = {_pattern_effective_id(e) for e in entries}
+    state: dict[str, str] = {}
+    unresolved: list[str] = []
+    for ev in _load_attestation_events(attest_path):
+        pid = ev["pattern_id"]
+        if pid not in known:
+            unresolved.append(pid)
+            continue
+        state[pid] = ev["level"] if ev["type"] == "verification" else "unverified"
+    if unresolved:
+        shown = ", ".join(unresolved[:5])
+        more = f" (+{len(unresolved) - 5} more)" if len(unresolved) > 5 else ""
+        print(
+            f"[pattern-sync] {len(unresolved)} unresolved attestation(s) — "
+            f"no pattern has that pattern_id: {shown}{more}",
+            file=sys.stderr,
+        )
+    return state
+
+
 def _pattern_db_sync(conn, patterns_path: Path) -> None:
-    """Sync JSONL write-ahead log into FTS5. Skips re-index when file is unchanged."""
+    """Sync JSONL write-ahead log into FTS5. Skips re-index when nothing changed.
+
+    Freshness is checked against BOTH logs: an attestation append changes
+    effective state without touching patterns.jsonl, so a check keyed only on
+    the pattern file would serve stale, pre-promotion rows forever.
+    """
     import sqlite3
+    attest_path = patterns_path.parent / _PATTERN_ATTESTATIONS_FILENAME
     stat = patterns_path.stat()
     mtime_str = str(stat.st_mtime)
     size_str = str(stat.st_size)
+    try:
+        astat = attest_path.stat()
+        attest_mtime_str = str(astat.st_mtime)
+        attest_size_str = str(astat.st_size)
+    except OSError:
+        attest_mtime_str = "0"
+        attest_size_str = "0"
 
-    row = conn.execute(
-        "SELECT value FROM patterns_meta WHERE key='jsonl_mtime'"
-    ).fetchone()
-    cached_mtime = row[0] if row else None
-    row = conn.execute(
-        "SELECT value FROM patterns_meta WHERE key='jsonl_size'"
-    ).fetchone()
-    cached_size = row[0] if row else None
+    cached: dict[str, str | None] = {}
+    for key in ("jsonl_mtime", "jsonl_size", "attest_mtime", "attest_size"):
+        row = conn.execute(
+            "SELECT value FROM patterns_meta WHERE key=?", (key,)
+        ).fetchone()
+        cached[key] = row[0] if row else None
 
-    if cached_mtime == mtime_str and cached_size == size_str:
+    if (
+        cached["jsonl_mtime"] == mtime_str
+        and cached["jsonl_size"] == size_str
+        and cached["attest_mtime"] == attest_mtime_str
+        and cached["attest_size"] == attest_size_str
+    ):
         return  # nothing changed
 
     entries = _load_pattern_entries(patterns_path)
+    effective = _effective_verified_map(entries, attest_path)
 
     conn.execute("DELETE FROM patterns")
     conn.executemany(
-        "INSERT INTO patterns(description, reason, lesson, id, timestamp, outcome, complexity, supersedes) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO patterns(description, reason, lesson, id, timestamp, outcome, complexity, supersedes, verified, pattern_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 e.get("description", ""),
@@ -1106,18 +1240,23 @@ def _pattern_db_sync(conn, patterns_path: Path) -> None:
                 e.get("outcome", ""),
                 e.get("complexity", ""),
                 json.dumps(e.get("supersedes") or []),
+                effective.get(pid) or e.get("verified") or "unverified",
+                pid,
             )
             for e in entries
+            for pid in (_pattern_effective_id(e),)
         ],
     )
-    conn.execute(
-        "INSERT OR REPLACE INTO patterns_meta(key, value) VALUES('jsonl_mtime', ?)",
-        (mtime_str,),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO patterns_meta(key, value) VALUES('jsonl_size', ?)",
-        (size_str,),
-    )
+    for key, value in (
+        ("jsonl_mtime", mtime_str),
+        ("jsonl_size", size_str),
+        ("attest_mtime", attest_mtime_str),
+        ("attest_size", attest_size_str),
+    ):
+        conn.execute(
+            "INSERT OR REPLACE INTO patterns_meta(key, value) VALUES(?, ?)",
+            (key, value),
+        )
     conn.commit()
 
 
@@ -1167,7 +1306,7 @@ def _pattern_fts5_query(conn, query: str | None, top: int) -> list[dict]:
     record and the correction that replaced it describe the same subject in the
     same words, so returning both hands the caller a contradiction it cannot rank.
     """
-    cols = "description, reason, lesson, id, timestamp, outcome, complexity, supersedes"
+    cols = "description, reason, lesson, id, timestamp, outcome, complexity, supersedes, verified, pattern_id"
     retired = _superseded_task_ids(conn)
     # Over-fetch so dropping retired rows still fills `top`.
     fetch = top * 4 if retired else top
@@ -1189,7 +1328,10 @@ def _pattern_fts5_query(conn, query: str | None, top: int) -> list[dict]:
 
     out: list[dict] = []
     for r in rows:
-        if r[3] and r[3] in retired:
+        # A supersedes array may name either handle: historical entries hold
+        # task_ids (original all-rows semantics, never rewritten), new entries
+        # hold pattern_ids.
+        if (r[3] and r[3] in retired) or (r[9] and r[9] in retired):
             continue
         try:
             supersedes = json.loads(r[7]) or []
@@ -1200,14 +1342,17 @@ def _pattern_fts5_query(conn, query: str | None, top: int) -> list[dict]:
                 "description": r[0],
                 "reason": r[1],
                 "lesson": r[2],
-                # `task_id` is the canonical name — pass it to record's
-                # `supersedes` to retire this pattern. `id` kept for back-compat.
+                # `task_id` is a grouping label — pass `pattern_id` to
+                # `supersedes`/`verify-pattern` to name a record precisely.
+                # `id` kept for back-compat.
                 "task_id": r[3],
                 "id": r[3],
                 "timestamp": r[4],
                 "outcome": r[5],
                 "complexity": r[6],
                 "supersedes": supersedes,
+                "verified": r[8] or "unverified",
+                "pattern_id": r[9] or "",
             }
         )
         if len(out) >= top:
@@ -1228,14 +1373,21 @@ def _print_patterns(entries: list[dict], fmt: str) -> None:
         ts = e.get("timestamp", "")[:19]
         complexity = e.get("complexity", "?")
         marker = "+" if outcome == "success" else "-" if outcome == "failure" else "?"
+        # The verification state rides EVERY row: an unverified pattern reads
+        # as a hypothesis, never a premise.
+        label = _PATTERN_VERIFIED_LABELS.get(e.get("verified"), "UNVERIFIED")
         # task_id is the handle for `record-pattern --supersedes` — show it, or
         # the caller can name what it read but not what it needs to retire.
         tid = e.get("task_id") or e.get("id") or ""
-        head = f"  [{marker}] {ts} ({complexity})" + (f" <{tid}>" if tid else "")
+        head = f"  [{marker}][{label}] {ts} ({complexity})" + (f" <{tid}>" if tid else "")
         try:
             print(f"{head} {desc}")
         except UnicodeEncodeError:
             print(f"{head} {desc.encode('ascii', 'replace').decode()}")
+        # pattern_id is the attestation/supersession handle — a row without it
+        # visible cannot be promoted, revoked, or precisely retired.
+        if e.get("pattern_id"):
+            print(f"       Pattern-id: {e['pattern_id']}")
         if e.get("reason"):
             print(f"       Reason: {e['reason']}")
         if e.get("lesson"):
@@ -1286,9 +1438,16 @@ def cmd_query_patterns(
         print(f"[query-patterns] unexpected FTS5 error, falling back to JSONL: {exc!r}", file=sys.stderr)
 
     # JSONL fallback — substring scan (used when sqlite3 / FTS5 unavailable).
-    # Same validated loader as the FTS5 path; only the ranking differs (no
-    # BM25 without FTS5 — the substring scan stays recency-sorted).
+    # Same validated loader and attestation join as the FTS5 path; only the
+    # ranking differs (no BM25 without FTS5 — the scan stays recency-sorted).
     entries = _load_pattern_entries(patterns_path)
+    effective = _effective_verified_map(
+        entries, patterns_path.parent / _PATTERN_ATTESTATIONS_FILENAME
+    )
+    for e in entries:
+        pid = _pattern_effective_id(e)
+        e["pattern_id"] = pid
+        e["verified"] = effective.get(pid) or e.get("verified") or "unverified"
 
     if query:
         lower_q = query.lower()
@@ -1300,7 +1459,8 @@ def cmd_query_patterns(
         ]
 
     # Same supersession rule as the FTS5 path — the fallback must not hand back
-    # a contradiction the primary path would have filtered.
+    # a contradiction the primary path would have filtered. A supersedes array
+    # may name either handle (historical task_ids, new pattern_ids).
     retired = {
         str(tid)
         for e in entries
@@ -1308,7 +1468,10 @@ def cmd_query_patterns(
         if tid
     }
     if retired:
-        entries = [e for e in entries if e.get("task_id") not in retired]
+        entries = [
+            e for e in entries
+            if e.get("task_id") not in retired and e["pattern_id"] not in retired
+        ]
 
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
     _print_patterns(entries[:top], fmt)
@@ -1387,12 +1550,20 @@ def cmd_record_pattern(
 ) -> None:
     """Record a pattern to .liteharness/patterns.jsonl in the current project.
 
-    ``supersedes`` names task_ids this record retires. Supersession is append-only
-    — the retired entries are never edited, retrieval just stops returning them.
-    It has to be supplied here, at record time: which fact replaces which is only
-    knowable while both are in the recording agent's context.
+    Every record is BORN ``verified: "unverified"`` with an immutable UUID4
+    ``pattern_id``. There is deliberately NO level parameter here: promotion is
+    an append-only attestation (``verify-pattern``) whose level carries its own
+    evidence — a record-time level would be self-assertable.
+
+    ``supersedes`` names records this one retires — pattern_ids for precision,
+    task_ids still honored (historical semantics, and a task_id retires every
+    row that carries it). Supersession is append-only — the retired entries are
+    never edited, retrieval just stops returning them. It has to be supplied
+    here, at record time: which fact replaces which is only knowable while both
+    are in the recording agent's context.
     """
     import subprocess
+    import uuid
 
     project_root = project or os.getcwd()
     patterns_dir = Path(project_root) / ".liteharness"
@@ -1429,11 +1600,16 @@ def cmd_record_pattern(
         schema_outcome = "failure"
 
     entry = {
+        # task_id is a GROUPING label, not an identity: unknown-<epoch> ids
+        # collide within a second (live duplicates exist). pattern_id is the
+        # identity — immutable, and the only attestation/supersession target.
         "task_id": f"{agent_id or 'unknown'}-{int(time.time())}",
+        "pattern_id": str(uuid.uuid4()),
         "session": agent_id or "cli",
         "outcome": schema_outcome,
         "complexity": "medium",
         "description": task_desc,
+        "verified": "unverified",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1449,6 +1625,145 @@ def cmd_record_pattern(
         f.write(line)
 
     print(f"Recorded pattern: {schema_outcome} for {entry['task_id']}")
+
+
+def cmd_verify_pattern(
+    pattern_id: str,
+    level: str,
+    actor: str | None = None,
+    evidence_ref: str | None = None,
+    delegation_ref: str | None = None,
+    run_id: str | None = None,
+    project: str | None = None,
+) -> None:
+    """Append a verification attestation to pattern-attestations.jsonl.
+
+    One event per state change, append-only, in a SEPARATE file so
+    patterns.jsonl stays pattern-only forever. Each level REQUIRES its
+    evidence: human -> evidence_ref (where Ryan/the human approved),
+    judgement -> delegation_ref (where judgement was delegated),
+    gauntlet -> run_id. Resolution targets pattern_id ONLY and FAILS CLOSED
+    on zero matches — never a task_id fallback that would knowingly promote
+    unrelated rows (the task_id namespace holds live collisions).
+
+    This is provenance enforcement plus policy, NOT security: any local
+    process can append; the supported path makes every state change causal
+    and attributable, and that visibility is the defense.
+    """
+    import uuid
+
+    def refuse(msg: str) -> None:
+        print(f"[verify-pattern] {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if level not in _PATTERN_VERIFY_LEVELS:
+        refuse(f"unknown level '{level}' — one of: {', '.join(_PATTERN_VERIFY_LEVELS)}")
+    if not actor:
+        refuse("--actor is required — every state change must be attributable")
+    evidence_key = _PATTERN_VERIFY_LEVELS[level]
+    evidence = {
+        "evidence_ref": evidence_ref,
+        "delegation_ref": delegation_ref,
+        "run_id": run_id,
+    }[evidence_key]
+    if not evidence:
+        refuse(
+            f"level '{level}' requires --{evidence_key.replace('_', '-')} — "
+            "the exception carries its own authorization"
+        )
+
+    project_root = project or os.getcwd()
+    patterns_path = Path(project_root) / ".liteharness" / "patterns.jsonl"
+    if not patterns_path.exists():
+        refuse(f"no patterns.jsonl at {patterns_path}")
+
+    entries = _load_pattern_entries(patterns_path)
+    matches = [e for e in entries if _pattern_effective_id(e) == pattern_id]
+    if not matches:
+        refuse(
+            f"'{pattern_id}' resolves to 0 patterns — attestation refused "
+            "(fail closed). task_ids are not attestation targets; take the "
+            "Pattern-id from query-patterns output."
+        )
+    # Exact-id matching cannot resolve to more than one identity; >1 rows here
+    # are exact duplicates deliberately sharing it — attesting one attests the
+    # fact, so every copy reflects the state.
+
+    event = {
+        "type": "verification",
+        "attestation_id": str(uuid.uuid4()),
+        "pattern_id": pattern_id,
+        "level": level,
+        "actor": actor,
+        evidence_key: evidence,
+        "source": "liteharness-cli",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    attest_path = patterns_path.parent / _PATTERN_ATTESTATIONS_FILENAME
+    with open(attest_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+
+    print(f"Attested {level} for {pattern_id} (attestation {event['attestation_id']})")
+
+
+def cmd_revoke_pattern(
+    pattern_id: str,
+    reason: str | None = None,
+    prior_attestation_id: str | None = None,
+    actor: str | None = None,
+    project: str | None = None,
+) -> None:
+    """Append a revocation, returning a pattern's effective state to unverified.
+
+    A revocation is just another attestation — nothing is ever edited in
+    place. It requires the reason and the id of the verification it revokes;
+    the prior attestation must exist and target the same pattern (fail
+    closed), or a typo would silently revoke nothing while reporting success.
+    """
+    import uuid
+
+    def refuse(msg: str) -> None:
+        print(f"[revoke-pattern] {msg}", file=sys.stderr)
+        sys.exit(1)
+
+    if not reason:
+        refuse("--reason is required")
+    if not prior_attestation_id:
+        refuse("--prior-attestation-id is required — name the verification being revoked")
+    if not actor:
+        refuse("--actor is required — every state change must be attributable")
+
+    project_root = project or os.getcwd()
+    attest_path = (
+        Path(project_root) / ".liteharness" / _PATTERN_ATTESTATIONS_FILENAME
+    )
+    prior = [
+        ev
+        for ev in _load_attestation_events(attest_path)
+        if ev.get("type") == "verification"
+        and ev.get("attestation_id") == prior_attestation_id
+        and ev.get("pattern_id") == pattern_id
+    ]
+    if not prior:
+        refuse(
+            f"no verification '{prior_attestation_id}' targeting '{pattern_id}' "
+            "exists — revocation refused (fail closed)"
+        )
+
+    event = {
+        "type": "revocation",
+        "attestation_id": str(uuid.uuid4()),
+        "pattern_id": pattern_id,
+        "actor": actor,
+        "reason": reason,
+        "prior_attestation_id": prior_attestation_id,
+        "source": "liteharness-cli",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(attest_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+
+    print(f"Revoked {prior_attestation_id} for {pattern_id} (revocation {event['attestation_id']})")
 
 
 HARNESS_VERSION = "0.2.0"
@@ -3360,7 +3675,11 @@ def main() -> None:
         print("  rag <action> [query] [--top-k N] [--scope S] [--tier T] [--source S]")
         print("                                 Multi-strategy code RAG (help|status|index|query|...)")
         print("  record-pattern --outcome <success|failure|stuck|unknown> [--agent-id ID] [--task DESC]")
-        print("                 [--supersedes task_id[,task_id...]]  # retire patterns this one corrects")
+        print("                 [--supersedes id[,id...]]  # retire patterns this one corrects (pattern_ids preferred)")
+        print("                                 Records are BORN unverified — no level flag exists here")
+        print("  verify-pattern --pattern-id ID --level human|judgement|gauntlet --actor WHO")
+        print("                 --evidence-ref|--delegation-ref|--run-id EVIDENCE  # per level, required")
+        print("  revoke-pattern --pattern-id ID --reason WHY --prior-attestation-id AID --actor WHO")
         print("                                 Record a task pattern")
         print("                                 --task -  reads the description from stdin (opt-in;")
         print("                                 omitting --task never reads stdin and never blocks)")
@@ -3956,13 +4275,80 @@ def main() -> None:
                 )
                 i += 2
             else:
-                i += 1
+                # STRICT: an unknown flag silently eaten here is how a caller
+                # comes to believe it self-promoted a record. There is no
+                # level flag on record BY DESIGN — patterns are born
+                # unverified; promotion is an attestation via verify-pattern.
+                print(
+                    f"[record-pattern] unknown argument: {sys.argv[i]} "
+                    "(record accepts no verification level — use verify-pattern)",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
         cmd_record_pattern(
             outcome=rp_outcome,
             agent_id=rp_agent_id,
             task_desc=rp_task,
             project=rp_project,
             supersedes=rp_supersedes,
+        )
+    elif cmd == "verify-pattern":
+        vp: dict[str, str | None] = {
+            "--pattern-id": None, "--level": None, "--actor": None,
+            "--evidence-ref": None, "--delegation-ref": None, "--run-id": None,
+            "--project": None,
+        }
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] in vp and i + 1 < len(sys.argv):
+                vp[sys.argv[i]] = sys.argv[i + 1]
+                i += 2
+            else:
+                print(f"[verify-pattern] unknown argument: {sys.argv[i]}", file=sys.stderr)
+                sys.exit(2)
+        if not vp["--pattern-id"] or not vp["--level"]:
+            print(
+                "Usage: liteharness verify-pattern --pattern-id ID --level "
+                "human|judgement|gauntlet --actor WHO --evidence-ref/"
+                "--delegation-ref/--run-id EVIDENCE [--project ROOT]",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        cmd_verify_pattern(
+            pattern_id=vp["--pattern-id"],
+            level=vp["--level"],
+            actor=vp["--actor"],
+            evidence_ref=vp["--evidence-ref"],
+            delegation_ref=vp["--delegation-ref"],
+            run_id=vp["--run-id"],
+            project=vp["--project"],
+        )
+    elif cmd == "revoke-pattern":
+        rv: dict[str, str | None] = {
+            "--pattern-id": None, "--reason": None,
+            "--prior-attestation-id": None, "--actor": None, "--project": None,
+        }
+        i = 2
+        while i < len(sys.argv):
+            if sys.argv[i] in rv and i + 1 < len(sys.argv):
+                rv[sys.argv[i]] = sys.argv[i + 1]
+                i += 2
+            else:
+                print(f"[revoke-pattern] unknown argument: {sys.argv[i]}", file=sys.stderr)
+                sys.exit(2)
+        if not rv["--pattern-id"]:
+            print(
+                "Usage: liteharness revoke-pattern --pattern-id ID --reason WHY "
+                "--prior-attestation-id AID --actor WHO [--project ROOT]",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        cmd_revoke_pattern(
+            pattern_id=rv["--pattern-id"],
+            reason=rv["--reason"],
+            prior_attestation_id=rv["--prior-attestation-id"],
+            actor=rv["--actor"],
+            project=rv["--project"],
         )
     elif cmd == "rag":
         cmd_rag()
