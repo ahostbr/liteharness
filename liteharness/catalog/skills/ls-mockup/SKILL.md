@@ -720,7 +720,14 @@ last=""
 while true; do
   cur=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['revision'])" "$F" 2>/dev/null || echo "-")
   if [ "$cur" != "$last" ]; then
-    [ -n "$last" ] && echo "<mockupId> answered — revision $last -> $cur"
+    if [ -z "$last" ] && [ "$cur" != "-" ]; then
+      # Armed against a file that ALREADY HAS ANSWERS. Do not seed silently:
+      # the session file is created lazily BY the first answer, so a populated
+      # file at arm time means answers are already waiting to be read.
+      echo "<mockupId> ALREADY ANSWERED at arm time — revision $cur; read the file now, do not wait"
+    elif [ -n "$last" ]; then
+      echo "<mockupId> answered — revision $last -> $cur"
+    fi
     last="$cur"
   fi
   sleep 3
@@ -732,7 +739,8 @@ Behaviour, tested both directions before this went into the skill:
 | condition                                                            | result                                              |
 | -------------------------------------------------------------------- | --------------------------------------------------- |
 | session file does not exist yet (created lazily on the first answer) | silent — no spam                                    |
-| first tick after arming                                              | silent — seeds the baseline instead of firing on it |
+| first tick, file ABSENT                                              | silent — seeds `-`; the first answer then fires normally |
+| first tick, file ALREADY HAS ANSWERS                                 | **fires immediately** — never absorbed as baseline   |
 | a real answer lands                                                  | fires **once** — `answered — revision 11 -> 12`     |
 
 **Compare `revision`, never mtime.** `revision` is monotonic and bumps only on a real write;
