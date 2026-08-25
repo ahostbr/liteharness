@@ -3690,7 +3690,7 @@ def main() -> None:
         print("  workflow run --global <name> [--model NAME]")
         print("                                 Launch Claude with the Workflow tool to run a workflow file")
         print("  memory-nudge [--on|--off] [--cadence N]")
-        print("                                 Toggle the every-other-turn MEMORY.md index pointer (off by default)")
+        print("                                 Toggle the every-other-turn durable-knowledge nudge (off by default)")
         print()
         print("Spawn options:")
         print("  --model <name>                 Model: opus (=Opus 5), opus-5, opus-1m, opus-200k, opus-4.8, fable, sonnet, sonnet-5, haiku, or full ID")
@@ -4068,7 +4068,7 @@ def main() -> None:
         bot = NudgeBot(nb_config, lmstudio=lmstudio_cfg)
         bot.run()
     elif cmd == "memory-nudge":
-        # Toggle / tune the every-other-turn MEMORY.md index pointer emitted by
+        # Toggle / tune the every-other-turn durable-knowledge nudge emitted by
         # the UserPromptSubmit hook (liteharness.hooks memory-nudge). Distinct
         # from the nudge-bot (which drives idle agents via LM Studio).
         mn_cfg = config.load()

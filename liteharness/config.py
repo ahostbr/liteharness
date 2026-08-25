@@ -249,7 +249,7 @@ def get_memory_nudge() -> dict:
     """Memory-nudge settings, merged over defaults.
 
     On by default (fleet-wide, 2026-07-14): the UserPromptSubmit hook emits a
-    tiny MEMORY.md index pointer every `cadence` turns (default 2 = every other
+    tiny durable-knowledge nudge every `cadence` turns (default 2 = every other
     turn). Turn it off per-agent via `liteharness memory-nudge --off` (or
     config). `cadence` is the every-Nth-turn interval.
     """

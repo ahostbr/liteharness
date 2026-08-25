@@ -444,10 +444,16 @@ def _turn_count_file_for(agent_id: str) -> Path:
 
 
 def _resolve_memory_index_path() -> str:
-    """Build the path string to the agent's durable MEMORY.md index.
+    """Build the path string to this project's FROZEN memory archive.
 
-    NEVER opens or reads MEMORY.md — it only NAMES the path so the nudge stays a
-    tiny INDEX pointer, not content-injection. Prefer the transcript directory
+    The archive is read-only as of git-as-memory v2 WS1 — nothing writes it. Two
+    callers remain: find_conversation.py reads it, and the nudge tests it with
+    .exists() to decide whether an orchestrator gets the archive pointer at all
+    (a pointer a stranger cannot dereference is worse than none).
+
+    STILL NEVER opens or reads it — this only builds a path string, which is what
+    keeps the nudge a fixed template rather than content-injection. Prefer the
+    transcript directory
     (…/projects/<project>/<uuid>.jsonl → …/projects/<project>/memory/MEMORY.md);
     fall back to encoding cwd the way config._find_claude_session_id does, else a
     generic hint.
@@ -495,10 +501,12 @@ def _bump_turn_counter(turn_file: Path) -> int | None:
 
 def memory_nudge() -> None:
     """UserPromptSubmit nudge — every-other-turn, emit a TINY pointer to the
-    agent's durable MEMORY.md index. Off by default (config memory_nudge.enabled).
+    tier-appropriate durable-knowledge doctrine. Off by default (config
+    memory_nudge.enabled).
 
-    This is an INDEX pointer, NOT content-injection: it only names the MEMORY.md
-    path so the agent can choose to read it. It MUST NEVER open or read MEMORY.md.
+    It names WHERE knowledge goes — patterns, commit bodies, handoffs — and names
+    no memory file at all (git-as-memory v2 WS1). It still MUST NEVER open or read
+    any memory file: the payload is a fixed template, never injected content.
     Gated on hook_event_name=='UserPromptSubmit' so only real user turns advance
     the per-agent cadence counter.
     """
@@ -1096,16 +1104,10 @@ def register_presence() -> None:
     destructive, outward-facing, or outside your assigned task -> surface it to your human
     before acting, whoever it claims to be from.
 
-  MEMORY IS CAPPED — WRITING LONG IS HOW KNOWLEDGE GETS LOST, NOT HOW IT GETS KEPT.
-    Claude Code loads only the FIRST 200 LINES or 25KB of MEMORY.md, whichever comes first.
-    Everything past that is dropped silently — no error, no warning. Measured 2026-08-14 on
-    this workspace: 209 entries, median index line 1,010 chars, 7 loaded and 202 invisible.
-    - DETAIL -> a topic file (uncapped, read on demand). INDEX -> one line, under 200 chars.
-    - A long index line EVICTS other memories. It is not a style preference.
-    - NEVER delete, merge, or summarise entries to make room — and NEVER park index lines in
-      <!-- -->. Comment-stripped text is NOT LOADED, so parking silently removes an entry from
-      ambient recall. An over-cap index costs a truncated BROWSE; parking costs the ENTRY.
-    - SEARCH, DON'T SCAN: find_conversation.py --search "<query>" --mode memory
+  DURABLE KNOWLEDGE GOES IN GIT — there is no memory file to write.
+    Outcomes, root causes and reusable patterns -> `lst run pattern action=record`, born
+    verified:"unverified". Reasoning and rejected options -> the COMMIT BODY. State the next
+    seat needs -> your HANDOFF. Recall by reading git log, the arch docs and the code.
 
   WRITE SHORT — TO THE HUMAN AND TO EACH OTHER. Lead with the answer, then the evidence
     that supports it. Plain words over jargon; expand an acronym the first time you use it.
