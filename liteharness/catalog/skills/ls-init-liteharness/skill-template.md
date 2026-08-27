@@ -118,11 +118,20 @@ session goes to a place the tools already index:
 | what you learned | where it goes |
 |---|---|
 | task outcome, root cause, reusable pattern | `lst run pattern action=record …` |
-| why you made this change, what you rejected | the **commit body**, with your trailers |
+| why you made this change, what you rejected | the **commit body**, with your trailers — every claim names its **measurement** and the **command** that produced it, never a bare state |
 | state the next seat needs to continue | your **handoff** |
 
 Recall is `git log`, the architecture docs, and the code. Those are the sources of
 truth; anything else is a claim about them.
+
+🔴 **A commit body is true only at its own timestamp.** Nothing updates it when the
+condition it describes is fixed, and no later commit is obliged to announce that an
+earlier diagnosis expired. Cite one as `per <sha> (<date>, unverified today)` — never
+as a current fact. This is not hypothetical: a 2026-04-09 body stating that a build
+defect "breaks ALL semantic token resolution" was read four months later as a present
+measurement, and its prescription — *use inline styles* — had by then become the
+architecture across 328 files. The claim was false when re-measured. Had that body
+named the command that produced it, re-checking would have cost thirty seconds.
 
 **Never write `CLAUDE.md` or `docs/architecture/**`.** `CLAUDE.md` is human-gated,
 and the architecture docs are generated from verified patterns — writing them by

@@ -580,7 +580,11 @@ def _memory_checkin_text(tier: str) -> str:
         "memory file.\n"
         "  task outcome / root cause / reusable pattern -> lst run pattern action=record ...\n"
         "      (born verified:\"unverified\" — that is a SCHEMA Fact, not a modifier you choose)\n"
-        "  why this change, what you rejected           -> the COMMIT BODY (with your trailers)\n"
+        "  why this change, what you rejected           -> the COMMIT BODY (with your trailers);\n"
+        "      every claim names its MEASUREMENT and the COMMAND that produced it — never a bare\n"
+        "      state. A body is true only at its own timestamp and NOTHING updates it when the\n"
+        "      condition it describes is fixed; a reader four months on cannot tell. Cite a body\n"
+        "      as `per <sha> (<date>, unverified today)`, never as a current fact.\n"
         "  state a compacting seat will need            -> your HANDOFF; every row names a\n"
         "      sha, a symbol, or a re-runnable query — never a bare state\n"
         "  NEVER record DONE/finished/working as fact. Until a human has verified it end-to-end\n"
@@ -1106,8 +1110,11 @@ def register_presence() -> None:
 
   DURABLE KNOWLEDGE GOES IN GIT — there is no memory file to write.
     Outcomes, root causes and reusable patterns -> `lst run pattern action=record`, born
-    verified:"unverified". Reasoning and rejected options -> the COMMIT BODY. State the next
-    seat needs -> your HANDOFF. Recall by reading git log, the arch docs and the code.
+    verified:"unverified". Reasoning and rejected options -> the COMMIT BODY, where every
+    claim names its MEASUREMENT and the COMMAND that produced it — a body is true only at
+    its own timestamp, nothing updates it when the condition is fixed, and a reader months
+    later cannot tell. Cite one as `per <sha> (<date>, unverified today)`, never as fact.
+    State the next seat needs -> your HANDOFF. Recall by reading git log, arch docs, code.
 
   WRITE SHORT — TO THE HUMAN AND TO EACH OTHER. Lead with the answer, then the evidence
     that supports it. Plain words over jargon; expand an acronym the first time you use it.
