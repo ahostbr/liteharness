@@ -1261,18 +1261,47 @@ def _pattern_db_sync(conn, patterns_path: Path) -> None:
 
 
 def _fts5_phrase_query(raw: str) -> str:
-    """Turn an arbitrary user string into a safe FTS5 phrase query.
+    """Turn an arbitrary user string into a safe FTS5 query that ORs its tokens.
 
-    FTS5 has many operators (-, OR, AND, NOT, NEAR, column:, parens, quotes)
-    that turn a user's literal query into a syntax error or wrong match.
-    Wrapping every whitespace-separated token in double quotes treats each
-    one as a literal phrase and disables operator parsing. Double quotes
-    inside a token are doubled, per FTS5 quoting rules.
+    TWO PROPERTIES, and the first one is why the quoting exists:
+
+    1. EVERY TOKEN IS QUOTED, so nothing a user types is parsed as an operator.
+       FTS5 has many (-, OR, AND, NOT, NEAR, column:, parens, quotes) and a
+       literal string containing one becomes a syntax error or a wrong match.
+       Measured: `cat -dog` raises "no such column: dog", `"unbalanced` raises
+       "unterminated string", `a AND NOT b` raises a syntax error. Double
+       quotes inside a token are doubled, per FTS5 quoting rules.
+
+    2. 🔴 THE TOKENS ARE JOINED WITH `OR`, NOT WITH SPACES. Space-separated
+       FTS5 terms are an IMPLICIT AND, so a five-word query whose first four
+       words matched a pattern perfectly returned NOTHING because the fifth did
+       not appear (T106). Every seat querying collective memory in a natural
+       sentence got silence and read it as "no such pattern".
+
+    ⚠️ OR DOES NOT COST PRECISION ORDERING. `bm25` already ranks a row matching
+    more query tokens above one matching fewer, and the caller sorts by it, so
+    the near-miss appears BELOW the full match rather than instead of it.
+
+    REJECTED — AND-then-fall-back-to-OR: the fallback fires only on zero rows,
+    so a query where one pattern matches all five tokens still hides the four-
+    token near-misses entirely, which is the same complaint in a narrower case.
+    It also makes the result set discontinuous: adding a word can silently
+    change which ranking basis produced the list.
+
+    REJECTED — appending `*` for prefix recall (`"compact"*` does match
+    "compaction"; measured). It is a real improvement and a SEPARATE decision:
+    it changes what "matches" means for every single-token query, and it cannot
+    be opted out of per query. Worth its own task with its own evidence.
+
+    NOT ADDRESSED HERE — stemming. The table is `tokenize="unicode61"`, which
+    does not stem, so "compaction" does not find "compact" and quoting is not
+    the reason: measured, the UNQUOTED token does not match either. Stemming is
+    a tokenizer change and would require rebuilding the index.
     """
     tokens = [t for t in raw.split() if t]
     if not tokens:
         return ""
-    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+    return " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
 def _superseded_task_ids(conn) -> set[str]:
