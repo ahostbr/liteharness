@@ -342,7 +342,28 @@ def _apply_hook_context(hook_input: dict) -> None:
     # Extract session_id from hook input
     session_id = hook_input.get("session_id")
     if session_id and not os.environ.get("LITEHARNESS_AGENT_ID"):
-        os.environ["LITEHARNESS_AGENT_ID"] = session_id
+        # 🔴 THE HOOK PAYLOAD'S session_id IS A DEFAULT, NOT AN OVERRIDE, AND
+        # LITEHARNESS_AGENT_ID IS THE OVERRIDE SLOT — get_agent_id() checks it
+        # FIRST, above CLAUDE_CODE_SESSION_ID, and its own docstring calls it
+        # "explicitly set by orchestrator". The hook is not the orchestrator.
+        #
+        # Claude Code's payload session_id CHANGES ON EVERY --resume while
+        # CLAUDE_CODE_SESSION_ID stays stable, so writing the payload into the
+        # top slot silently re-identified a live agent on every resume: the
+        # registration flipped between two ids, `send <id>` alternated rc=0 and
+        # rc=1 with nothing else changing, and a dispatch to the losing id was
+        # indistinguishable from a task in progress. Measured 2026-08-29 across
+        # four sends in twenty minutes (Sentinel/OpenBolt, LiteSuite fleet).
+        #
+        #   AN ID MUST BE DERIVED FROM ONE SOURCE. Where the CLI publishes a
+        #   stable id of its own, the per-session payload must not outrank it.
+        #
+        # Codex and Copilot have no CLI-native stable id, so the payload IS
+        # their only source and this still populates it for them. Only the
+        # Claude Code case defers, and it defers to a value get_agent_id()
+        # already prefers one line further down.
+        if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
+            os.environ["LITEHARNESS_AGENT_ID"] = session_id
 
     # Extract model from hook input
     # Claude Code hooks send model as a plain string (e.g. "claude-opus-4-8[1m]")
