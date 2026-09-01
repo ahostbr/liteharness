@@ -1496,6 +1496,12 @@ def bridge_assistant_message(hook_input: dict) -> None:
         _log(f"SKIP: no bridge token at {token_path}")
         return
 
+    # Derived from the transcript, not minted here — see _last_assistant_event_id.
+    # Absent (old transcript, oversized entry) is a valid state: the consumer
+    # falls back to its transitional content guard.
+    event_id = _last_assistant_event_id(hook_input.get("transcript_path"))
+    _log(f"bridge: event_id={event_id or 'NONE'}")
+
     payload = json.dumps({
         "role": "assistant",
         "content": content,
@@ -1503,6 +1509,7 @@ def bridge_assistant_message(hook_input: dict) -> None:
         "session_id": agent_id,
         "pane_id": pane_id,
         "agent_id": agent_id,
+        "message_id": event_id,
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -1520,6 +1527,58 @@ def bridge_assistant_message(hook_input: dict) -> None:
         _log(f"POST ok: status={resp.status}")
     except Exception as e:
         _log(f"POST failed: {e}")
+
+
+def _last_assistant_event_id(transcript_path: str | None) -> str | None:
+    """The API message id of the transcript's last assistant turn, or None.
+
+    🔴 DERIVED, NEVER MINTED — and that distinction is the whole point of this
+    function. The duplicate this exists to kill is the SAME Stop hook running
+    TWICE (two registrations, ~40ms apart, LiteSuite T132). A freshly minted
+    uuid4 would be generated independently by each of those two runs, so the
+    two posts would carry DIFFERENT ids and a downstream id-keyed dedupe would
+    let both through while looking correct. The id has to be a property of the
+    TURN, not of the call, or it dedupes nothing.
+
+    `message.id` (Anthropic's `msg_...`) is that property: both runs read the
+    same transcript entry and compute the same id, while a genuine repeat of
+    identical text is a different turn and keeps its own id. A content hash
+    would fail that second half — it cannot tell a duplicate delivery from
+    Sentinel saying "Quiet hold." twice.
+
+    ⚠️ TAIL-READ, BOUNDED. Transcripts reach six figures of lines (171,322
+    measured 2026-08-31), and this runs inside a 10s Stop hook, so we read only
+    the last TAIL_BYTES. An assistant entry larger than that window is not
+    found and we return None — the caller then falls back to the transitional
+    content guard rather than blocking the post.
+    """
+    if not transcript_path:
+        return None
+    tail_bytes = 262144
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            chunk = f.read()
+    except OSError:
+        return None
+    lines = chunk.split(b"\n")
+    if size > tail_bytes:
+        # First line is almost certainly a fragment of a record we cut in half.
+        lines = lines[1:]
+    for raw in reversed(lines):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if entry.get("type") != "assistant":
+            continue
+        message = entry.get("message") or {}
+        return message.get("id") or entry.get("uuid") or None
+    return None
 
 
 def _bridge_url() -> str:
