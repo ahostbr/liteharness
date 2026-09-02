@@ -178,20 +178,45 @@ def generate_summary(
 
 # ── TTS playback via LiteSuite Voice API ─────────────────────────────────────
 
-def speak_via_litesuite(text: str, port: int = _DEFAULT_PORT) -> bool:
+def speak_via_litesuite(
+    text: str,
+    port: int = _DEFAULT_PORT,
+    summary_type: str | None = None,
+    agent_name: str | None = None,
+) -> bool:
     """
     Send text to LiteSuite's /v1/tts/speak endpoint.
 
     This is fire-and-forget from the hook's perspective — LiteSuite handles
     synthesis, companion animation, and playback asynchronously.
     Returns True if the request was accepted (HTTP 200), False on error.
+
+    X-LiteSuite-Origin names this caller in LiteSuite's voice log. It is
+    DIAGNOSTIC ONLY — nothing on either side branches on it, and an older
+    LiteSuite ignores an unknown header.
+
+    Why it exists: on 2026-09-02 LiteSuite's voice-debug.log showed [API] Speak
+    arriving every few seconds with 19-30 char texts during a live conversation,
+    deferred by the audio lease and replayed as a backlog, and NOTHING in the log
+    said who asked. Two candidates were argued from shape alone before anyone
+    read LiteSuite's own conversation-audio-lease.ts, which names this module as
+    the caller in its docblock. A header is cheaper than that argument.
     """
     try:
         import requests
 
+        headers = {"X-LiteSuite-Origin": "smart-tts"}
+        # The hook kind and the agent, when the caller knew them, so a burst can
+        # be attributed to a producer rather than to "something".
+        if summary_type:
+            headers["X-LiteSuite-Origin"] = f"smart-tts/{summary_type}"
+        if agent_name:
+            headers["X-LiteSuite-Agent"] = agent_name
+
         response = requests.post(
             _voice_url("/v1/tts/speak", port),
             json={"text": text},
+            headers=headers,
             timeout=5,
         )
         if response.status_code == 200:
@@ -473,7 +498,9 @@ def main() -> None:
             message = fallback
 
     # Route audio: LiteSuite Voice API first, edge-tts direct as fallback
-    if not speak_via_litesuite(message, port=args.port):
+    if not speak_via_litesuite(
+        message, port=args.port, summary_type=args.type, agent_name=args.agent
+    ):
         print("[SmartTTS] Falling back to edge-tts direct", file=sys.stderr)
         speak_via_edge_tts(message, voice=voice)
 
