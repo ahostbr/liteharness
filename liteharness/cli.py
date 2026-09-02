@@ -802,10 +802,56 @@ VALID_TIERS = ("orchestrator", "leader", "worker", "thinker", "reviewer")
 _NAME_LIVE_STALE_SECONDS = 600
 
 
+def _superseded_by_later_registration(agent_id: str, data: dict) -> bool:
+    """True if a LATER registration already owns this record's `session_pid`.
+
+    🔴 THE DEFECT THIS ENDS (T141-P). `_dedupe_by_session_pid` has always known this
+    rule — its own docstring says "The existing liveness check cannot catch this:
+    BOTH rows carry the same LIVE pid, so `_pid_alive` is correctly True for each."
+    That sentence describes a real failure and nothing acted on it, so `discover`
+    and `register --takeover` disagreed about the same record.
+
+    ⭐ MEASURED 2026-09-02. A Claude Code session was cleared and a new session
+    started IN THE SAME TERMINAL. Both presence rows carried
+    `session_pid` 446104 and `wt_session` 85c3ba5a — the pid of the LIVE successor.
+    The dead predecessor's own `pid` (267232) and watcher (25660) were both gone,
+    yet `_agent_record_live` returned True, because the only pid it consulted
+    belonged to the agent asking for the name. **The liveness probe was measuring
+    the claimant.** `discover` printed "superseded by a later registration on the
+    same PID" for the very same record in the very same second.
+
+    ⬜ Same rule, one implementation, so the two can no longer drift: a later
+    `registered_at` on the same `session_pid` wins, exactly as the roster decides.
+    """
+    session_pid = data.get("session_pid")
+    if not session_pid:
+        return False  # unknown owner is never grouped — see _dedupe_by_session_pid
+    mine = str(data.get("registered_at") or "")
+    agents_dir = config.get_root() / "agents"
+    try:
+        entries = list(agents_dir.glob("*.json"))
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.stem == agent_id:
+            continue
+        try:
+            other = json.loads(entry.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if other.get("session_pid") != session_pid or other.get("exited_at"):
+            continue
+        # String compare on the ISO timestamp, the SAME comparison the roster uses.
+        if str(other.get("registered_at") or "") > mine:
+            return True
+    return False
+
+
 def _agent_record_live(agent_id: str) -> bool:
     """True if the agent's presence shows a fresh heartbeat AND an alive owning
-    session_pid. Mirrors cmd_discover._is_live so name-takeover never steals a name
-    from a genuinely live agent — only from a dead ghost squatting the registry."""
+    session_pid AND has not been superseded on that pid. Mirrors cmd_discover so
+    name-takeover never steals a name from a genuinely live agent — only from a
+    dead ghost squatting the registry."""
     from .hooks import _pid_alive
 
     path = config.get_root() / "agents" / f"{agent_id}.json"
@@ -824,7 +870,12 @@ def _agent_record_live(agent_id: str) -> bool:
     session_pid = data.get("session_pid")
     if not session_pid:  # orphaned watcher: no immutable owning session = not live
         return False
-    return _pid_alive(session_pid)
+    if not _pid_alive(session_pid):
+        return False
+    # A pid can outlive the agent that registered under it: `/clear` and `/resume`
+    # both reuse the terminal's process. Freshness cannot separate them either —
+    # an orphaned `watch-auto` keeps heartbeating a record whose session is gone.
+    return not _superseded_by_later_registration(agent_id, data)
 
 
 def _evict_agent_records(agent_id: str) -> str:
@@ -3730,7 +3781,8 @@ def main() -> None:
         print("  status                         Show status")
         print("  send <to> <message>            Send a message")
         print("  list                           List inbox messages")
-        print("  inbox [N] [--all] [--agent ID] Read-only inbox view: full bodies, new+cur+done, newest N")
+        print("  inbox [N] [--all] [--agent ID]  (--agent-id is an accepted alias; an UNKNOWN flag is rejected,")
+        print("                                 never ignored) Read-only inbox view: full bodies, new+cur+done, newest N")
         print("  discover [count]               Discover active agents")
         print("  spawn [options]                Spawn a new Claude Code session")
         print("  sessions <cmd> [options]       Save/restore terminal agent sessions")
@@ -3923,14 +3975,52 @@ def main() -> None:
     elif cmd == "list":
         cmd_list()
     elif cmd == "inbox":
+        # 🔴 `--agent-id` USED TO BE SILENTLY IGNORED (T141-P). Only `--agent` was
+        # read; an unknown flag fell straight through, the UUID after it did not
+        # match the `isdigit()` count scan either, and `cmd_inbox` then answered
+        # about the CALLER's own id. So asking about another agent returned a
+        # confident "No messages involving <you>" — a WRONG ANSWER to a question
+        # that was never asked, which is worse than an error. Measured 2026-09-02:
+        # two reads of a predecessor's inbox came back empty this way, and the
+        # spelling `--agent-id` is what the handoffs and `register` already use.
+        #
+        # Fixed at BOTH levels, because either alone leaves half the class open:
+        # the alias fixes this spelling, and the unknown-flag rejection means the
+        # NEXT wrong spelling fails loudly instead of lying.
         inbox_count = 10
         inbox_agent = None
         inbox_all = "--all" in sys.argv
-        if "--agent" in sys.argv:
-            idx = sys.argv.index("--agent")
-            if idx + 1 < len(sys.argv):
+        _INBOX_VALUE_FLAGS = ("--agent", "--agent-id")
+        _INBOX_BARE_FLAGS = ("--all",)
+        for flag in _INBOX_VALUE_FLAGS:
+            if flag in sys.argv:
+                idx = sys.argv.index(flag)
+                if idx + 1 >= len(sys.argv):
+                    print(f"Error: {flag} needs a value. NOTHING WAS READ.", file=sys.stderr)
+                    sys.exit(2)
                 inbox_agent = sys.argv[idx + 1]
-        for tok in sys.argv[2:]:
+                break
+        consumed = set()
+        for flag in _INBOX_VALUE_FLAGS:
+            if flag in sys.argv:
+                i = sys.argv.index(flag)
+                consumed.update({i, i + 1})
+        unknown = [
+            tok for i, tok in enumerate(sys.argv[2:], start=2)
+            if tok.startswith("--") and i not in consumed and tok not in _INBOX_BARE_FLAGS
+        ]
+        if unknown:
+            print(
+                f"Error: unknown option(s) for `inbox`: {', '.join(unknown)}. NOTHING WAS READ.\n"
+                f"  Valid: [N] [--all] [--agent ID | --agent-id ID]\n"
+                f"  An ignored flag would have answered about YOUR id instead, which looks "
+                f"like a real result.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        for i, tok in enumerate(sys.argv[2:], start=2):
+            if i in consumed:
+                continue
             if tok.isdigit():
                 inbox_count = int(tok)
                 break
