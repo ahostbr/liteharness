@@ -920,12 +920,15 @@ def cmd_register(
     agents_dir.mkdir(parents=True, exist_ok=True)
     path = agents_dir / f"{agent_id}.json"
 
-    if path.exists():
-        try:
-            presence = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            presence = {}
-    else:
+    # 🔴 Via the salvaging reader, NOT a bare json.loads. An unreadable row here
+    # falls through to `presence = {}` and every field below is then written from
+    # the arguments alone — so a torn read silently DROPS tier, model, name,
+    # started_at and the spatial block, which is the same demotion the hook path
+    # produced on Sentinel's row (2026-09-02, 14:05Z -> 14:06Z).
+    from .hooks import _read_presence, _write_json_atomic
+
+    presence = _read_presence(path)
+    if not presence:
         presence = {"agent_id": agent_id, "started_at": datetime.now(timezone.utc).isoformat()}
 
     # The OWNING process, so liveness is a fact about a pid rather than a guess
@@ -1024,7 +1027,14 @@ def cmd_register(
     presence.pop("recap_at", None)
     presence["registered_at"] = now_iso
 
-    path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
+    # 🔴 ATOMIC, because this writer is the one that produced the corruption
+    # `_write_json_atomic` was written for. `write_text` truncates then writes,
+    # so a heartbeat reading mid-write sees a complete document followed by the
+    # tail of a longer one — and the reader that finds it treats a live agent as
+    # having no row at all. hooks.py has written atomically since that was found;
+    # `liteharness register` never did, and it is invoked by the SessionStart and
+    # PostCompact hooks on every seat.
+    _write_json_atomic(path, presence)
     team_str = f", team={presence['team']}" if presence.get("team") else ""
     spatial_str = f", pane={pane_id}" if pane_id else ""
     print(f"Registered agent {agent_id}: cli={presence.get('cli', '?')}, model={presence.get('model', '?')}, tier={presence.get('tier', 'worker')}, name={resolved_name}{team_str}{spatial_str}")
@@ -1688,6 +1698,61 @@ def cmd_record_pattern(
     import subprocess
     import uuid
 
+    from .hooks import _is_authoritative_agent_id
+
+    # 🔴 AN UNATTRIBUTED ROW POISONS ATTRIBUTION FOR EVERY LATER READER.
+    # `session` used to fall back to the literal "cli", and MEASURED on this
+    # box 2026-09-02 that is 172 of 328 rows in LiteSuite's store — 52% of the
+    # collective memory with no author at all. A record with no author field
+    # cannot be attributed by its CONTENT: the reader's own recent experience
+    # supplies the match, and an agent reading a row that resembles its own
+    # last mistake will claim it. That happened to this seat the same day, one
+    # sentence short of asserting a peer's row as its own.
+    #
+    # So the id is derived from the registered session when the caller does not
+    # name one, and a row that can still not be attributed is REFUSED rather
+    # than written anonymously. Refusing costs one row; an anonymous row costs
+    # every future attribution question asked of the store.
+    # ⚠️ A LOCAL CHECK, NOT A WIDENING OF `_is_authoritative_agent_id`. That
+    # predicate rejects only empty and `lh-` ids and has other callers with
+    # other stakes, so broadening it here would change behaviour in places this
+    # card never looked at. What counts as an AUTHOR is a question this recorder
+    # is entitled to answer more strictly than liveness does.
+    #
+    # The placeholders below are worse than an empty id, not better: a row
+    # stamped `unknown` LOOKS attributed. Accepting one would restore the exact
+    # defect under a different string, and the next reader would have no way to
+    # tell it from a real session. (Caught by the arm, not by review — the first
+    # version of this guard let "unknown" straight through.)
+    NON_AUTHORS = {"unknown", "cli", "none", "null", "-"}
+
+    def _is_author(candidate: str | None) -> bool:
+        value = (candidate or "").strip()
+        if not value or value.lower() in NON_AUTHORS:
+            return False
+        return _is_authoritative_agent_id(value)
+
+    if not agent_id:
+        derived = config.get_agent_id()
+        if _is_author(derived):
+            agent_id = derived
+    if not _is_author(agent_id):
+        agent_id = None
+    if not agent_id:
+        # The error names its own remedy, because an error that does not is read
+        # as a dead end and routed around.
+        print(
+            "[record-pattern] REFUSED: this row would have no author.\n"
+            "  No --agent-id was given and no registered session could be resolved,\n"
+            "  so the row would be written as session='cli' and could never be\n"
+            "  attributed to anyone. 172 of 328 rows in one live store are already\n"
+            "  in that state.\n"
+            "  Fix: pass --agent-id <your-session-uuid>, or run from a registered\n"
+            "  session (python -m liteharness.cli register --agent-id <id> ...).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     supersedes = _coerce_id_list(supersedes, "supersedes")
 
     project_root = project or os.getcwd()
@@ -1730,7 +1795,10 @@ def cmd_record_pattern(
         # identity — immutable, and the only attestation/supersession target.
         "task_id": f"{agent_id or 'unknown'}-{int(time.time())}",
         "pattern_id": str(uuid.uuid4()),
-        "session": agent_id or "cli",
+        # Never "cli": an unattributed row is refused above, so by the time we
+        # build the entry an author exists.
+        "session": agent_id,
+        "agent_id": agent_id,
         "outcome": schema_outcome,
         "complexity": "medium",
         "description": task_desc,

@@ -211,6 +211,55 @@ def _pid_alive(pid: int | None) -> bool:
         return False
 
 
+def _read_presence(path) -> dict:
+    """The agent's existing registry row, or {} only when there genuinely is none.
+
+    🔴 AN UNREADABLE ROW AND A MISSING ROW ARE DIFFERENT FACTS, AND ONLY ONE OF
+    THEM LICENSES DEFAULTS. Every caller here uses the result as
+    `existing.get("tier") or "worker"` / `prefer_known(model, existing…)`, so a
+    read that fails does not merely lose information — it DEMOTES a live agent to
+    tier=worker, model=unknown, and the write that follows makes the demotion
+    permanent. Measured 2026-09-02: Sentinel's own row went orchestrator ->
+    worker and claude-fable-5-1 -> unknown between 14:05:16Z and 14:06:07Z, with
+    the heartbeat then carrying the demoted values (OpenBolt's catch, message
+    0c171ad2). Nothing errored and nothing warned.
+
+    The corruption has a known shape, documented on `_write_json_atomic`: a
+    complete document followed by the tail of a longer one, from a non-atomic
+    writer racing a heartbeat. `raw_decode` reads the FIRST complete object and
+    ignores that tail, so the row is recovered rather than replaced with
+    defaults — the salvaged prefix is a real presence written by a real
+    registration, not a guess.
+
+    A short retry comes first because a torn window is measured in milliseconds.
+    If everything fails the caller still gets {}, but it is now the honest
+    answer to "is there a row" rather than the accidental one.
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    for attempt in range(3):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        if text:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                try:
+                    # The first complete object; trailing junk from a torn write
+                    # is exactly what raw_decode is for.
+                    salvaged, _ = json.JSONDecoder().raw_decode(text)
+                    if isinstance(salvaged, dict) and salvaged.get("agent_id"):
+                        return salvaged
+                except ValueError:
+                    pass
+        if attempt < 2:
+            time.sleep(0.05)
+    return {}
+
+
 def _write_json_atomic(path, payload: dict) -> None:
     """Write JSON so a concurrent reader never sees a half-written file.
 
@@ -972,12 +1021,7 @@ def register_presence() -> None:
     # Read existing presence early so the identity block (and the watch command
     # it prints) can carry the agent's resolved tier. SessionStart can fire
     # multiple times (resume, compaction) — never downgrade known values.
-    existing: dict = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            existing = {}
+    existing: dict = _read_presence(path)
     tier = os.environ.get("LITEHARNESS_TIER") or existing.get("tier") or "worker"
     # Who spawned this agent, so it can report in to its LEADER rather than guessing
     # the orchestrator. Same never-downgrade rule as tier: a re-register (resume,
@@ -1164,12 +1208,7 @@ def register_presence() -> None:
     # Preserve known values across re-registrations (SessionStart can fire multiple
     # times — resume, compaction, etc). Never downgrade model/cli from known → unknown,
     # and keep the original started_at so uptime stays accurate.
-    existing: dict = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            existing = {}
+    existing: dict = _read_presence(path)
 
     def prefer_known(new_value: str, old_value: str) -> str:
         if new_value and new_value != "unknown":
