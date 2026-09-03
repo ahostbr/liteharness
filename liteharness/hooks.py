@@ -390,6 +390,12 @@ def _apply_hook_context(hook_input: dict) -> None:
     """
     # Extract session_id from hook input
     session_id = hook_input.get("session_id")
+    # Recorded UNCONDITIONALLY, and separately from any slot that decides
+    # identity: `_obs_identity` needs the payload id even — especially — when it
+    # loses, because "was the env var absent, or present and already rewritten?"
+    # is only answerable by seeing both values from the SAME process (T244).
+    if session_id:
+        os.environ["LITEHARNESS_PAYLOAD_SESSION_ID"] = str(session_id)
     if session_id and not os.environ.get("LITEHARNESS_AGENT_ID"):
         # 🔴 THE HOOK PAYLOAD'S session_id IS A DEFAULT, NOT AN OVERRIDE, AND
         # LITEHARNESS_AGENT_ID IS THE OVERRIDE SLOT — get_agent_id() checks it
@@ -411,8 +417,18 @@ def _apply_hook_context(hook_input: dict) -> None:
         # their only source and this still populates it for them. Only the
         # Claude Code case defers, and it defers to a value get_agent_id()
         # already prefers one line further down.
+        #
+        # ⚠️ T244 — AND THE DEFERRAL ABOVE HAS A PRECONDITION, SO IT IS NOT THE
+        # WHOLE FIX. Where CLAUDE_CODE_SESSION_ID does not reach the hook there
+        # is nothing to defer TO, the payload becomes the identity again, and on
+        # a resume that identity is NEW. The marker below is how
+        # `register_presence` can later tell "this id is a per-session default"
+        # from "this id is authoritative", which no inspection of the id itself
+        # can do — both are plain UUIDs and both pass
+        # `_is_authoritative_agent_id`.
         if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
             os.environ["LITEHARNESS_AGENT_ID"] = session_id
+            os.environ["LITEHARNESS_AGENT_ID_FROM_PAYLOAD"] = "1"
 
     # Extract model from hook input
     # Claude Code hooks send model as a plain string (e.g. "claude-opus-4-8[1m]")
@@ -1004,13 +1020,167 @@ def _purge_stale_agents() -> int:
     return removed
 
 
+def _authoritative_owner_of_pid(session_pid: int | None, exclude_id: str) -> str | None:
+    """The live record that already owns `session_pid` under an authoritative id.
+
+    Latest `registered_at` wins, the same string compare the roster and
+    `_superseded_by_later_registration` use — three places deciding "who owns
+    this pid" by three rules is how `discover` and `register --takeover` came to
+    disagree in the first place (T141-P).
+    """
+    if not session_pid:
+        return None
+    try:
+        entries = list((config.get_root() / "agents").glob("*.json"))
+    except OSError:
+        return None
+    best: tuple[str, str] | None = None
+    for entry in entries:
+        if entry.stem == exclude_id or not _is_authoritative_agent_id(entry.stem):
+            continue
+        try:
+            data = json.loads(entry.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("exited_at"):
+            continue
+        if _parse_positive_int(data.get("session_pid")) != session_pid:
+            continue
+        stamp = str(data.get("registered_at") or "")
+        if best is None or stamp > best[0]:
+            best = (stamp, entry.stem)
+    return best[1] if best else None
+
+
+def _obs_identity(resolved: str, adopted_from: str | None, session_pid: int | None) -> None:
+    """Append what every register RESOLVED and what it resolved it FROM (T244).
+
+    🔴 THE TWO IDS MUST BE SEEN FROM ONE PROCESS. The phantom on 2026-09-03 was
+    diagnosed from a shell's `CLAUDE_CODE_SESSION_ID` and a hook's payload — two
+    processes, two moments — which left "absent from the hook" and "present but
+    already rewritten for the resumed session" indistinguishable, and they imply
+    different fixes. One line, written where the decision is made, ends that.
+    Never raises: instrumentation that can break a SessionStart is worse than no
+    instrumentation.
+    """
+    try:
+        path = config.get_root() / "identity-log.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "resolved": resolved,
+                        "adopted_from": adopted_from,
+                        "env_claude_code_session_id": os.environ.get("CLAUDE_CODE_SESSION_ID"),
+                        "payload_session_id": os.environ.get("LITEHARNESS_PAYLOAD_SESSION_ID"),
+                        "session_pid": session_pid,
+                        "hook_pid": os.getpid(),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
+def _record_belongs_to_process(agent_id: str, session_pid: int | None) -> bool:
+    """True when `agent_id`'s record was written while `session_pid` was running.
+
+    Guards adoption against pid reuse across a reboot. Returns True when it
+    cannot tell (no psutil, unreadable record, unparseable stamp): the caller
+    reaches this only on a live-pid collision, which is already strong evidence,
+    and refusing on ignorance would disable the fix on every box without psutil.
+    """
+    if not session_pid:
+        return False
+    path = config.get_root() / "agents" / f"{agent_id}.json"
+    try:
+        stamp = str(json.loads(path.read_text(encoding="utf-8")).get("registered_at") or "")
+        registered = datetime.fromisoformat(stamp)
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return True
+    if registered.tzinfo is None:
+        registered = registered.replace(tzinfo=timezone.utc)
+    try:
+        import psutil
+
+        started = datetime.fromtimestamp(psutil.Process(session_pid).create_time(), timezone.utc)
+    except Exception:
+        return True
+    return registered >= started
+
+
+def _adopt_pid_owner(agent_id: str) -> str:
+    """T244 — a resume must not out-register the name a takeover claimed.
+
+    🔴 THE HOOK IS NOT ENTITLED TO A SECOND IDENTITY FOR ONE SEAT. On a
+    `--resume` the payload `session_id` is a fresh one, so a second record lands
+    on the SAME `session_pid` as the record a `register --takeover` just claimed.
+    `_superseded_by_later_registration` compares nothing but `registered_at`, so
+    the newcomer wins for being newer and the taken-over name vanishes from
+    `discover`.
+        SUPERSESSION BY TIMESTAMP ALONE CANNOT TELL A SUCCESSOR FROM AN IMPOSTOR.
+
+    ⚠️ THE TRIGGER IS THE PID CLASH, NOT WHERE OUR ID CAME FROM. My first version
+    fired only when the id was a payload DEFAULT, on the theory that a present
+    `CLAUDE_CODE_SESSION_ID` makes `_apply_hook_context` defer and the clash
+    impossible. Sentinel refuted that from his own seat, measured: at 16:2x on
+    2026-09-03 his hook registered `99dd8b40` on pid 23100 while his shell's
+    `CLAUDE_CODE_SESSION_ID` read — and still reads — `bfc5e812`. Whether the var
+    was absent from the hook subprocess or Claude Code had already rewritten it
+    for the resumed session, the OUTCOME is the same and it is the outcome this
+    guards. So the condition is exactly the collision: a live, non-exited,
+    authoritative record owns our `session_pid` under a DIFFERENT id.
+        A GUARD KEYED TO THE CAUSE YOU GUESSED MISSES THE CAUSE YOU DID NOT.
+    Both values are logged on every register (`_obs_identity`) so the next reader
+    does not have to re-derive which of the two it was.
+
+    ⬜ ADOPTION RATHER THAN REFUSAL, and the alternatives are worse than the bug:
+    registering beside it loses the name, and registering without claiming the
+    pid makes the record read as an orphaned watcher — `_agent_record_live`
+    requires a live `session_pid` — so the seat would be unreachable instead of
+    misnamed. Adopting keeps one seat on one record and lets the identity block
+    print the id the agent must actually pass to `--agent-id` and `--from`.
+
+    ⚠️ IT CANNOT HIJACK A GENUINELY NEW SEAT, and that is a property of the key
+    rather than a promise: `_resolve_session_pid` walks to the nearest owning CLI
+    ancestor, which is the seat's OWN process, so two live sessions in one
+    terminal never share a `session_pid`. Codex and Copilot are untouched for the
+    same reason — their payload is their only id source, and adoption needs a
+    DIFFERENT authoritative record already holding the same live pid, which for
+    them does not exist. Both cases are armed rather than argued.
+    """
+    session_pid = _resolve_session_pid()
+    owner = _authoritative_owner_of_pid(session_pid, agent_id)
+    if not owner:
+        _obs_identity(agent_id, adopted_from=None, session_pid=session_pid)
+        return agent_id
+    # ⬜ PID REUSE IS THE ONE WAY THIS COULD STEAL AN IDENTITY: after a reboot a
+    # new claude.exe can inherit a dead session's pid, and the dead record would
+    # then look like this seat's own earlier registration. A record written
+    # BEFORE the owning process started cannot belong to it. Best-effort —
+    # psutil is optional in this tree, and where it is missing the collision
+    # itself is still the better evidence.
+    if not _record_belongs_to_process(owner, session_pid):
+        _obs_identity(agent_id, adopted_from=None, session_pid=session_pid)
+        return agent_id
+    # Downstream readers resolve the id again (the watcher command, the check
+    # path); leaving the env pointing at the payload would re-split the identity
+    # one call later.
+    os.environ["LITEHARNESS_AGENT_ID"] = owner
+    _obs_identity(owner, adopted_from=agent_id, session_pid=session_pid)
+    return owner
+
+
 def register_presence() -> None:
     """
     Write a presence file and output agent identity block.
     Called on SessionStart. The stdout is injected into context,
     teaching the agent about LiteHarness on first contact.
     """
-    agent_id = config.get_agent_id()
+    agent_id = _adopt_pid_owner(config.get_agent_id())
     model = config.get_model()
     cli = config.get_cli()
 
