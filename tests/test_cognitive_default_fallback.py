@@ -44,20 +44,67 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_exemplar_still_wins_over_default():
+def test_a_generated_architecture_still_wins_over_default(tmp_path, monkeypatch):
     """A name with its own file must NOT be shadowed by the fallback.
 
-    Fixture updated 2026-08-09: this asserted `ryan.md` — the architecture named after
-    the HUMAN. The resolver keys on the AGENT's name, so that file resolved for nobody
-    and the real orchestrator ("Sentinel") silently ran `default.md` for months. The
-    file was migrated to `sentinel.md`; the invariant here is unchanged.
+    🔴 THIS TEST USED TO ASSERT A FILE THAT DOES NOT SHIP, AND ITS RESULT WAS DECIDED BY
+    ANOTHER REPOSITORY. It called `resolve_cognitive_file("Sentinel", "orchestrator")`
+    and demanded `sentinel.md`. Diagnosed 2026-09-04 (T351): `resolve_prompts_dir()`
+    resolves to the LiteSuite sibling checkout — on this box
+    `C:/Projects/LiteSuite/resources/liteharness-plugin/prompts` — whose
+    `cognitive-architectures/orchestrator/` contains exactly ONE file, `default.md`.
+    `sentinel.md` exists nowhere in liteharness-oss and by design never will: an
+    orchestrator identity is GENERATED per user by `/ls-init-liteharness` and ships to
+    nobody, which is why the name deliberately does not default to Sentinel.
+
+        A UNIT TEST WHOSE VERDICT DEPENDS ON A DIFFERENT REPOSITORY'S CONTENTS IS
+        REPORTING ON THAT REPOSITORY, NOT ON THIS CODE.
+
+    Fixed by testing the INVARIANT instead of an artefact: the autouse fixture above
+    already isolates the user overlay, so this writes its own generated architecture
+    there and demands the resolver prefer it. That is the property the fallback must
+    not break, and its verdict no longer depends on what any sibling repo happens to
+    contain.
+
+    ⚠️ Precisely: this test's OUTCOME is now independent of the sibling checkout, but
+    the module-level `skipif` still gates on a prompt library resolving at all, because
+    the control below needs the shipped `default.md`. On a box with no library the file
+    skips rather than passes — which is honest, and is not the same as running clean.
+
+    ⬜ The earlier fixture note is kept because it names the same class of error: this
+    once asserted `ryan.md`, the architecture named after the HUMAN, while the resolver
+    keys on the AGENT's name — so that file resolved for nobody and the real
+    orchestrator silently ran `default.md` for months.
     """
-    hit = resolve_cognitive_file("Sentinel", "orchestrator")
+    overlay = tmp_path / "overlay"
+    generated = overlay / "cognitive-architectures" / "orchestrator" / "gustave.md"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("# Gustave\n", encoding="utf-8")
+    monkeypatch.setenv("LITEHARNESS_USER_PROMPTS_DIR", str(overlay))
+
+    hit = resolve_cognitive_file("Gustave", "orchestrator")
     assert hit is not None
-    assert hit.name == "sentinel.md", (
+    assert hit.name == "gustave.md", (
         f"expected the generated architecture, got {hit.name} — a personalised file that "
         f"resolves to default.md is indistinguishable from one that was never written"
     )
+
+
+def test_CONTROL_the_same_orchestrator_without_a_file_falls_back_to_default(tmp_path,
+                                                                            monkeypatch):
+    """Without this, the test above passes against a resolver that returns any file.
+
+    It also pins the fallback the rest of this module exists for: an orchestrator with
+    no architecture of its own must still resolve to something, because
+    `orchestrator-role.md` marks that read MANDATORY and a miss loads nothing silently.
+    """
+    overlay = tmp_path / "empty-overlay"
+    overlay.mkdir()
+    monkeypatch.setenv("LITEHARNESS_USER_PROMPTS_DIR", str(overlay))
+
+    hit = resolve_cognitive_file("Gustave", "orchestrator")
+    assert hit is not None, "an orchestrator resolved to nothing at all"
+    assert hit.name == "default.md"
 
 
 def test_read_and_write_paths_slug_identically():

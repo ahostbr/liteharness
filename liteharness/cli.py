@@ -272,7 +272,13 @@ def _merge_claude_hooks(settings_path: Path, hook_config: dict) -> bool:
                         break  # Don't add same matcher twice
 
         settings["hooks"] = existing_hooks
-        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        # ⚠️ WITH THE TRAILING NEWLINE. `~/.claude/settings.json` is tracked in a git
+        # repo on this box, and json.dumps does not end with one — so an install that
+        # changed NOTHING still reported a one-line diff and dirtied the file. Measured
+        # 2026-09-04 while proving T350's fix on the real file: the only diff was
+        # "\ No newline at end of file". An installer that cannot be run without
+        # producing a diff makes its own no-op indistinguishable from a change.
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         return True
     except Exception as e:
         print(f"    Warning: Could not update {settings_path}: {e}")
@@ -328,7 +334,10 @@ def _merge_claude_statusline(settings_path: Path) -> str:
             return "kept"
         settings["statusLine"] = dict(_DEFAULT_STATUSLINE)
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        # Same trailing newline as the hook merge above: the two writers share one file
+        # and only one of them ending with a newline would trade a permanent diff for an
+        # intermittent one, which is worse to diagnose.
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         return "installed"
     except Exception as e:
         print(f"    Warning: could not install status line: {e}")
