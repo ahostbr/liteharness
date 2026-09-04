@@ -190,6 +190,18 @@ class MergeHealsAnInstalledBoxTests(unittest.TestCase):
         self.assertIn("Stop", self._events(foreign),
                       "the heal removed another tool's hook — it must only touch ours")
 
+    def test_the_written_file_ends_with_a_newline(self) -> None:
+        """A no-op install must leave a tracked file BYTE-identical.
+
+        `~/.claude/settings.json` is git-tracked on at least one box, and `json.dumps`
+        does not end with a newline — so an install that changed nothing still produced
+        "\\ No newline at end of file" and dirtied the repo. Measured 2026-09-04 while
+        proving T350 on the real file; it was the ONLY diff that run.
+        """
+        self.settings.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        cli._merge_claude_hooks(self.settings, self._shipped())
+        self.assertTrue(self.settings.read_text(encoding="utf-8").endswith("\n"))
+
     def test_installing_twice_is_a_no_op(self) -> None:
         self.settings.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
         cli._merge_claude_hooks(self.settings, self._shipped())

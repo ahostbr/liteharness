@@ -854,9 +854,12 @@ def _recipient_is_live(agents_dir, to: str) -> bool:
     prefix — rather than trusting a directory listing taken earlier. A record
     that is present now is a recipient, whatever the older set said.
 
-    Also treats a record whose `session_pid` is alive as live even if it is stale
-    by the clock: the caller is about to DESTROY that agent's mail, so the two
-    mistakes are not symmetric.
+    ⚠️ There is deliberately NO pid check here, and an earlier draft of this
+    docstring claimed one. It could not have been implemented at this point even
+    if it were wanted: `session_pid` is a field INSIDE the record, so when the
+    record is missing — the only case that reaches this function — there is no pid
+    to read. The pid veto belongs where a record exists to read it from, which is
+    `_purge_stale_agents`, and that is where it lives.
     """
     try:
         exact = agents_dir / f"{to}.json"
