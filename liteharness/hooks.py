@@ -846,6 +846,33 @@ def _maybe_cleanup() -> None:
         pass
 
 
+def _recipient_is_live(agents_dir, to: str) -> bool:
+    """Re-ask the filesystem, at the moment of deletion, whether `to` still exists.
+
+    Deliberately does the SINGLE-ID question as a single-id question — an
+    `exists()` on the one path, plus a prefix scan only when the address is a
+    prefix — rather than trusting a directory listing taken earlier. A record
+    that is present now is a recipient, whatever the older set said.
+
+    Also treats a record whose `session_pid` is alive as live even if it is stale
+    by the clock: the caller is about to DESTROY that agent's mail, so the two
+    mistakes are not symmetric.
+    """
+    try:
+        exact = agents_dir / f"{to}.json"
+        if exact.exists():
+            return True
+        if len(to) < 36:  # an 8-char prefix address, not a full uuid
+            for f in agents_dir.glob("*.json"):
+                if f.stem[:8] == to[:8]:
+                    return True
+    except OSError:
+        # Cannot look is not the same fact as not there, and this decides a
+        # deletion — so it resolves the same way absence of proof always should.
+        return True
+    return False
+
+
 def _purge_orphaned_messages() -> int:
     """Remove messages in new/ addressed to agents with no presence file.
 
@@ -874,6 +901,17 @@ def _purge_orphaned_messages() -> int:
                 continue
             # Check if recipient exists (full ID or prefix match)
             if to not in known_ids and to[:8] not in known_ids:
+                # 🔴 THE SET IS A PHOTOGRAPH; THE DELETION IS NOW (T350). `known_ids`
+                # was taken once, above, and this loop can run for a while. A seat
+                # whose record was momentarily absent when the photograph was taken —
+                # which used to happen to EVERY seat at EVERY turn boundary, see
+                # `deregister` — has its queued mail destroyed here with nothing
+                # logged and nothing raised. That is the silent twin of the loud
+                # "no agent <id> is registered" refusal, and it is the worse half:
+                # a refusal can be retried by whoever sent it, a deleted message
+                # cannot be noticed by anyone.
+                if _recipient_is_live(agents_dir, to):
+                    continue
                 f.unlink()
                 removed += 1
         except (json.JSONDecodeError, OSError):
@@ -1002,6 +1040,18 @@ def _purge_stale_agents() -> int:
                     removed += 1
                 except OSError:
                     pass
+                continue
+
+            # 🔴 A LIVE PROCESS IS NOT STALE, WHATEVER THE CLOCK SAYS (T350).
+            # Both branches below judge an agent by `last_seen`, which the WATCHER
+            # writes — so a seat whose watcher was stopped, compacted or killed
+            # ages out while it is still working, and unregistering it refuses its
+            # mail and deletes its queued messages. The dead-pid branch above is
+            # the positive test for death; this is the veto. An idle record with a
+            # live pid is left alone deliberately: the cost is one stale row, and
+            # the cost of the other mistake is a working agent that cannot be
+            # reached.
+            if session_pid and _pid_alive(session_pid):
                 continue
 
             # Fast-path: agent recapped and has been idle > RECAP_STALE_SECONDS
@@ -1645,10 +1695,25 @@ def register_presence() -> None:
 
 
 def deregister() -> None:
-    """Remove agent presence file on session stop.
+    """Remove agent presence file when the SESSION ends.
 
-    Called by the Stop hook. This is the clean shutdown path —
-    the 1-hour STALE_AGENT_SECONDS is only a safety net for crashes.
+    🔴 WIRE THIS TO SessionEnd. NEVER TO Stop. In Claude Code the Stop hook fires
+    at the end of every ASSISTANT TURN, and this docstring used to say "Remove
+    agent presence file on session stop. Called by the Stop hook. This is the
+    clean shutdown path" — one word doing two jobs, and the config believed it.
+        STOP IS A TURN BOUNDARY. SessionEnd IS THE SESSION BOUNDARY.
+    Wired to Stop (as `hooks_configs/claude_hooks.json` was until T350), every
+    seat unlinked its own presence file once per turn and stayed unregistered
+    until its next hook re-created it. Measured 2026-09-04: eight gaps in ten
+    minutes across three seats, 1.1–4.1 s each; during the gap `os.listdir` does
+    not show the entry, `stat` is a genuine ENOENT, and `_known_agent_ids()`
+    REFUSES a live agent — five real sends were refused that day. Because SENDING
+    A MESSAGE ENDS A TURN, a seat was deregistered by its own outgoing traffic,
+    which is why every refused agent was demonstrably alive and every retry
+    worked.
+
+    ⚠️ The 1-hour STALE_AGENT_SECONDS reaper remains the safety net for crashes —
+    a closed terminal fires no hook at all, so it cannot be the only mechanism.
     """
     agent_id = config.get_agent_id()
     path = config.get_root() / "agents" / f"{agent_id}.json"

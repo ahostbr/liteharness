@@ -167,9 +167,94 @@ def _merge_claude_hooks(settings_path: Path, hook_config: dict) -> bool:
             print(f"    Removed {len(pruned)} hook(s) for actions this version does not "
                   f"implement: {', '.join(pruned)}")
 
+        # ── Heal a hook a past release wired to the WRONG EVENT (T350) ────────────────
+        #
+        # `deregister` was shipped on Stop as well as SessionEnd. In Claude Code the Stop
+        # hook fires at the end of every ASSISTANT TURN, not at session end, so every seat
+        # unlinked its own presence file once per turn and stayed unregistered until the
+        # next hook re-created it. Measured 2026-09-04: eight gaps in ten minutes across
+        # three seats, 1.1-4.1 s each, and `_known_agent_ids()` REFUSES a live id for the
+        # whole window -- which is the "no agent <id> is registered" that five real sends
+        # hit that day. Sending a message ends a turn, so a seat was deregistered by its
+        # own outgoing traffic.
+        #
+        # Fixing the shipped file alone does not heal an installed box: the append loop
+        # below collects existing commands PER EVENT, so it re-adds the Stop entry beside
+        # a hand-corrected SessionEnd one. Measured by SilverBolt on a copy (5544e6f3):
+        # BEFORE SessionEnd -> AFTER SessionEnd,Stop.
+        #
+        # 🔴 THE HEAL IS LIMITED TO ONE COMMAND ON PURPOSE, AND THE FIRST DRAFT WAS NOT.
+        # The obvious rule -- "the shipped config is authoritative about which events our
+        # commands belong to" -- is too strong, and running it against this box's real
+        # settings.json proved it in one shot: it silently removed THREE deliberate,
+        # load-bearing hooks that the shipped config simply does not list --
+        # `register` on PreCompact and PostCompact (the PostCompact one is what puts a
+        # seat back in the registry after a compaction) and `check` on UserPromptSubmit.
+        #     AN INSTALLER CANNOT TELL A DEFECT FROM A DELIBERATE ADDITION, SO IT MUST
+        #     ONLY UNDO THE DEFECT IT KNOWS ABOUT.
+        # A blanket rule is doubly wrong here: `liteharness.hooks check` is itself shipped
+        # on BOTH PostToolUse and SessionStart, so "one command, one event" would drop one
+        # of ours as well. Only `deregister` is healed, only off events the shipped config
+        # does not wire it to, and every other command -- ours or another tool's -- is left
+        # exactly where the user has it.
+        healed_commands = ("liteharness.hooks deregister",)
+        shipped_events: dict[str, set[str]] = {}
+        for event, matchers in new_hooks.items():
+            for matcher_obj in matchers:
+                for h in matcher_obj.get("hooks", []):
+                    cmd = h.get("command", "") or ""
+                    if any(c in cmd for c in healed_commands):
+                        shipped_events.setdefault(cmd, set()).add(event)
+
+        relocated: list[str] = []
+        for event in list(existing_hooks.keys()):
+            kept_matchers = []
+            removed_here = False
+            for matcher_obj in existing_hooks[event] or []:
+                inner = []
+                for h in matcher_obj.get("hooks", []):
+                    cmd = h.get("command", "") or ""
+                    belongs = shipped_events.get(cmd)
+                    if belongs is not None and event not in belongs:
+                        relocated.append(f"{event}:{cmd.rsplit(' ', 1)[-1]}")
+                        removed_here = True
+                        continue
+                    inner.append(h)
+                if inner:
+                    matcher_obj["hooks"] = inner
+                    kept_matchers.append(matcher_obj)
+            # Touch NOTHING unless this pass actually took something out. The append
+            # loop below leaves an empty list behind for any shipped event whose hooks
+            # are all non-`liteharness.hooks` commands, and a tidy-up here would make
+            # the first install and the second produce different files — an
+            # idempotence break introduced by a fix that was supposed to be inert on a
+            # healthy box. Caught by `test_installing_twice_is_a_no_op`.
+            if not removed_here:
+                continue
+            if kept_matchers:
+                existing_hooks[event] = kept_matchers
+            else:
+                del existing_hooks[event]
+        if relocated:
+            print(f"    Moved {len(relocated)} hook(s) off an event this version does not "
+                  f"wire them to: {', '.join(relocated)}")
+
         for event, new_matchers in new_hooks.items():
+            # ⚠️ CREATED ONLY WHEN SOMETHING IS ACTUALLY APPENDED. This used to write
+            # `existing_hooks[event] = []` up front, so any shipped event whose hooks are
+            # all non-`liteharness.hooks` commands (Stop, Notification and SubagentStop
+            # ship only `liteharness.tts.smart_tts`, which the marker below does not
+            # match) left an empty list in the user's settings — and the prune block
+            # above then DELETED that key on the next install. Two installs of the same
+            # version produced two different files. Surfaced by
+            # `test_installing_twice_is_a_no_op`, which was written for the T350 heal
+            # and failed on this instead.
             if event not in existing_hooks:
                 existing_hooks[event] = []
+                if not any(marker in (h.get("command", "") or "")
+                           for m in new_matchers for h in m.get("hooks", []) or []):
+                    del existing_hooks[event]
+                    continue
 
             # Collect all existing commands across all matchers to avoid duplicates
             existing_cmds: set[str] = set()
