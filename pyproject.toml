@@ -51,6 +51,7 @@ liteharness = [
   "hooks_configs/*.json",
   "hooks_configs/*.ts",
   "cli_scripts/**/*.py",
+  "cli_scripts/**/*.md",
   "ps_scripts/*.ps1",
   "catalog/PROVENANCE.json",
   "catalog/skills/**/*",

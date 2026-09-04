@@ -457,6 +457,24 @@ def _install_cli_scripts(cli_name: str) -> bool:
         shutil.copy2(src_file, dest)
         installed += 1
 
+    if cli_name == "codex-cli":
+        # The old manual-start copy spawned a detached injector, overriding the
+        # installed stdout guidance. Update both supported aliases together.
+        skill_root = Path.home() / ".codex" / "skills"
+        source_skill = Path(__file__).parent / "catalog" / "skills" / "ls-liteharness" / "SKILL.md"
+        aliases = [(source_skill, skill_root / alias / "SKILL.md")
+                   for alias in ("liteharness", "ls-liteharness")]
+        aliases.extend([
+            (src_dir / "manual-start.md", skill_root / "liteharness-manual-start" / "SKILL.md"),
+            (src_dir / "manual_liteharness.py", skill_root / "liteharness-manual-start" / "scripts" / "manual_liteharness.py"),
+        ])
+        for source, dest in aliases:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                shutil.copy2(dest, dest.with_suffix(f".bak.{ts}"))
+            shutil.copy2(source, dest)
+
     return installed > 0
 
 

@@ -55,7 +55,7 @@ Every agent MUST register on activation. Choose the inbox monitor path for the c
    `python -m liteharness.hooks check --agent-id <YOUR-SESSION-ID>`
    To send messages: `python -m liteharness.cli send <target-id> "message" --from <YOUR-SESSION-ID>`
 
-3. **Codex terminal sessions: use stdout delivery.** Start `~\.codex\skills\liteharness\scripts\liteharness_watcher_supervisor.py` in an attached terminal with `LITEHARNESS_AGENT_ID=<YOUR-AGENT-ID>`. The supervisor only runs `python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>` and streams stdout. There is no UIAutomation, clipboard paste, SendKeys, or pane injection in the Codex watcher stack.
+3. **Codex CLI and desktop tool sessions: use one attached stdout watcher.** Register first, then launch `python -u ~/.codex/skills/liteharness/scripts/liteharness_watcher_supervisor.py --agent-id <UUID> --model <actual-model>` in an attached background tool terminal. Keep its tool session ID and read its stdout after major tool use and while awaiting replies. The wrapper calls the canonical hooks watcher under a per-agent OS lock. It never detaches or injects into a window. Registration/notify hooks never replace it.
 4. **Register with correct info:**
    ```bash
    python -m liteharness.cli register --agent-id <YOUR-AGENT-ID> --cli <claude-code|pi|codex|copilot-cli|copilot-desktop> --model <your-model>
@@ -113,20 +113,29 @@ Always pass `--from` with YOUR full UUID. Without it, sender detection may be wr
 
 ### Codex Inbox Watcher Safety
 
-The Codex watcher delivery mechanism is stdout. Do not add target discovery, UIAutomation, clipboard paste, SendKeys, or window/pane injection to the Codex watcher scripts. The canonical supervisor is intentionally thin:
+Start one attached background tool terminal, retaining its session ID:
 
 ```powershell
-$env:LITEHARNESS_AGENT_ID="<agent-id>"
-python "~\.codex\skills\liteharness\scripts\liteharness_watcher_supervisor.py"
+python -u "$env:USERPROFILE\.codex\skills\liteharness\scripts\liteharness_watcher_supervisor.py" --agent-id <FULL-UUID> --model <ACTUAL-MODEL>
 ```
 
-That supervisor launches:
+Read the terminal's output after major tool use and when waiting for messages. Re-arm if it exits.
+The wrapper calls `liteharness.hooks.watch_inbox` in the same process; an OS lock refuses
+another managed consumer for that agent. Do not also run raw hooks watch or a claiming
+manual-check loop. The legacy notify entrypoint is a non-spawning, non-claiming no-op.
 
-```bash
-python -m liteharness.hooks watch --agent-id <agent-id>
-```
+`manual_liteharness.py start --check-now` registers only and leaves a live watcher alone.
+`watch` and `codex-monitor start/restart` run attached. `codex-monitor status` reports
+stdout process/heartbeat health, not a headed target. A real message read from the tool
+terminal proves receipt; liveness alone does not. Stdout is not a promise that an idle
+desktop task will automatically wake. For recovery use the read-only
+`python -m liteharness.cli inbox 5 --agent <UUID>`.
 
-`liteharness.hooks watch` owns inbox filtering, claiming, printing, and completion. When testing watcher changes, start the supervisor in an attached terminal, send the agent a LiteHarness message, and confirm the message prints to stdout without any window manipulation.
+Do not add UIAutomation, clipboard, SendKeys, pane injection or detached pythonw to this
+path. If an old detached monitor remains, explicitly stop only that agent's legacy monitor
+before starting the attached consumer. Canonical code and this skill live in
+`liteharness-oss`; deploy with `python -m liteharness.cli update-scripts --cli codex-cli`.
+That command synchronizes the liteharness, ls-liteharness and manual-start aliases.
 
 ## Spawning Agents
 
