@@ -1175,6 +1175,11 @@ def cmd_register(
 
     resolved_name = naming.get_name(agent_id)
     presence["name"] = resolved_name
+    # An explicit CLI registration is an identity choice, unlike an automatic
+    # SessionStart registration. Resume may replace only the latter (T363).
+    presence["registration_source"] = "takeover"
+    presence.pop("exited_at", None)
+    presence.pop("superseded_by", None)
     now_iso = datetime.now(timezone.utc).isoformat()
     presence["last_seen"] = now_iso
     # Re-registering declares the agent LIVE: clear any recap wind-down flag
