@@ -177,7 +177,7 @@ from . import inbox, config
 CHECK_INTERVAL_SECONDS = 10
 
 # T372 — how current a watcher's heartbeat must be before the turn hook will leave mail
-# to it. The watcher stamps `last_seen` every loop iteration (~5 s), so 60 is twelve
+# to it. The watcher stamps `watcher_last_seen` every loop iteration (~5 s), so 60 is twelve
 # missed beats: long enough that ordinary scheduling jitter never hands delivery back to
 # the hook, short enough that a stopped consumer costs one turn rather than silence.
 # ⚠️ THIS NUMBER IS THE MAXIMUM DELAY A MESSAGE CAN SUFFER when a watcher dies without
@@ -758,14 +758,33 @@ def _a_live_watcher_is_attached(agent_id: str) -> bool:
     pid = row.get("watcher_pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or not _pid_alive(pid):
         return False
-    last_seen = row.get("last_seen")
+    owner = _parse_positive_int(row.get("session_pid"))
+    if not owner or not _pid_alive(owner):
+        return False
+    last_seen = row.get("watcher_last_seen")
     if not isinstance(last_seen, str) or not last_seen:
+        _obs_watcher_freshness_unknown(agent_id)
         return False
     try:
         age = time.time() - datetime.fromisoformat(last_seen).timestamp()
     except ValueError:
         return False
-    return age < WATCHER_FRESH_SECONDS
+    return 0 <= age < WATCHER_FRESH_SECONDS
+
+
+def _obs_watcher_freshness_unknown(agent_id: str) -> None:
+    """Explain migration fallback in metadata, without claiming a new identity."""
+    try:
+        path = config.get_root() / "identity-log.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "at": datetime.now(timezone.utc).isoformat(),
+                "event": "watcher_freshness", "agent_id": agent_id,
+                "reason": "missing-watcher-last-seen", "decision": "hook-delivers",
+            }) + "\n")
+    except OSError:
+        pass
 
 
 def check_inbox() -> None:
@@ -777,18 +796,19 @@ def check_inbox() -> None:
     injects stdout into the agent's context.
     """
     agent_id = config.get_agent_id()
+    # Observe this agent turn even when a watcher owns delivery. This must not
+    # freshen the watcher's clock or create a missing presence record.
+    try:
+        config.merge_presence_fields(config.get_root() / "agents" / f"{agent_id}.json", {
+            "agent_last_seen": datetime.now(timezone.utc).isoformat(),
+        })
+    except OSError:
+        pass
 
-    # T370/T372: printing is not recipient acknowledgement. Leave wake-owned
-    # mail to its attached consumer instead of archiving it from a turn hook.
-    from liteharness.cli_scripts.codex.liteharness_watcher_supervisor import desktop_owner_active
-    if _is_codex_hook_runtime() and desktop_owner_active(config.get_root(), agent_id):
-        return
-
-    # T372 — the same principle, for the runtime the branch above cannot reach. That guard
-    # needs BOTH conjuncts, so every Claude Code seat kept the defect while this file read
-    # as fixed: the hook printed and archived to done/ in one unconditional step, and a
-    # swallowed stdout filed a message as delivered that nobody saw (gate report 9aec3daa,
-    # 2026-09-05, taken during an 18 s watcher pause and recovered by hand from done/).
+    # T130: use the same verified clock rule for every runtime. A native
+    # watcher's OS lock alone cannot prove freshness during schema migration.
+    # T372 prevents a hook racing the watcher to archive its mail. T130 requires
+    # watcher freshness from the watcher's own clock, not an agent turn.
     # Deferral is SILENT: the watcher renders it, and a second copy in the turn — or a note
     # about having skipped one — is bookkeeping in someone's context.
     if _a_live_watcher_is_attached(agent_id):
@@ -1637,7 +1657,7 @@ def register_presence() -> None:
         # back into the 300s fast-purge tier after every re-register.
         # (recap_at is deliberately NOT carried over — registering declares live.)
         "registered_at": now_iso,
-        "last_seen": now_iso,
+        "agent_last_seen": now_iso,
         "pid": os.getpid(),
         "ppid": os.getppid(),
         "cwd": os.getcwd(),
@@ -1651,6 +1671,10 @@ def register_presence() -> None:
     }
 
     session_pid = _resolve_session_pid(existing)
+    for key in ("watcher_last_seen", "watcher_pid", "watcher_ppid"):
+        if key in existing:
+            presence[key] = existing[key]
+    config.sync_legacy_activity(presence)
     if session_pid:
         presence["session_pid"] = session_pid
     elif existing.get("session_pid"):
@@ -2359,7 +2383,7 @@ def update_cwd(hook_input: dict) -> None:
     try:
         config.merge_presence_fields(path, {
             "cwd": new_cwd,
-            "last_seen": datetime.now(timezone.utc).isoformat(),
+            "agent_last_seen": datetime.now(timezone.utc).isoformat(),
         })
     except OSError:
         pass
@@ -2375,9 +2399,9 @@ _LAST_PRESENCE: dict = {}
 
 
 def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> None:
-    """Update last_seen timestamp in presence file.
+    """Stamp the caller's activity clock and derive legacy last_seen recency.
 
-    Heartbeats are NON-OWNER writers: they touch only last_seen / watcher pids /
+    Heartbeats are NON-OWNER writers: they touch only their own clock / watcher pids /
     session_pid and must never clobber fields register set (tier, model, name).
 
     agent_id: explicit identity (the watch loop passes its validated --agent-id);
@@ -2413,7 +2437,17 @@ def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> N
     if presence is not None:
         # File exists: merge ONLY heartbeat-owned fields (re-read at write time
         # via merge_presence_fields, shrinking the stale-read window).
-        updates: dict = {"last_seen": now}
+        # A watcher may recover its owner through a live CLI ancestor, but an
+        # orphan cannot turn its own pulse into evidence that a dead seat lives.
+        owner = _parse_positive_int(presence.get("session_pid"))
+        recovered_owner = None
+        if is_watcher and owner and not _pid_alive(owner):
+            recovered_owner = _resolve_session_pid(presence)
+            if not recovered_owner or not _pid_alive(recovered_owner):
+                return
+        updates: dict = {"watcher_last_seen" if is_watcher else "agent_last_seen": now}
+        if recovered_owner:
+            updates["session_pid"] = recovered_owner
         if is_watcher:
             updates["watcher_pid"] = os.getpid()
             updates["watcher_ppid"] = os.getppid()
@@ -2479,7 +2513,13 @@ def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> N
     else:
         return  # no authority to invent a registration
 
-    presence["last_seen"] = now
+    owner = _parse_positive_int(presence.get("session_pid"))
+    if is_watcher and owner and not _pid_alive(owner):
+        recovered_owner = _resolve_session_pid(presence)
+        if not recovered_owner or not _pid_alive(recovered_owner):
+            return
+        presence["session_pid"] = recovered_owner
+    config.stamp_activity(presence, now, is_watcher=is_watcher)
     if is_watcher:
         presence["watcher_pid"] = os.getpid()
         presence["watcher_ppid"] = os.getppid()

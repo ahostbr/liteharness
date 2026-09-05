@@ -1181,7 +1181,7 @@ def cmd_register(
     presence.pop("exited_at", None)
     presence.pop("superseded_by", None)
     now_iso = datetime.now(timezone.utc).isoformat()
-    presence["last_seen"] = now_iso
+    config.stamp_activity(presence, now_iso)
     # Re-registering declares the agent LIVE: clear any recap wind-down flag
     # (a preserved recap_at kept re-registered agents in the 300s fast-purge
     # tier) and anchor recap detection so a stale transcript marker can't
