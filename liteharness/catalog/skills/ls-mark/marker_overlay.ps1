@@ -5,10 +5,10 @@
 # never steals focus. This is the agent path (pccontrol.py marker) — unchanged.
 #
 # INTERACTIVE (-Interactive -HandoffFile <json>): the HUMAN path (/mark).
-# The ring is draggable; two buttons ride under it. [send] hides the buttons
+# The ring is draggable; a nearby note window follows it. [send] hides the note
 # (the RING STAYS — it is the highlight), waits a beat for the compositor,
 # captures the marker's monitor, and writes <handoff>.png plus the handoff
-# JSON: {x, y, mon, mon_x, mon_y, png}. [cancel] or Esc writes
+# JSON: {x, y, mon, mon_x, mon_y, png, text}. [cancel] or Esc writes
 # {"cancelled": true}. LiteTUI polls for the JSON and hands the screenshot to
 # the model with the coordinates — a manual human screen-marker channel.
 param(
@@ -61,7 +61,7 @@ function Resolve-MarkerColor([string]$c) {
 
 $size = if ($Size -ge 20) { $Size } else { 110 }
 $labelH = if ($Label -ne '') { 20 } else { 0 }
-$btnH = if ($Interactive) { 26 } else { 0 }
+$btnH = 0
 $key = [System.Drawing.Color]::FromArgb(255, 0, 254)   # transparency key
 $mc = Resolve-MarkerColor $Color
 
@@ -117,7 +117,7 @@ if (-not $Interactive) {
     exit 0
 }
 
-# ── interactive: draggable ring + send/cancel, the human path ────────────────
+# ── interactive: draggable ring + optional note, the human path ──────────────
 if ($HandoffFile -eq '') { Write-Error 'Interactive mode needs -HandoffFile'; exit 1 }
 
 $script:drag = $null
@@ -138,28 +138,88 @@ function Write-Handoff([hashtable]$obj) {
     Move-Item -Force $tmp $HandoffFile
 }
 
+$note = New-Object System.Windows.Forms.Form
+$note.Text = 'Mark this spot'
+$note.FormBorderStyle = 'FixedToolWindow'
+$note.StartPosition = 'Manual'
+$note.TopMost = $true
+$note.ShowInTaskbar = $false
+$note.KeyPreview = $true
+$note.ClientSize = New-Object System.Drawing.Size(340, 170)
+$note.BackColor = [System.Drawing.Color]::FromArgb(255, 28, 30, 34)
+$note.ForeColor = [System.Drawing.Color]::White
+$note.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+
+$hint = New-Object System.Windows.Forms.Label
+$hint.Text = 'Drag the ring. Add a note if helpful.'
+$hint.AutoSize = $true
+$hint.Location = New-Object System.Drawing.Point(12, 10)
+$note.Controls.Add($hint)
+
+$inputNote = New-Object System.Windows.Forms.TextBox
+$inputNote.AccessibleName = 'Note about the marked spot'
+$inputNote.Multiline = $true
+$inputNote.AcceptsReturn = $true
+$inputNote.ScrollBars = 'Vertical'
+$inputNote.MaxLength = 8000
+$inputNote.Location = New-Object System.Drawing.Point(12, 36)
+$inputNote.Size = New-Object System.Drawing.Size(316, 82)
+$inputNote.BackColor = [System.Drawing.Color]::FromArgb(255, 42, 45, 50)
+$inputNote.ForeColor = [System.Drawing.Color]::White
+$note.Controls.Add($inputNote)
+
+function Place-NoteWindow {
+    $centre = New-Object System.Drawing.Point(($f.Left + [int]($size / 2)), ($f.Top + [int]($size / 2)))
+    $area = [System.Windows.Forms.Screen]::FromPoint($centre).WorkingArea
+    $left = $f.Right + 12
+    if (($left + $note.Width) -gt $area.Right) { $left = $f.Left - $note.Width - 12 }
+    $left = [Math]::Max($area.Left, [Math]::Min($left, $area.Right - $note.Width))
+    $top = [Math]::Max($area.Top, [Math]::Min($f.Top, $area.Bottom - $note.Height))
+    $note.Location = New-Object System.Drawing.Point($left, $top)
+}
+$f.Add_LocationChanged({ Place-NoteWindow })
+$f.Add_Shown({ Place-NoteWindow; $note.Show($f); $inputNote.Focus() })
+$f.Add_FormClosed({ $note.Close() })
+$script:finished = $false
+
+function Cancel-Mark {
+    if (-not $script:finished) {
+        $script:finished = $true
+        Write-Handoff @{ cancelled = $true }
+        $f.Close()
+    }
+}
+$note.Add_FormClosing({ Cancel-Mark })
+
 $btnSend = New-Object System.Windows.Forms.Button
-$btnSend.Text = 'send'
-$btnSend.Size = New-Object System.Drawing.Size(([int]($size / 2) - 2), 22)
-$btnSend.Location = New-Object System.Drawing.Point(0, ($size + $labelH + 2))
+$btnSend.Text = 'Send'
+$btnSend.Size = New-Object System.Drawing.Size(86, 30)
+$btnSend.Location = New-Object System.Drawing.Point(242, 130)
 $btnSend.BackColor = [System.Drawing.Color]::FromArgb(255, 20, 120, 60)
 $btnSend.ForeColor = [System.Drawing.Color]::White
 $btnSend.FlatStyle = 'Flat'
 
 $btnCancel = New-Object System.Windows.Forms.Button
-$btnCancel.Text = 'x'
-$btnCancel.Size = New-Object System.Drawing.Size(([int]($size / 2) - 2), 22)
-$btnCancel.Location = New-Object System.Drawing.Point(([int]($size / 2) + 2), ($size + $labelH + 2))
+$btnCancel.Text = 'Cancel'
+$btnCancel.Size = New-Object System.Drawing.Size(86, 30)
+$btnCancel.Location = New-Object System.Drawing.Point(148, 130)
 $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(255, 90, 30, 30)
 $btnCancel.ForeColor = [System.Drawing.Color]::White
 $btnCancel.FlatStyle = 'Flat'
 
-$f.Controls.Add($btnSend)
-$f.Controls.Add($btnCancel)
+$note.Controls.Add($btnSend)
+$note.Controls.Add($btnCancel)
 
-$btnCancel.Add_Click({ Write-Handoff @{ cancelled = $true }; $f.Close() })
+$btnCancel.Add_Click({ Cancel-Mark })
 $f.Add_KeyDown({ param($s, $e)
-    if ($e.KeyCode -eq 'Escape') { Write-Handoff @{ cancelled = $true }; $f.Close() } })
+    if ($e.KeyCode -eq 'Escape') { Cancel-Mark } })
+$note.Add_KeyDown({ param($s, $e)
+    if ($e.KeyCode -eq 'Escape') { $e.SuppressKeyPress = $true; Cancel-Mark }
+    elseif ($e.Control -and $e.KeyCode -eq 'Enter') {
+        $e.SuppressKeyPress = $true
+        $btnSend.PerformClick()
+    }
+})
 
 $btnSend.Add_Click({
     # Marker centre in virtual-desktop coords (ring centre, not form corner).
@@ -173,9 +233,10 @@ $btnSend.Add_Click({
     }
     $mb = $screens[$monIdx].Bounds
 
-    # THE RING STAYS IN THE SHOT — it IS the highlight. Only the buttons hide.
-    $btnSend.Visible = $false
-    $btnCancel.Visible = $false
+    # Capture the user's exact note separately, so it never covers the target.
+    $text = $inputNote.Text
+    # THE RING STAYS IN THE SHOT — it IS the highlight. Only the note window hides.
+    $note.Hide()
     $f.Refresh()
     Start-Sleep -Milliseconds 220   # let the compositor catch up
 
@@ -191,8 +252,9 @@ $btnSend.Add_Click({
         x = $mx; y = $my
         mon = $monIdx
         mon_x = ($mx - $mb.X); mon_y = ($my - $mb.Y)
-        png = $png
+        png = $png; text = $text
     }
+    $script:finished = $true
     $f.Close()
 })
 

@@ -1,9 +1,9 @@
 """Ask the human to mark a spot on their screen. Blocks; prints the handoff.
 
 Launches marker_overlay.ps1 (shipped beside this file) in interactive mode:
-a draggable ring with send/cancel buttons. On send, the overlay captures the
+a draggable ring with an optional multiline note and send/cancel buttons. On send, the overlay captures the
 marker's monitor WITH THE RING STILL IN THE SHOT and writes an atomic JSON
-handoff. This script polls for it and prints exactly one line: the JSON, or
+handoff including the note as `text`. This script polls for it and prints exactly one line: the JSON, or
 CANCELLED, or TIMEOUT.
 
 The JSON is read with utf-8-sig — Windows PowerShell writes it with a BOM,

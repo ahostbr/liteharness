@@ -1,15 +1,17 @@
 ---
 name: ls-mark
-description: Ask the HUMAN to mark a spot on their screen — a draggable ring with a send button; you get the coordinates AND a screenshot with the ring still in it. Use whenever "which one do you mean?", "show me where", or a UI element needs pointing at. Triggers on 'mark the screen', 'mark it', 'show me where', 'point at it', 'which one do you mean', 'let me mark', 'screen marker'.
+description: Ask the human to mark a spot on their screen and optionally explain it in a text note. Returns coordinates, their note, and a screenshot with the draggable ring visible. Use for screen pointing, ambiguous UI references, and visual bug reports.
 ---
 
 # /ls-mark — the human screen-marker channel
 
 The reverse of an agent's click-marker: instead of you showing the human where
 you are about to act, **the human shows YOU what they are talking about**. A
-draggable ring appears on their screen; they drag it onto the thing and click
+draggable ring appears on their screen with an optional multiline note; they drag it onto the thing and click
 **send**; you receive the coordinates in two systems plus a screenshot of that
 monitor **with the ring still in the shot** — the ring IS the highlight.
+The note window follows the ring and stays within the monitor's working area.
+Enter adds a new line; Ctrl+Enter sends. Escape or Cancel cancels.
 
 ## Run it
 
@@ -22,7 +24,7 @@ The call BLOCKS until the human clicks send, cancels, or the timeout passes.
 Output is ONE line:
 
 ```json
-{"x": 1745, "y": 724, "mon": 0, "mon_x": 1745, "mon_y": 724, "png": "C:\\...\\mark.png"}
+{"x": 1745, "y": 724, "mon": 0, "mon_x": 1745, "mon_y": 724, "png": "C:\\...\\mark.png", "text": "This field loses focus when I type."}
 ```
 
 or `CANCELLED` / `TIMEOUT after 180s`.
@@ -32,6 +34,8 @@ or `CANCELLED` / `TIMEOUT after 180s`.
 1. **Read the PNG** with your Read tool — you are multimodal, and the cyan ring
    in the image shows exactly what the human pointed at. Do this FIRST: the
    coordinates tell you where, the image tells you WHAT.
+   Read the user's `text` alongside it. An empty string means no note was supplied.
+   The note window is hidden from the screenshot so it does not obscure the target.
 2. Coordinates come in both systems on purpose:
    - `x`, `y` — absolute virtual-desktop pixels (multi-monitor global).
    - `mon`, `mon_x`, `mon_y` — the monitor index and monitor-local pixels, for
