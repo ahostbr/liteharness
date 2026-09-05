@@ -359,7 +359,7 @@ def stop_monitor_pid(pid: object) -> None:
 def codex_monitor_status(agent_id: str) -> dict:
     record = read_json_file(config.get_root() / "codex_sessions" / "monitors" / f"{agent_id}.json")
     presence = read_json_file(config.get_root() / "agents" / f"{agent_id}.json")
-    if record.get("agent_id") == agent_id and record.get("delivery") == "stdout":
+    if record.get("agent_id") == agent_id and record.get("delivery") in {"stdout", "desktop-turn"}:
         pid = record.get("pid")
         stamp = None
         if presence.get("watcher_pid") == pid:
@@ -370,7 +370,7 @@ def codex_monitor_status(agent_id: str) -> dict:
         return dict(agent_id=agent_id, supervisor_pid=pid, supervisor_alive=pid_is_alive(pid),
                     supervisor_updated_at=stamp, watcher_pid=pid, watcher_alive=pid_is_alive(pid),
                     watcher_updated_at=stamp, watcher_last_scan_at=stamp, last_error=None,
-                    target={}, delivery="stdout")
+                    target={}, delivery=record["delivery"])
     # Read legacy records only to support explicit migration/stop; never launch them.
     sup = read_json_file(codex_monitor_state_path(agent_id, "supervisor.pid"))
     beat = read_json_file(codex_monitor_state_path(agent_id, "supervisor.heartbeat.json"))
@@ -463,7 +463,8 @@ def cmd_start(args: argparse.Namespace) -> int:
     print("  Inbox delivery requires one attached tool terminal running:")
     print(f"    python -u \"{Path(__file__).resolve()}\" watch")
     print("  Retain the tool session ID and read its stdout after major tool use.")
-    print("  This does not promise automatic desktop wake while the agent is idle.")
+    print("  Desktop wake: get the current real turn id with read_thread, then watch --turn-id <id>.")
+    print("  Terminal-only stdout delivery does not provide automatic desktop wake.")
     if args.check_now:
         return cmd_check(args)
     return 0
@@ -472,8 +473,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     agent_id = config.get_agent_id()
     status = codex_monitor_status(agent_id)
-    if status["delivery"] == "stdout" and status["watcher_alive"]:
-        print("[LITEHARNESS] Attached stdout watcher owns delivery. Read its tool session output; check did not claim messages.")
+    if status["delivery"] in {"stdout", "desktop-turn"} and status["watcher_alive"]:
+        print(f"[LITEHARNESS] Attached {status['delivery']} watcher owns delivery; check did not claim messages.")
         return 0
     claimed = claim_messages(agent_id)
     if not claimed:
@@ -487,7 +488,11 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_watch(args: argparse.Namespace) -> int:
     from liteharness.cli_scripts.codex.liteharness_watcher_supervisor import main as watch_main
-    return watch_main(["--agent-id", config.get_agent_id(), "--root", str(config.get_root())])
+    options = ["--agent-id", config.get_agent_id(), "--root", str(config.get_root()),
+               "--delivery", getattr(args, "delivery", "auto")]
+    if getattr(args, "turn_id", None):
+        options += ["--turn-id", args.turn_id]
+    return watch_main(options)
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
@@ -548,15 +553,25 @@ def print_codex_monitor_status(agent_id: str) -> None:
     print(f"  Delivery: {status['delivery']}")
     print(f"  Watcher: pid={status['watcher_pid']} alive={status['watcher_alive']}")
     print(f"  Heartbeat: {format_age(status['watcher_updated_at'])}")
-    print(f"  Stdout process health: {'running' if codex_monitor_is_ready(status) else 'not ready'}")
-    print("  Delivery proof: read an actual message from the attached tool session.")
-    print("  Automatic desktop wake: not provided by stdout delivery.")
+    print(f"  Attached process health: {'running' if codex_monitor_is_ready(status) else 'not ready'}")
+    if status["delivery"] == "desktop-turn":
+        print("  Delivery proof: a new task turn containing the nonce and its recipient acknowledgement.")
+        print("  Desktop wake transport: app-tools pipe to this exact thread; recipient ack required.")
+        base = config.get_root() / "codex_sessions" / "delivery" / agent_id
+        counts = {}
+        for path in (base / "ledger").glob("*.json"):
+            phase = read_json_file(path).get("state", "invalid")
+            counts[phase] = counts.get(phase, 0) + 1
+        print(f"  Delivery states: {counts}")
+    else:
+        print("  Receipt proof: read an actual message from the attached tool session.")
+        print("  Automatic desktop wake: not provided by stdout delivery.")
     if status["delivery"] == "legacy" and (status["watcher_alive"] or status["supervisor_alive"]):
         print("  Legacy detached monitor detected. Stop it explicitly before starting watch in an attached tool terminal.")
 
 
 def codex_monitor_is_ready(status: dict) -> bool:
-    return bool(status.get("delivery") == "stdout" and status["watcher_alive"]
+    return bool(status.get("delivery") in {"stdout", "desktop-turn"} and status["watcher_alive"]
                 and timestamp_is_fresh(status["watcher_updated_at"]))
 
 
@@ -659,6 +674,8 @@ def build_parser() -> argparse.ArgumentParser:
     check.set_defaults(func=cmd_check)
 
     watch = subparsers.add_parser("watch", help="Watch the inbox continuously.")
+    watch.add_argument("--turn-id", help="Real originating Codex turn id from read_thread")
+    watch.add_argument("--delivery", choices=["auto", "stdout", "desktop-turn"], default="auto")
     watch.set_defaults(func=cmd_watch)
 
     attached_health = subparsers.add_parser(
@@ -716,6 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="Number of log lines to show for the logs action.",
     )
+    codex_monitor.add_argument("--turn-id", help="Real originating Codex turn id from read_thread")
+    codex_monitor.add_argument("--delivery", choices=["auto", "stdout", "desktop-turn"], default="auto")
     codex_monitor.set_defaults(func=cmd_codex_monitor)
 
     return parser

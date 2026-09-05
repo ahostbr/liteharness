@@ -1,0 +1,44 @@
+{
+  "task": "T370",
+  "recipient_task": "01a071fa-8f65-7ac3-93a6-8f4566d7b777",
+  "nonce": "T370-IDLE-20260905-7f69c14e",
+  "message_id": "b6c21822-5797-4812-a379-13a10b08448f",
+  "transport": "LiteHarness CLI -> attached watcher -> Codex native app-tools pipe -> send_message_to_thread",
+  "before": {
+    "status": "idle",
+    "completed_turn": "01a072d3-cd13-70c1-a520-7d79d0da9548",
+    "completed_at_unix": 1788632934
+  },
+  "after": {
+    "status": "completed",
+    "new_turn": "01a072d5-30ff-75f3-93f1-281d61f2d8f1",
+    "started_at_unix": 1788632969,
+    "completed_at_unix": 1788633003
+  },
+  "idle_gap_seconds": 35,
+  "recipient_rollout": "~/.codex/sessions/2026/09/05/rollout-2026-09-05T10-30-41-01a071fa-8f65-7ac3-93a6-8f4566d7b777.jsonl",
+  "transcript_witness": [
+    {
+      "line": 1767,
+      "timestamp": "2026-09-05T18:29:29.532Z",
+      "record_type": "response_item",
+      "payload_type": "function_call_output",
+      "tool": "send_message_to_thread",
+      "namespace": "codex_app",
+      "nonce": "T370-IDLE-20260905-7f69c14e",
+      "message_id": "b6c21822-5797-4812-a379-13a10b08448f"
+    }
+  ],
+  "recipient_ack": {
+    "id": "b6c21822-5797-4812-a379-13a10b08448f",
+    "agent_id": "01a071fa-8f65-7ac3-93a6-8f4566d7b777",
+    "acknowledged_at": 1788632980.1409786
+  },
+  "final_ledger_state": "acknowledged",
+  "recipient_report_message": "da87d5dd-2434-46bc-a26c-b585a5ad86f4",
+  "recipient_report": {
+    "human_prompt_required": false,
+    "manual_stdout_poll_required": false
+  },
+  "scope": "One real idle task on Windows app 26.901.5280.0; active reply delivery also verified. No claim about app-restart recovery or every host."
+}
