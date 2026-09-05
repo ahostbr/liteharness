@@ -128,21 +128,117 @@ def test_stale_heartbeat_still_dead():
 
 # ── 2. inbox flag handling ──────────────────────────────────────────────────
 
-def _run_inbox(*args) -> subprocess.CompletedProcess:
+def _run_inbox(*args, home: Path | None = None, caller: str | None = None) -> subprocess.CompletedProcess:
+    """Run the inbox CLI, optionally against a maildir of our own (T369).
+
+    `home` redirects `Path.home()` in the CHILD via USERPROFILE/HOME, which is the only
+    seam available here: `inbox.INBOX_ROOT` is computed at import from `Path.home()`, and
+    this is a subprocess, so no in-process mock can reach it.
+    """
+    env = dict(os.environ)
+    if home is not None:
+        env["USERPROFILE"] = str(home)
+        env["HOME"] = str(home)
+    if caller is not None:
+        env["LITEHARNESS_AGENT_ID"] = caller
     return subprocess.run(
         [sys.executable, "-m", "liteharness.cli", "inbox", *args],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=90,
+        cwd=str(ROOT), capture_output=True, text=True, timeout=90, env=env,
     )
+
+
+DEAD_ID = "00000000-dead-4dead-dead-000000000000"
+OTHER_ID = "11111111-2222-3333-4444-555555555555"
+CALLER_ID = "99999999-9999-9999-9999-999999999999"
+
+
+def _seed_maildir(home: Path) -> None:
+    """One message for each id, plus a broadcast — the shape that exposed the coupling."""
+    new = home / ".liteharness" / "inbox" / "new"
+    new.mkdir(parents=True, exist_ok=True)
+    for name, to, body in (
+        ("for-dead", DEAD_ID, "ADDRESSED-TO-DEAD"),
+        ("for-other", OTHER_ID, "ADDRESSED-TO-OTHER"),
+        ("announcement", "broadcast", "FLEET-BROADCAST"),
+    ):
+        (new / f"{name}.json").write_text(
+            json.dumps({"id": name, "from": "2cbc7137", "to": to,
+                        "timestamp": _now(), "body": body}),
+            encoding="utf-8",
+        )
 
 
 def test_inbox_agent_id_is_accepted_not_ignored():
-    """`--agent-id` must be honoured. Before: silently dropped, answered about the caller."""
-    r = _run_inbox("1", "--agent-id", "00000000-dead-4dead-dead-000000000000")
-    combined = r.stdout + r.stderr
-    assert r.returncode == 0, f"--agent-id should be accepted; got rc={r.returncode}\n{combined}"
-    assert "00000000-dead-4dead-dead-000000000000" in combined, (
-        "the id asked about does not appear in the answer — the flag was ignored again"
-    )
+    """`--agent-id` must be honoured. Before: silently dropped, answered about the caller.
+
+    🔴 THIS TEST USED TO READ THE DEVELOPER'S REAL ~/.liteharness MAILDIR (T369). It asked
+    for a dead id and asserted that id appeared in the output — which is only true of the
+    EMPTY answer, "No messages involving <id>". `cmd_inbox` keeps any message whose `to` is
+    `broadcast` for EVERY queried id, so the moment a real fleet notice was the newest
+    message the answer became a listing whose header reads `<sender> -> broadcast`, the
+    queried id appeared nowhere, and the test failed. Measured twice on 2026-09-05 against
+    unmodified main, both times eating a live notice.
+
+        A TEST THAT SHELLS OUT AGAINST SHARED MUTABLE STATE IS NOT FLAKY. It is coupled,
+        and its result reports on the machine as much as on the code.
+
+    The intent is unchanged and is what is pinned below: the flag must select WHOSE inbox
+    is answered. That is now asserted by CONTRAST — the same maildir answered three
+    different ways — rather than by hoping an id appears in prose, which was only ever a
+    proxy for it and was satisfied by the empty case.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        _seed_maildir(home)
+
+        dead = _run_inbox("10", "--agent-id", DEAD_ID, home=home, caller=CALLER_ID)
+        combined = dead.stdout + dead.stderr
+        assert dead.returncode == 0, f"--agent-id should be accepted; got rc={dead.returncode}\n{combined}"
+        assert "ADDRESSED-TO-DEAD" in combined, (
+            "the queried id's own mail is missing — the flag was ignored again"
+        )
+        assert "ADDRESSED-TO-OTHER" not in combined, (
+            "another agent's directed mail was returned for this id"
+        )
+
+        other = _run_inbox("10", "--agent-id", OTHER_ID, home=home, caller=CALLER_ID)
+        assert "ADDRESSED-TO-OTHER" in (other.stdout + other.stderr)
+        assert "ADDRESSED-TO-DEAD" not in (other.stdout + other.stderr)
+
+        # ⚠️ THE DISCRIMINATOR. Both runs above could pass against a CLI that answered
+        # about the caller if the caller happened to be the id asked for. Asking as
+        # nobody proves the flag — and only the flag — chose the answer.
+        caller = _run_inbox("10", home=home, caller=CALLER_ID)
+        assert "ADDRESSED-TO-DEAD" not in (caller.stdout + caller.stderr)
+        assert "ADDRESSED-TO-OTHER" not in (caller.stdout + caller.stderr)
+
+
+def test_CONTROL_a_broadcast_is_answered_for_every_id():
+    """Without this, the assertions above pass against a filter that returns nothing.
+
+    This is also the exact behaviour that made the old test environment-coupled, so it is
+    pinned deliberately rather than left as an accident of the implementation.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        _seed_maildir(home)
+        for who in (DEAD_ID, OTHER_ID):
+            r = _run_inbox("10", "--agent-id", who, home=home, caller=CALLER_ID)
+            assert "FLEET-BROADCAST" in (r.stdout + r.stderr), (
+                f"a broadcast was withheld from {who} — the filter now drops fleet notices"
+            )
+
+
+def test_an_empty_maildir_names_the_id_it_was_asked_about():
+    """The original assertion, kept — but now on the only input for which it is true."""
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        (home / ".liteharness" / "inbox" / "new").mkdir(parents=True)
+        r = _run_inbox("10", "--agent-id", DEAD_ID, home=home, caller=CALLER_ID)
+        combined = r.stdout + r.stderr
+        assert r.returncode == 0, combined
+        assert DEAD_ID in combined, "the empty answer no longer says whose inbox was empty"
+        assert CALLER_ID not in combined, "the empty answer named the CALLER — the original defect"
 
 
 def test_inbox_rejects_an_unknown_flag_loudly():
