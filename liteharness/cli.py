@@ -757,6 +757,46 @@ def _known_agent_ids() -> tuple[set[str], str | None]:
     return ids, None
 
 
+#: How long to wait before asking the registry a second time (T238).
+#: 50 ms is far longer than the window a single `os.replace` leaves open and far
+#: shorter than a human notices. It is a module constant so a test can shrink it
+#: rather than sleep through a real one.
+RECIPIENT_RECHECK_DELAY_S = 0.05
+
+
+def _verify_recipient(
+    to: str, retry_delay: float = RECIPIENT_RECHECK_DELAY_S
+) -> tuple[set[str], str | None, bool]:
+    """Is `to` registered? ASKED TWICE, because one listing can lie (T238).
+
+    The registry is a directory of one JSON file per agent, and a watcher
+    heartbeat rewrites a record with tmp-write + `os.replace` (hooks.py:270-286).
+    A `glob("*.json")` that runs inside that window can come back missing exactly
+    the record being rewritten. REPRODUCED 2026-09-03 (Sentinel, mechanism by
+    OpenBolt 6feaf389): 45,103 rewrites against 375,989 reads produced one
+    listing short of the rewritten record — and that one listing is enough to
+    refuse a send to a LIVE agent with "not registered ... Pass --force", which
+    happened at 14:4x against a98678ea.
+
+        A NEGATIVE FROM A READER THAT CAN MISS IS NOT AN ANSWER, IT IS ONE
+        SAMPLE. Absence is the only verdict this reader can get wrong, so it is
+        the only one worth paying 50 ms to re-check; a hit needs no second look.
+
+    ⚠️ THE SECOND READ'S SET IS WHAT COMES BACK, not the first's, because it is
+    the read the refusal is made on — the "N agent(s) known" line and the
+    did-you-mean list have to describe the listing that actually decided.
+
+    An unreadable registry still fails OPEN and still says so: see
+    `_known_agent_ids`. Re-reading cannot turn "cannot verify" into a refusal.
+    """
+    known, error = _known_agent_ids()
+    if error or to in known:
+        return known, error, to in known
+    time.sleep(retry_delay)
+    known, error = _known_agent_ids()
+    return known, error, to in known
+
+
 def cmd_send(
     to: str,
     body: str,
@@ -801,14 +841,16 @@ def cmd_send(
     # Fails CLOSED on an unknown id and OPEN on an unreadable registry, deliberately:
     # see _known_agent_ids. "broadcast" is a real address that owns no record.
     if not force and to != "broadcast":
-        known, registry_error = _known_agent_ids()
+        # Two reads, not one: a single listing can miss a record mid-heartbeat.
+        # See _verify_recipient.
+        known, registry_error, recipient_known = _verify_recipient(to)
         if registry_error:
             print(
                 f"Warning: RECIPIENT NOT VERIFIED -- {registry_error}.\n"
                 f"  Sending anyway. This is not a claim that {to} exists.",
                 file=sys.stderr,
             )
-        elif to not in known:
+        elif not recipient_known:
             import difflib
 
             near = difflib.get_close_matches(to, sorted(known), n=3, cutoff=0.6)
