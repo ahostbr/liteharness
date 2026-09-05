@@ -66,7 +66,9 @@ def _seed(home: Path, *, to: str = ME, watcher_pid: int | None = None,
     (root / "inbox" / "new").mkdir(parents=True, exist_ok=True)
     (root / "agents").mkdir(parents=True, exist_ok=True)
     row: dict[str, object] = {"agent_id": ME, "cli": "claude-code", "tier": "worker"}
-    row["last_seen"] = (datetime.now(timezone.utc) - timedelta(seconds=watcher_age_s)).isoformat()
+    row["watcher_last_seen"] = (datetime.now(timezone.utc) - timedelta(seconds=watcher_age_s)).isoformat()
+    row["last_seen"] = row["watcher_last_seen"]
+    row["session_pid"] = os.getpid()
     if watcher_pid is not None:
         row["watcher_pid"] = watcher_pid
     (root / "agents" / f"{ME}.json").write_text(json.dumps(row), encoding="utf-8")
@@ -135,7 +137,7 @@ def test_CONTROL_a_dead_watcher_pid_does_not_hold_the_mail():
         assert printed, "the hook went quiet without delivering — the message reached nobody"
 
 
-def test_CONTROL_a_stale_last_seen_does_not_hold_the_mail():
+def test_CONTROL_a_stale_watcher_last_seen_does_not_hold_the_mail():
     """Two failure modes, ONE test, and the docstring is where they are told apart.
 
     A pid can be alive and not be the watcher (RECYCLED by an unrelated process), and a

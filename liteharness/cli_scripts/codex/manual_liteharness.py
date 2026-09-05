@@ -257,7 +257,7 @@ def write_presence(agent_id: str) -> Path:
         "model": model,
         "project": current_project(),
         "started_at": existing.get("started_at") or utc_now(),
-        "last_seen": utc_now(),
+        "agent_last_seen": utc_now(),
         "pid": detected_pid or os.getpid(),
         **identity,
     }
@@ -271,7 +271,11 @@ def write_presence(agent_id: str) -> Path:
     transcript_path = existing.get("transcript_path")
     if transcript_path:
         presence["transcript_path"] = transcript_path
-    path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
+    for key in ("watcher_last_seen", "watcher_pid", "watcher_ppid"):
+        if key in existing:
+            presence[key] = existing[key]
+    config.sync_legacy_activity(presence)
+    config.atomic_write_json(path, presence)
     return path
 
 
@@ -364,13 +368,13 @@ def codex_monitor_status(agent_id: str) -> dict:
         stamp = None
         if presence.get("watcher_pid") == pid:
             try:
-                stamp = datetime.fromisoformat(presence["last_seen"]).timestamp()
+                stamp = datetime.fromisoformat(presence["watcher_last_seen"]).timestamp()
             except (ValueError, KeyError, TypeError):
                 pass
         return dict(agent_id=agent_id, supervisor_pid=pid, supervisor_alive=pid_is_alive(pid),
                     supervisor_updated_at=stamp, watcher_pid=pid, watcher_alive=pid_is_alive(pid),
                     watcher_updated_at=stamp, watcher_last_scan_at=stamp, last_error=None,
-                    target={}, delivery=record["delivery"])
+                    target={}, delivery=record["delivery"], watcher_freshness_verified=stamp is not None)
     # Read legacy records only to support explicit migration/stop; never launch them.
     sup = read_json_file(codex_monitor_state_path(agent_id, "supervisor.pid"))
     beat = read_json_file(codex_monitor_state_path(agent_id, "supervisor.heartbeat.json"))
@@ -379,7 +383,8 @@ def codex_monitor_status(agent_id: str) -> dict:
     return dict(agent_id=agent_id, supervisor_pid=sup.get("pid"),
                 supervisor_alive=pid_is_alive(sup.get("pid")), supervisor_updated_at=None,
                 watcher_pid=pid, watcher_alive=pid_is_alive(pid), watcher_updated_at=None,
-                watcher_last_scan_at=None, last_error=None, target={}, delivery="legacy")
+                watcher_last_scan_at=None, last_error=None, target={}, delivery="legacy",
+                watcher_freshness_verified=False)
 
 
 def format_age(timestamp: object) -> str:
@@ -411,9 +416,8 @@ def update_presence_heartbeat(agent_id: str) -> None:
         presence = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    presence["last_seen"] = utc_now()
     try:
-        path.write_text(json.dumps(presence, indent=2), encoding="utf-8")
+        config.merge_presence_fields(path, {"agent_last_seen": utc_now()})
     except OSError:
         return
 
@@ -553,6 +557,8 @@ def print_codex_monitor_status(agent_id: str) -> None:
     print(f"  Delivery: {status['delivery']}")
     print(f"  Watcher: pid={status['watcher_pid']} alive={status['watcher_alive']}")
     print(f"  Heartbeat: {format_age(status['watcher_updated_at'])}")
+    if not status.get("watcher_freshness_verified"):
+        print("  Watcher freshness unverified: no valid watcher_last_seen; agent activity is not a substitute.")
     print(f"  Attached process health: {'running' if codex_monitor_is_ready(status) else 'not ready'}")
     if status["delivery"] == "desktop-turn":
         print("  Delivery proof: a new task turn containing the nonce and its recipient acknowledgement.")

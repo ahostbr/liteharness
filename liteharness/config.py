@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -79,6 +80,30 @@ def atomic_write_json(path: Path, data: dict) -> None:
         raise
 
 
+def sync_legacy_activity(presence: dict) -> None:
+    """last_seen is compatibility recency, never proof of either actor's activity."""
+    clocks = []
+    for key in ("agent_last_seen", "watcher_last_seen"):
+        value = presence.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            stamp = datetime.fromisoformat(value)
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            clocks.append((stamp.timestamp(), value))
+        except ValueError:
+            continue
+    if clocks:
+        presence["last_seen"] = max(clocks)[1]
+
+
+def stamp_activity(presence: dict, timestamp: str, *, is_watcher: bool = False) -> None:
+    """Stamp only the caller's clock and derive the compatibility maximum."""
+    presence["watcher_last_seen" if is_watcher else "agent_last_seen"] = timestamp
+    sync_legacy_activity(presence)
+
+
 def merge_presence_fields(path: Path, updates: dict) -> bool:
     """Read-merge-write a presence file, touching ONLY the keys in `updates`.
 
@@ -98,7 +123,11 @@ def merge_presence_fields(path: Path, updates: dict) -> bool:
         base = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return False
+    if not isinstance(base, dict):
+        return False
     base.update(updates)
+    if "agent_last_seen" in updates or "watcher_last_seen" in updates:
+        sync_legacy_activity(base)
     atomic_write_json(path, base)
     return True
 

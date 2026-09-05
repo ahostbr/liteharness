@@ -220,6 +220,16 @@ def test_attached_watcher_native_pipe_ack_and_hook_exclusion(tmp_path):
     watcher = None
     try:
         wait_for(ready.exists)
+        # Registration precedes a real watcher. Supply a known live owner so
+        # the shared freshness predicate can distinguish it from an orphan.
+        agents = tmp_path / "agents"
+        agents.mkdir()
+        from datetime import datetime, timezone
+        (agents / "recipient.json").write_text(json.dumps({
+            "agent_id": "recipient", "session_pid": os.getpid(),
+            "model": "test-model", "tier": "worker",
+            "agent_last_seen": datetime.now(timezone.utc).isoformat(),
+        }))
         watcher = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         record = tmp_path / "codex_sessions" / "monitors" / "recipient.json"
         wait_for(record.exists)

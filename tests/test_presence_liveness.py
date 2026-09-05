@@ -59,10 +59,11 @@ class PresenceLivenessTests(unittest.TestCase):
         self.assertNotIn("watcher_pid", presence)
 
     def test_heartbeat_keeps_session_pid_and_writes_watcher_pid(self) -> None:
+        owner_pid = hooks.os.getpid()  # This control requires a live owner.
         path = self._presence_path("agent-123")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"agent_id": "agent-123", "session_pid": 12345, "last_seen": "old"}),
+            json.dumps({"agent_id": "agent-123", "session_pid": owner_pid, "last_seen": "old"}),
             encoding="utf-8",
         )
 
@@ -74,7 +75,7 @@ class PresenceLivenessTests(unittest.TestCase):
                     hooks.update_heartbeat(is_watcher=True)
 
         presence = json.loads(path.read_text(encoding="utf-8"))
-        self.assertEqual(presence["session_pid"], 12345)
+        self.assertEqual(presence["session_pid"], owner_pid)
         self.assertEqual(presence["watcher_pid"], 999)
         self.assertEqual(presence["watcher_ppid"], 111)
         self.assertNotIn("pid", presence)
