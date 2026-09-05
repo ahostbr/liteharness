@@ -278,6 +278,9 @@ def _merge_claude_hooks(settings_path: Path, hook_config: dict) -> bool:
         # 2026-09-04 while proving T350's fix on the real file: the only diff was
         # "\ No newline at end of file". An installer that cannot be run without
         # producing a diff makes its own no-op indistinguishable from a change.
+        # A first-time user may have no .claude directory yet. Create it before
+        # writing hooks, rather than relying on the later status-line installer.
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         return True
     except Exception as e:
