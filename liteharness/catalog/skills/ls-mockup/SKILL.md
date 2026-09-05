@@ -767,6 +767,17 @@ that needed it.
 6. **Arm the watcher before you share the URL** (see above). A driven page with nobody
    listening is a one-way page with extra steps — and the user has no way to tell, because
    from their side it looks exactly like a page that is being watched.
+7. **Every question carries the agent's recommendation** — which option you would pick and one
+   sentence of why, rendered beside the control (a quiet block above the `AskChoice`, not inside
+   the options). Counsel, not a default: the control is never pre-selected. A page of naked
+   choices makes the human do the analysis you already did; the point of the page is that they
+   read your reasoning and override it where they know better. (Ryan, 2026-09-05: "your
+   recommendations … to the skill req and this page".)
+8. **Every question section carries its own free-text box.** One `AskText` per `AskChoice` (or
+   per checklist), `promptId` `<question>-note`, two or three rows, optional — so the human can
+   qualify, override or explain an answer where they gave it. A single notes box at the bottom
+   of the page is not a substitute: by the time they reach it the answer it qualified is three
+   screens up.
 
 ## Operational gotchas
 
