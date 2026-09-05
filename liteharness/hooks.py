@@ -175,6 +175,15 @@ from . import inbox, config
 
 # Throttle: only check inbox every N seconds (default 10)
 CHECK_INTERVAL_SECONDS = 10
+
+# T372 — how current a watcher's heartbeat must be before the turn hook will leave mail
+# to it. The watcher stamps `last_seen` every loop iteration (~5 s), so 60 is twelve
+# missed beats: long enough that ordinary scheduling jitter never hands delivery back to
+# the hook, short enough that a stopped consumer costs one turn rather than silence.
+# ⚠️ THIS NUMBER IS THE MAXIMUM DELAY A MESSAGE CAN SUFFER when a watcher dies without
+# clearing its pid — raise it and you lengthen that window, lower it and two consumers
+# start racing again. It is named so that trade is arguable instead of buried.
+WATCHER_FRESH_SECONDS = 60
 LAST_CHECK_FILE = config.HARNESS_ROOT / ".last_inbox_check"
 LAST_CLEANUP_FILE = config.HARNESS_ROOT / ".last_inbox_cleanup"
 CLEANUP_INTERVAL_SECONDS = 3600  # Run cleanup at most once per hour
@@ -720,6 +729,46 @@ def _refresh_presence_model() -> None:
         config.merge_presence_fields(path, {"model": model})
 
 
+def _a_live_watcher_is_attached(agent_id: str) -> bool:
+    """True when THIS id's presence row names a watcher that is alive and heartbeating.
+
+    Only that id's own row is consulted, and that is what makes the field trustworthy:
+    `update_heartbeat(is_watcher=True)` stamps `watcher_pid` on the watcher's OWN id, so a
+    watcher bound to some other id leaves this row reading `watcher_pid: None` — measured
+    2026-09-05 on a seat whose watcher had resolved a session id instead of its agent id,
+    and None was the correct answer. Liveness and freshness are both required: a pid can
+    outlive the consumer that owned it (recycled), and a watcher process can be alive with
+    its consumer paused. Neither is visible from here, and neither needs to be — both stop
+    the heartbeat, so one freshness test covers them.
+
+    🔴 EVERY UNCERTAIN PATH RETURNS FALSE, WHICH MEANS THE HOOK DELIVERS. Unreadable row,
+    missing field, unparseable timestamp: the answer is "no watcher", because the two
+    mistakes are not symmetric. Delivering when a watcher would have is a DUPLICATE — one
+    extra copy in a turn, visible and harmless. Deferring when nothing is listening is
+    SILENCE. This function only ever authorises WITHHOLDING, so it must never withhold on
+    a guess.
+    """
+    try:
+        row = json.loads(
+            (config.get_root() / "agents" / f"{agent_id}.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return False
+    if not isinstance(row, dict):
+        return False
+    pid = row.get("watcher_pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or not _pid_alive(pid):
+        return False
+    last_seen = row.get("last_seen")
+    if not isinstance(last_seen, str) or not last_seen:
+        return False
+    try:
+        age = time.time() - datetime.fromisoformat(last_seen).timestamp()
+    except ValueError:
+        return False
+    return age < WATCHER_FRESH_SECONDS
+
+
 def check_inbox() -> None:
     """
     Check inbox for messages, output as system-reminder for hook injection.
@@ -734,6 +783,16 @@ def check_inbox() -> None:
     # mail to its attached consumer instead of archiving it from a turn hook.
     from liteharness.cli_scripts.codex.liteharness_watcher_supervisor import desktop_owner_active
     if _is_codex_hook_runtime() and desktop_owner_active(config.get_root(), agent_id):
+        return
+
+    # T372 — the same principle, for the runtime the branch above cannot reach. That guard
+    # needs BOTH conjuncts, so every Claude Code seat kept the defect while this file read
+    # as fixed: the hook printed and archived to done/ in one unconditional step, and a
+    # swallowed stdout filed a message as delivered that nobody saw (gate report 9aec3daa,
+    # 2026-09-05, taken during an 18 s watcher pause and recovered by hand from done/).
+    # Deferral is SILENT: the watcher renders it, and a second copy in the turn — or a note
+    # about having skipped one — is bookkeeping in someone's context.
+    if _a_live_watcher_is_attached(agent_id):
         return
 
     if not _should_check():
