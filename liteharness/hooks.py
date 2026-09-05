@@ -730,6 +730,12 @@ def check_inbox() -> None:
     """
     agent_id = config.get_agent_id()
 
+    # T370/T372: printing is not recipient acknowledgement. Leave wake-owned
+    # mail to its attached consumer instead of archiving it from a turn hook.
+    from liteharness.cli_scripts.codex.liteharness_watcher_supervisor import desktop_owner_active
+    if _is_codex_hook_runtime() and desktop_owner_active(config.get_root(), agent_id):
+        return
+
     if not _should_check():
         return
 

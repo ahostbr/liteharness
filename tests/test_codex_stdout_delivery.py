@@ -95,7 +95,8 @@ def test_installer_updates_all_codex_aliases(tmp_path):
     package = Path(cli.__file__).parent
     source = package / 'cli_scripts' / 'codex'
     for name in ['liteharness_notify.py', 'liteharness_inbox_watcher.py',
-                 'liteharness_watcher_supervisor.py', 'manual_liteharness.py']:
+                 'liteharness_watcher_supervisor.py', 'manual_liteharness.py',
+                 'desktop_delivery.py']:
         assert (root / 'liteharness' / 'scripts' / name).read_bytes() == (source / name).read_bytes()
     assert (root / 'liteharness-manual-start' / 'scripts' / 'manual_liteharness.py').read_bytes() == (source / 'manual_liteharness.py').read_bytes()
     canonical = (package / 'catalog' / 'skills' / 'ls-liteharness' / 'SKILL.md').read_bytes()

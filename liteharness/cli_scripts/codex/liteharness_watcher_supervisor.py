@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Single attached Codex stdout consumer (legacy supervisor entrypoint).
+"""Single attached Codex inbox consumer (legacy supervisor entrypoint).
 
 Launch in an attached tool terminal and read its output. Process liveness alone
 does not prove host-level asynchronous delivery. No detached child or UI injection.
 """
 from __future__ import annotations
 import argparse
+import json
 import os
 import re
 import stat
@@ -48,11 +49,32 @@ def acquire(handle) -> None:
         import fcntl
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+def desktop_owner_active(root: Path, agent_id: str) -> bool:
+    """Use the OS lock, not stale PID metadata, to suppress a hook reader."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", agent_id):
+        return False
+    state = root / "codex_sessions" / "monitors"
+    try:
+        record = json.loads((state / f"{agent_id}.json").read_text(encoding="utf-8"))
+        if record.get("agent_id") != agent_id or record.get("delivery") != "desktop-turn":
+            return False
+        with (state / f"{agent_id}.lock").open("r+b") as handle:
+            try:
+                acquire(handle)
+            except OSError:
+                return True
+    except (OSError, ValueError, AttributeError):
+        pass
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-id", default=os.environ.get("LITEHARNESS_AGENT_ID") or os.environ.get("CODEX_THREAD_ID"))
     parser.add_argument("--root", type=Path, default=config.get_root())
     parser.add_argument("--model", default=os.environ.get("LITEHARNESS_MODEL"))
+    parser.add_argument("--delivery", choices=["auto", "stdout", "desktop-turn"], default="auto")
+    parser.add_argument("--turn-id", help="Real originating turn id from Codex read_thread")
     args = parser.parse_args(argv)
     if not args.agent_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", args.agent_id):
         parser.error("an explicit valid --agent-id or LITEHARNESS_AGENT_ID is required")
@@ -60,6 +82,15 @@ def main(argv: list[str] | None = None) -> int:
         print("[LITEHARNESS] Refusing an unattached inbox consumer. Launch in a tool terminal with captured stdout.", file=sys.stderr)
         return 2
     configure_root(args.root.resolve())
+    delivery = args.delivery
+    if delivery == "auto":
+        delivery = "desktop-turn" if (
+            os.environ.get("CODEX_APP_TOOLS_PIPE_PATH")
+            and os.environ.get("CODEX_THREAD_ID") == args.agent_id
+        ) else "stdout"
+    if delivery == "desktop-turn":
+        from liteharness.cli_scripts.codex.desktop_delivery import DesktopClient
+        DesktopClient(args.agent_id, args.turn_id)
     os.environ["LITEHARNESS_AGENT_ID"] = args.agent_id
     if args.model:
         os.environ["LITEHARNESS_MODEL"] = args.model
@@ -75,12 +106,16 @@ def main(argv: list[str] | None = None) -> int:
         try:
             acquire(handle)
         except OSError:
-            print("[LITEHARNESS] A stdout watcher already owns this agent's inbox.", file=sys.stderr)
+            print("[LITEHARNESS] An attached watcher already owns this agent's inbox.", file=sys.stderr)
             return 3
-        config.atomic_write_json(record, {"agent_id": args.agent_id, "pid": os.getpid(), "delivery": "stdout"})
+        config.atomic_write_json(record, {"agent_id": args.agent_id, "pid": os.getpid(), "delivery": delivery})
         try:
             hooks.update_heartbeat(agent_id=args.agent_id, is_watcher=True)
-            hooks.watch_inbox(override_agent_id=args.agent_id)
+            if delivery == "desktop-turn":
+                from liteharness.cli_scripts.codex.desktop_delivery import run
+                run(config.get_root(), args.agent_id, args.turn_id)
+            else:
+                hooks.watch_inbox(override_agent_id=args.agent_id)
         except KeyboardInterrupt:
             return 0
         finally:
