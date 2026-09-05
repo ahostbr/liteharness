@@ -26,6 +26,12 @@ UserPromptSubmit inbox check. The existing test
 `tests/test_deregister_is_session_scoped.py` protects those additions. The code
 therefore already implements the required preserve-user-hooks policy.
 
+Command-path correction: this hook setup is invoked by **`liteharness init`**
+through `_INSTALLERS` (`cli.py:648-652`). The distinct **`liteharness install`**
+command (`cli.py:3889`) installs the skills/agents catalog through
+`installers.install_cli`; its adapter table does not include Claude. The merge
+measurements above apply to the hook installer, not the catalog command.
+
 ## Provenance
 
 Available oss main history contains three revisions each of
@@ -76,6 +82,13 @@ a temporary copy of the inspected settings, then installed each a second time:
 UserPromptSubmit matcher/hook contents were unchanged; PreCompact and PostCompact
 were unchanged. The live settings file's SHA-256 was identical before and after.
 The probe operated only on temporary copies and exported no settings contents.
+
+The fresh-file probe had an existing parent directory. A later outer-installer
+probe with no `.claude` directory exposed a different defect: hook writing fails
+before the status-line installer creates the directory, so the first setup call
+returns false and leaves only a status line. This does not invalidate the
+preservation result for existing settings, but it limits the fresh-install claim.
+The defect was reported separately; this documentation commit does not fix it.
 
 ## Recommendation
 
