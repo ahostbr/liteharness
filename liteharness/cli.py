@@ -1982,6 +1982,20 @@ def cmd_record_pattern(
     print(f"Recorded pattern: {schema_outcome} for {entry['task_id']}")
 
 
+def _scope_note(path: Path, project: str | None) -> str:
+    """Where the command looked, and why it looked there (T365).
+
+    🔴 A REFUSAL THAT NAMES ONLY THE TARGET SENDS THE READER TO AUDIT THE ONE
+    THING THAT WAS ALREADY CORRECT. Both attestation commands default their
+    project to the CWD, so the ordinary mistake — standing in one project while
+    holding an id that came from another — used to be reported as "resolves to
+    0 patterns", with advice to re-check the id. The id is fine; the store is
+    wrong, and nothing in the message said which store was read or how it was
+    chosen. Naming both makes the mismatch visible instead of deducible.
+    """
+    return f"searched {path} (store from {'--project' if project else 'cwd'})"
+
+
 def cmd_verify_pattern(
     pattern_id: str,
     level: str,
@@ -2037,7 +2051,9 @@ def cmd_verify_pattern(
     if not matches:
         refuse(
             f"'{pattern_id}' resolves to 0 patterns — attestation refused "
-            "(fail closed). task_ids are not attestation targets; take the "
+            f"(fail closed). {_scope_note(patterns_path, project)}; if that is "
+            "not the store you meant, pass --project ROOT. "
+            "task_ids are not attestation targets; take the "
             "Pattern-id from query-patterns output."
         )
     # Exact-id matching cannot resolve to more than one identity; >1 rows here
@@ -2102,7 +2118,9 @@ def cmd_revoke_pattern(
     if not prior:
         refuse(
             f"no verification '{prior_attestation_id}' targeting '{pattern_id}' "
-            "exists — revocation refused (fail closed)"
+            f"exists — revocation refused (fail closed). "
+            f"{_scope_note(attest_path, project)}; if that is not the store you "
+            "meant, pass --project ROOT"
         )
 
     event = {
