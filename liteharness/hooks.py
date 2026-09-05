@@ -876,11 +876,74 @@ def _recipient_is_live(agents_dir, to: str) -> bool:
     return False
 
 
+def _message_age_seconds(path: Path, msg: dict) -> float:
+    """How long ago this message was sent, from its envelope or failing that its file.
+
+    The envelope's `timestamp` is the truth — `inbox.send` always writes one — but a file
+    put here by anything else still has to age out, or an odd envelope becomes a message
+    that can never be collected. So mtime is the fallback rather than a licence to keep it
+    forever. If neither can be read the answer is 0.0, which reads as YOUNG and spares the
+    file: this number only ever authorises a deletion, and "cannot tell" must never do that.
+    """
+    ts = msg.get("timestamp")
+    if isinstance(ts, str) and ts:
+        try:
+            return time.time() - datetime.fromisoformat(ts).timestamp()
+        except ValueError:
+            pass
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _obs_swept_message(msg: dict, path: Path) -> None:
+    """Write down every message this sweep destroys — id, from, to (T364).
+
+    🔴 THE DELETION WAS THE ONLY EVENT WITH NO RECORD. `806ac83b` was reported to its
+    sender as "Sent message", removed inside a count ("Cleaned up 10 expired/orphaned
+    message(s)") that named nothing, and neither end knew for 1h40m. A count is not a
+    record: it cannot tell you WHICH message, so it cannot be checked against "the report
+    I never got". Never raises — instrumentation that can break a hook is worse than none.
+    """
+    try:
+        log_path = config.get_root() / "swept-messages.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "id": msg.get("id"),
+                        "from": msg.get("from"),
+                        "to": msg.get("to"),
+                        "sent_at": msg.get("timestamp"),
+                        "file": path.name,
+                        "reason": "orphaned: no presence file for recipient, past its TTL",
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
 def _purge_orphaned_messages() -> int:
-    """Remove messages in new/ addressed to agents with no presence file.
+    """Remove messages in new/ addressed to agents with no presence file, once expired.
 
     When agents die, their unclaimed messages sit in new/ forever because
     no agent will ever poll() and claim them. This purges those orphans.
+
+    🔴 BUT "NO PRESENCE FILE" IS ALSO THE CONDITION `send --force` EXISTS FOR (T364), so
+    an immediate deletion collects exactly the class a deliberate forced send creates.
+    Measured 2026-09-05: `806ac83b` accepted at 11:1x, swept at 12:3x, nobody told.
+    T350's `_recipient_is_live` below closes the RACE — a record momentarily absent when
+    `known_ids` was photographed — and CANNOT close this one, because it returns True only
+    where a record EXISTS and the forced send is the case where it never did.
+
+        A RECIPIENT THAT HAS NOT REGISTERED YET IS NOT THE SAME FACT AS ONE THAT NEVER WILL.
+        Only TIME separates them, so time is the discriminator: mail is held for its own
+        TTL and collected after it, instead of being judged the instant it lands.
     """
     agents_dir = config.get_root() / "agents"
     if not agents_dir.exists():
@@ -915,6 +978,16 @@ def _purge_orphaned_messages() -> int:
                 # cannot be noticed by anyone.
                 if _recipient_is_live(agents_dir, to):
                     continue
+                # T364 — the recipient may simply not have registered YET. Hold the
+                # message for its own TTL (the same clock `inbox.cleanup` uses, so the
+                # two collectors cannot disagree about when a message is expired) and
+                # only then treat absence as permanent.
+                ttl_minutes = msg.get("ttl_minutes")
+                if not isinstance(ttl_minutes, (int, float)) or ttl_minutes <= 0:
+                    ttl_minutes = inbox.DEFAULT_TTL_MINUTES
+                if _message_age_seconds(f, msg) < ttl_minutes * 60:
+                    continue
+                _obs_swept_message(msg, f)
                 f.unlink()
                 removed += 1
         except (json.JSONDecodeError, OSError):

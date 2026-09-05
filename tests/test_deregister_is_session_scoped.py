@@ -28,6 +28,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -334,11 +335,43 @@ class MailSweepSparesLiveRecipientsTests(unittest.TestCase):
                         "agent came back")
 
     def test_CONTROL_mail_for_a_genuinely_unknown_agent_is_still_purged(self) -> None:
-        """Without this the two tests above pass against a sweep that never deletes."""
+        """Without this the two tests above pass against a sweep that never deletes.
+
+        ⚠️ THE FIXTURE IS NOW AGED, AND THE ASSERTION IS UNCHANGED (T364). This test used
+        to write a message with the current time and expect it gone on the next sweep —
+        which is the very behaviour that destroyed `806ac83b`, a deliberate `send --force`
+        to an id that had no presence file yet. The sweep now holds an orphan for its own
+        TTL before collecting it, so "genuinely unknown" is no longer a question the sweep
+        can answer on arrival; it takes time to become true.
+
+        What is being kept here is this test's INTENT — the sweep must still collect real
+        orphans, or the two tests above are satisfiable by a sweep that deletes nothing.
+        Only the fixture moved: the message is now older than its TTL, which is what
+        "genuinely unknown" has to mean once a recipient is allowed to arrive late.
+        """
         msg = self._message("orphan", "99999999-0000-0000-0000-000000000000")
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=inbox.DEFAULT_TTL_MINUTES + 5))
+        msg.write_text(
+            json.dumps({"to": "99999999-0000-0000-0000-000000000000", "from": "someone",
+                        "body": "hi", "timestamp": stale.isoformat()}),
+            encoding="utf-8",
+        )
+        os.utime(msg, (stale.timestamp(), stale.timestamp()))
         removed = hooks._purge_orphaned_messages()
         self.assertFalse(msg.exists(), "the sweep no longer purges anything")
         self.assertEqual(1, removed)
+
+    def test_fresh_mail_to_an_unknown_agent_is_HELD_not_purged(self) -> None:
+        """The other half of the change, pinned next to the control it modified (T364).
+
+        Without this line sitting here, a future reader sees only that the control's
+        fixture grew a timestamp and has no way to tell whether that was a real behaviour
+        change or a test being bent to fit.
+        """
+        msg = self._message("just-sent", "99999999-0000-0000-0000-000000000000")
+        removed = hooks._purge_orphaned_messages()
+        self.assertTrue(msg.exists(), "a --force send was deleted before its recipient could register")
+        self.assertEqual(0, removed)
 
 
 if __name__ == "__main__":
