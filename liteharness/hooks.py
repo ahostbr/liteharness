@@ -411,9 +411,8 @@ def _apply_hook_context(hook_input: dict) -> None:
         # FIRST, above CLAUDE_CODE_SESSION_ID, and its own docstring calls it
         # "explicitly set by orchestrator". The hook is not the orchestrator.
         #
-        # Claude Code's payload session_id CHANGES ON EVERY --resume while
-        # CLAUDE_CODE_SESSION_ID stays stable, so writing the payload into the
-        # top slot silently re-identified a live agent on every resume: the
+        # Historical resumes supplied differing payload/environment identities;
+        # writing the payload into the top slot silently re-identified the agent:
         # registration flipped between two ids, `send <id>` alternated rc=0 and
         # rc=1 with nothing else changing, and a dispatch to the losing id was
         # indistinguishable from a task in progress. Measured 2026-08-29 across
@@ -422,10 +421,9 @@ def _apply_hook_context(hook_input: dict) -> None:
         #   AN ID MUST BE DERIVED FROM ONE SOURCE. Where the CLI publishes a
         #   stable id of its own, the per-session payload must not outrank it.
         #
-        # Codex and Copilot have no CLI-native stable id, so the payload IS
-        # their only source and this still populates it for them. Only the
-        # Claude Code case defers, and it defers to a value get_agent_id()
-        # already prefers one line further down.
+        # CLIs without this environment identity retain the payload fallback.
+        # T363 also observed both inputs changing together on a real resume;
+        # registration provenance, not this precedence rule, handles that case.
         #
         # ⚠️ T244 — AND THE DEFERRAL ABOVE HAS A PRECONDITION, SO IT IS NOT THE
         # WHOLE FIX. Where CLAUDE_CODE_SESSION_ID does not reach the hook there
@@ -461,6 +459,7 @@ def _apply_hook_context(hook_input: dict) -> None:
         os.environ["LITEHARNESS_HOOK_EVENT"] = str(hook_event)
 
     source = str(hook_input.get("source") or "").strip().lower()
+    os.environ["LITEHARNESS_HOOK_SOURCE"] = source
     env_cli = str(os.environ.get("LITEHARNESS_CLI") or "").strip().lower()
     is_litecode = (
         source == "litecode"
@@ -1212,7 +1211,7 @@ def _purge_stale_agents() -> int:
 
 
 def _authoritative_owner_of_pid(session_pid: int | None, exclude_id: str) -> str | None:
-    """The live record that already owns `session_pid` under an authoritative id.
+    """The explicit Claude takeover that already owns `session_pid`.
 
     Latest `registered_at` wins, the same string compare the roster and
     `_superseded_by_later_registration` use — three places deciding "who owns
@@ -1234,6 +1233,10 @@ def _authoritative_owner_of_pid(session_pid: int | None, exclude_id: str) -> str
         except (json.JSONDecodeError, OSError):
             continue
         if data.get("exited_at"):
+            continue
+        # A UUID is not proof of an intentional takeover. Ordinary startup
+        # records must not capture a later resume on the same CLI process.
+        if data.get("registration_source") != "takeover" or data.get("cli") != "claude-code":
             continue
         if _parse_positive_int(data.get("session_pid")) != session_pid:
             continue
@@ -1268,6 +1271,7 @@ def _obs_identity(resolved: str, adopted_from: str | None, session_pid: int | No
                         "payload_session_id": os.environ.get("LITEHARNESS_PAYLOAD_SESSION_ID"),
                         "session_pid": session_pid,
                         "hook_pid": os.getpid(),
+                        "hook_source": os.environ.get("LITEHARNESS_HOOK_SOURCE"),
                     }
                 )
                 + "\n"
@@ -1303,66 +1307,78 @@ def _record_belongs_to_process(agent_id: str, session_pid: int | None) -> bool:
     return registered >= started
 
 
+_IDENTITY_DECISION: dict = {}
+
+
+def _explicit_identity_override() -> bool:
+    return bool(
+        (os.environ.get("LITEHARNESS_AGENT_ID")
+         and os.environ.get("LITEHARNESS_AGENT_ID_FROM_PAYLOAD") != "1")
+        or os.environ.get("LITESUITE_AGENT_ID")
+    )
+
+
+def _identity_input_source() -> str:
+    if _explicit_identity_override():
+        return "explicit override"
+    if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "CLI environment"
+    if os.environ.get("LITEHARNESS_PAYLOAD_SESSION_ID"):
+        return "session payload"
+    return "configured identity"
+
+
+def _resume_startup_predecessors(agent_id: str, session_pid: int | None) -> list[str]:
+    """Identify known ordinary starts of this live process; never guess."""
+    if (
+        not session_pid
+        or config.get_cli() != "claude-code"
+        or _explicit_identity_override()
+        or os.environ.get("LITEHARNESS_HOOK_EVENT") != "SessionStart"
+        or os.environ.get("LITEHARNESS_HOOK_SOURCE") != "resume"
+        or os.environ.get("CLAUDE_CODE_SESSION_ID") != agent_id
+        or os.environ.get("LITEHARNESS_PAYLOAD_SESSION_ID") != agent_id
+    ):
+        return []
+    predecessors = []
+    for path in (config.get_root() / "agents").glob("*.json"):
+        if path.stem == agent_id:
+            continue
+        data = _read_presence(path)
+        if (
+            data.get("registration_source") == "startup"
+            and data.get("cli") == "claude-code"
+            and not data.get("exited_at")
+            and _parse_positive_int(data.get("session_pid")) == session_pid
+            and _record_belongs_to_process(path.stem, session_pid)
+        ):
+            predecessors.append(path.stem)
+    return predecessors
+
+
 def _adopt_pid_owner(agent_id: str) -> str:
-    """T244 — a resume must not out-register the name a takeover claimed.
+    """Protect explicit takeovers, not whichever startup UUID registered first.
 
-    🔴 THE HOOK IS NOT ENTITLED TO A SECOND IDENTITY FOR ONE SEAT. On a
-    `--resume` the payload `session_id` is a fresh one, so a second record lands
-    on the SAME `session_pid` as the record a `register --takeover` just claimed.
-    `_superseded_by_later_registration` compares nothing but `registered_at`, so
-    the newcomer wins for being newer and the taken-over name vanishes from
-    `discover`.
-        SUPERSESSION BY TIMESTAMP ALONE CANNOT TELL A SUCCESSOR FROM AN IMPOSTOR.
-
-    ⚠️ THE TRIGGER IS THE PID CLASH, NOT WHERE OUR ID CAME FROM. My first version
-    fired only when the id was a payload DEFAULT, on the theory that a present
-    `CLAUDE_CODE_SESSION_ID` makes `_apply_hook_context` defer and the clash
-    impossible. Sentinel refuted that from his own seat, measured: at 16:2x on
-    2026-09-03 his hook registered `99dd8b40` on pid 23100 while his shell's
-    `CLAUDE_CODE_SESSION_ID` read — and still reads — `bfc5e812`. Whether the var
-    was absent from the hook subprocess or Claude Code had already rewritten it
-    for the resumed session, the OUTCOME is the same and it is the outcome this
-    guards. So the condition is exactly the collision: a live, non-exited,
-    authoritative record owns our `session_pid` under a DIFFERENT id.
-        A GUARD KEYED TO THE CAUSE YOU GUESSED MISSES THE CAUSE YOU DID NOT.
-    Both values are logged on every register (`_obs_identity`) so the next reader
-    does not have to re-derive which of the two it was.
-
-    ⬜ ADOPTION RATHER THAN REFUSAL, and the alternatives are worse than the bug:
-    registering beside it loses the name, and registering without claiming the
-    pid makes the record read as an orphaned watcher — `_agent_record_live`
-    requires a live `session_pid` — so the seat would be unreachable instead of
-    misnamed. Adopting keeps one seat on one record and lets the identity block
-    print the id the agent must actually pass to `--agent-id` and `--from`.
-
-    ⚠️ IT CANNOT HIJACK A GENUINELY NEW SEAT, and that is a property of the key
-    rather than a promise: `_resolve_session_pid` walks to the nearest owning CLI
-    ancestor, which is the seat's OWN process, so two live sessions in one
-    terminal never share a `session_pid`. Codex and Copilot are untouched for the
-    same reason — their payload is their only id source, and adoption needs a
-    DIFFERENT authoritative record already holding the same live pid, which for
-    them does not exist. Both cases are armed rather than argued.
+    T363 replay: startup payload AND env said A; eleven seconds later resume
+    payload AND env said B. The old guard adopted A solely because it already
+    held the PID. Provenance distinguishes that start from T244's takeover.
     """
+    global _IDENTITY_DECISION
     session_pid = _resolve_session_pid()
-    owner = _authoritative_owner_of_pid(session_pid, agent_id)
-    if not owner:
-        _obs_identity(agent_id, adopted_from=None, session_pid=session_pid)
-        return agent_id
-    # ⬜ PID REUSE IS THE ONE WAY THIS COULD STEAL AN IDENTITY: after a reboot a
-    # new claude.exe can inherit a dead session's pid, and the dead record would
-    # then look like this seat's own earlier registration. A record written
-    # BEFORE the owning process started cannot belong to it. Best-effort —
-    # psutil is optional in this tree, and where it is missing the collision
-    # itself is still the better evidence.
-    if not _record_belongs_to_process(owner, session_pid):
-        _obs_identity(agent_id, adopted_from=None, session_pid=session_pid)
-        return agent_id
-    # Downstream readers resolve the id again (the watcher command, the check
-    # path); leaving the env pointing at the payload would re-split the identity
-    # one call later.
-    os.environ["LITEHARNESS_AGENT_ID"] = owner
-    _obs_identity(owner, adopted_from=agent_id, session_pid=session_pid)
-    return owner
+    _IDENTITY_DECISION = {"source": _identity_input_source(), "replaced": []}
+    # Codex Desktop tasks share a backend PID. This policy is Claude-specific.
+    owner = (
+        _authoritative_owner_of_pid(session_pid, agent_id)
+        if config.get_cli() == "claude-code" else None
+    )
+    if owner and _record_belongs_to_process(owner, session_pid):
+        os.environ["LITEHARNESS_AGENT_ID"] = owner
+        _IDENTITY_DECISION["source"] = f"protected explicit takeover {owner}"
+        _obs_identity(owner, adopted_from=agent_id, session_pid=session_pid)
+        return owner
+    _IDENTITY_DECISION["replaced"] = _resume_startup_predecessors(agent_id, session_pid)
+    _obs_identity(agent_id, adopted_from=None, session_pid=session_pid)
+    return agent_id
 
 
 def register_presence() -> None:
@@ -1418,8 +1434,16 @@ def register_presence() -> None:
     # watch_step telling the same agent its id did NOT come from a real session.
     # A block that contradicts itself teaches the agent to trust none of it.
     if has_authoritative_id:
-        id_line = ("That id is authoritative (session payload): pass it verbatim to --agent-id and --from,\n"
-                   "  never re-derive it from the filesystem.")
+        reason = _IDENTITY_DECISION.get("source", "configured identity")
+        replaced = _IDENTITY_DECISION.get("replaced", [])
+        replacement_note = (
+            "; resume supersedes this process's startup record " + ", ".join(replaced)
+            if replaced else ""
+        )
+        id_line = (
+            f"Resolved {agent_id} from {reason}{replacement_note}.\n"
+            "  Pass this resolved id verbatim to --agent-id and --from."
+        )
     else:
         id_line = ("That id is a LOCAL FALLBACK, not a real session id — re-register (below) before you\n"
                    "  use it for --agent-id or --from, or your messages will land under the wrong agent.")
@@ -1589,8 +1613,18 @@ def register_presence() -> None:
     project_id = os.environ.get("LITESUITE_PROJECT_ID") or existing.get("project_id") or ""
     pane_id = os.environ.get("LITESUITE_PANE_ID") or existing.get("pane_id") or ""
     leaf_id = os.environ.get("LITESUITE_LEAF_ID") or existing.get("leaf_id") or ""
+    registration_source = existing.get("registration_source")
+    if registration_source != "takeover":
+        if _explicit_identity_override():
+            registration_source = "takeover"
+        else:
+            hook_source = os.environ.get("LITEHARNESS_HOOK_SOURCE")
+            registration_source = hook_source if hook_source in {"startup", "resume"} else (
+                registration_source or "startup"
+            )
     presence = {
         "agent_id": agent_id,
+        "registration_source": registration_source,
         "model": prefer_known(model, existing.get("model", "")),
         "cli": prefer_known(cli, existing.get("cli", "")),
         "tier": tier,
@@ -1707,6 +1741,9 @@ def register_presence() -> None:
     # zero), and a boot-time traceback is how agents end up booting bare.
     try:
         config.atomic_write_json(path, presence)
+        # Existing roster logic supersedes the earlier ordinary record by
+        # registration time. Do not mutate it here: a concurrent explicit CLI
+        # takeover could have claimed it since the decision was read.
     except OSError as exc:
         print(f"[LITEHARNESS] presence write skipped ({exc.__class__.__name__}) — "
               f"the inbox watcher rewrites it on its next heartbeat.")
