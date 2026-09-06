@@ -1770,6 +1770,12 @@ def register_presence() -> None:
             print(f"  NOTE: requested name '{requested_name}' is held by live agent {holder} — keeping generated name.")
         else:
             naming.set_override(agent_id, requested_name)
+    # 🔴 T418-A. THE OVERRIDE'S MTIME IS ITS "LAST SEEN", NOT ITS NAMING DATE.
+    # `cleanup_stale_names` measures ABANDONMENT, and registration is the only
+    # honest evidence that a seat still wants its name — `set_override` writes
+    # once, so without this a seat named 31 days ago that has registered every
+    # day since would be swept the first night it is not running.
+    naming.touch_override(agent_id)
     presence["name"] = existing.get("name") or naming.get_name(agent_id)
 
     # Spawn mode: explicit env from the spawner FIRST. The old
