@@ -807,6 +807,7 @@ def cmd_send(
     from_id: str | None = None,
     thread_id: str | None = None,
     force: bool = False,
+    msg_type: str | None = None,
 ) -> None:
     """Send a message to another agent."""
     # `to` is POSITIONAL. Called flag-style (`send --to X --message Y`) it silently
@@ -880,6 +881,7 @@ def cmd_send(
         thread_id=resolved_thread,
         cli=config.get_cli(),
         model=config.get_model(),
+        msg_type=msg_type or inbox.DEFAULT_MSG_TYPE,
     )
     print(f"Sent message {msg_id[:8]} to {to}")
 
@@ -4143,7 +4145,7 @@ def main() -> None:
         if len(sys.argv) < 4:
             print(
                 "Usage: liteharness send <to-agent-id> <message> [--from <your-id>] "
-                "[--thread-id <id>] [--force]\n"
+                "[--thread-id <id>] [--type <label>] [--force]\n"
                 "   or: liteharness send <to-agent-id> --body-file <path> [--from <your-id>]\n"
                 "       Use --body-file for anything containing code, backticks or $ -- "
                 "the shell edits an inline body silently and still reports success."
@@ -4167,7 +4169,13 @@ def main() -> None:
         # body containing code, paths or shell metacharacters should be written to a
         # file and passed by path -- there is then no shell between the text and the
         # maildir, so there is nothing to mangle rather than a rule to remember.
-        flags = {"--project": None, "--from": None, "--thread-id": None, "--body-file": None}
+        flags = {
+            "--project": None,
+            "--from": None,
+            "--thread-id": None,
+            "--body-file": None,
+            "--type": None,
+        }
         bool_flags = {"--force": False}
         msg_tokens = []
         rest = sys.argv[3:]
@@ -4210,6 +4218,31 @@ def main() -> None:
                 print(f"Error: cannot read --body-file {body_file!r}: {exc}. Nothing was sent.",
                       file=sys.stderr)
                 sys.exit(1)
+        # A LABEL NOBODY CAN SET IS A FIELD NOBODY CAN USE. Until now `send` had no
+        # --type at all, so inbox.send's default was written for every CLI send and the
+        # `type` field carried no sender intent whatsoever. LiteSuite measured the cost
+        # while trying to build on it: across 105 live messages on 2026-09-06 the field
+        # held only "seat-message" (93), "notification" (11) and "message" (1) -- three
+        # labels, not one of them chosen by a sender (T279-A).
+        #
+        # Validated against a CLOSED SET and REFUSED rather than corrected. A typo like
+        # "REUSLT" stored verbatim would be read as an ordinary message forever -- this
+        # file's recurring defect, a send that reports success on something it quietly
+        # changed. What gets STORED is the canonical spelling, so a consumer can compare
+        # exactly without knowing that five labels are upper-case and the default is not.
+        msg_type = None
+        if flags["--type"] is not None:
+            msg_type = inbox.canonical_msg_type(flags["--type"])
+            if msg_type is None:
+                given = flags["--type"]
+                known = ", ".join(inbox.MESSAGE_TYPES)
+                print(
+                    f"Error: unknown --type {given!r}. NOTHING WAS SENT.\n"
+                    f"  Known types: {known}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
         # Fail closed. A send that reports success on a body it emptied is worse than a
         # send that refuses: the caller believes the message landed and never re-sends.
         if not msg_parts:
@@ -4219,7 +4252,15 @@ def main() -> None:
                 "[--thread-id <id>]"
             )
             sys.exit(1)
-        cmd_send(sys.argv[2], msg_parts, project, from_id, send_thread_id, bool_flags["--force"])
+        cmd_send(
+            sys.argv[2],
+            msg_parts,
+            project,
+            from_id,
+            send_thread_id,
+            bool_flags["--force"],
+            msg_type,
+        )
     elif cmd == "list":
         cmd_list()
     elif cmd == "inbox":
