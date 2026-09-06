@@ -146,6 +146,66 @@ def test_a_live_seat_is_never_swept_however_old_its_override(name_root):
     assert naming.get_override(SEAT) == CHOSEN
 
 
+def test_a_long_named_seat_that_keeps_registering_keeps_its_name(name_root, capsys):
+    """🔴 THE WINDOW MEASURES ABANDONMENT, NOT AGE OF THE NAME.
+
+    `set_override` writes ONCE, so the file's mtime is when the name was CHOSEN.
+    Keyed on that alone, a seat named 31 days ago that has registered every day
+    since is swept the first night it is not running — the original complaint
+    back again on a 30-day delay. Registration must refresh the clock.
+    """
+    naming.set_override(SEAT, CHOSEN)
+    age_override(name_root, SEAT, days=40)
+
+    register_session(SEAT, "startup")  # a normal day at work, 40 days later
+    capsys.readouterr()
+    end_the_session(name_root, SEAT)
+
+    # The sweep runs a day after that registration, not a day after the naming.
+    removed = naming.cleanup_stale_names(now=time.time() + 86400)
+
+    assert removed == 0, "a seat that registered yesterday was swept as abandoned"
+    assert naming.get_override(SEAT) == CHOSEN
+
+    register_session(SEAT, "resume")
+    row = json.loads((name_root / "agents" / f"{SEAT}.json").read_text())
+    assert row["name"] == CHOSEN
+
+
+def test_the_same_old_override_with_no_registration_is_still_swept(name_root):
+    """🔴 CONTROL — the pair to the arm above, differing only in the registration.
+
+    Same override, same age, same sweep time. If touching on registration were
+    replaced by touching on anything (a read, a name-collision scan), or if the
+    window simply stopped expiring, this arm fails while the one above still
+    passes. Two arms one variable apart are the only way to show the touch is
+    what did it.
+    """
+    naming.set_override(GHOST, "DeadName")
+    age_override(name_root, GHOST, days=40)
+
+    removed = naming.cleanup_stale_names(now=time.time() + 86400)
+
+    assert removed == 1, "an override abandoned for 40 days was kept"
+    assert naming.get_override(GHOST) is None
+
+
+def test_reading_a_name_does_not_refresh_it(name_root):
+    """⚠️ `get_name` MUST NOT TOUCH. `is_name_taken` walks every agent and calls
+    `get_name` on each, so refreshing on read would keep every ghost in the
+    registry alive forever on any collision check.
+    """
+    naming.set_override(GHOST, "DeadName")
+    age_override(name_root, GHOST, days=40)
+
+    assert naming.get_name(GHOST) == "DeadName"
+    naming.is_name_taken("DeadName")
+
+    assert naming.cleanup_stale_names(now=time.time() + 86400) == 1, (
+        "reading the name refreshed its clock — ghosts would never expire"
+    )
+
+
 def test_explicit_eviction_still_takes_the_name(name_root):
     """CONTROL — the deliberate path is unchanged.
 

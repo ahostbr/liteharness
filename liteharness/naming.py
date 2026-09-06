@@ -9,6 +9,7 @@ Design:
 """
 
 import hashlib
+import os
 import time
 from pathlib import Path
 
@@ -86,6 +87,34 @@ def set_override(agent_id: str, name: str) -> None:
     names_dir = config.get_root() / "names"
     names_dir.mkdir(parents=True, exist_ok=True)
     (names_dir / agent_id).write_text(name, encoding="utf-8")
+
+
+def touch_override(agent_id: str) -> bool:
+    """Mark this agent's override as still wanted. Returns True if one existed.
+
+    🔴 THE MTIME ON `names/<id>` MEANS "LAST SEEN", NOT "WHEN THE NAME WAS
+    CHOSEN". Do not read the file's date as a naming date — nothing else does.
+
+    `cleanup_stale_names` measures ABANDONMENT, and without this the only clock
+    available was `set_override`'s single write. A seat named 31 days ago that has
+    registered every day since would then end its session tonight and be swept at
+    the next sleep, coming back as `generate_name(<uuid>)` — the very complaint
+    T418-A exists to end, on a 30-day delay.
+
+    ⚠️ CALLED FROM THE REGISTRATION PATH ONLY, never from `get_name`. Reading a
+    name is not evidence that its owner is alive: `is_name_taken` walks every
+    agent and calls `get_name` on each, so touching on read would refresh every
+    ghost in the registry on any name collision check and no override would ever
+    expire.
+    """
+    path = config.get_root() / "names" / agent_id
+    if not path.exists():
+        return False
+    try:
+        os.utime(path, None)
+    except OSError:
+        return False  # read-only or vanished — the name is still served, just not refreshed
+    return True
 
 
 def clear_override(agent_id: str) -> None:
