@@ -1,4 +1,4 @@
-"""Find Claude Code conversation JSONL files by short ID prefix.
+"""Find and search Claude Code and Codex conversation archives.
 
 Usage:
     python find_conversation.py <id-prefix>                  # lookup only
@@ -29,17 +29,19 @@ import time
 import urllib.request
 
 # Fix Windows console encoding for Unicode output
-if sys.platform == "win32":
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import Counter
+from conversation_sources import conversation_files, identity, normalized_records, serialized_index
 
 LM_STUDIO_URL = "http://localhost:1234/v1"
 SCRIPT_DIR = Path(__file__).parent
-DB_PATH = SCRIPT_DIR / "convo_index.db"
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
+DATA_DIR = Path(os.environ.get("LITEHARNESS_CONVO_HOME", Path.home() / ".liteharness" / "conversations"))
+DB_PATH = DATA_DIR / "convo_index.db"
+PROJECTS_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
 
 # Embedding config — all-MiniLM-L6-v2 (384 dims)
 # Stored in LiteSuite's model directory so end users auto-download on first use
@@ -57,7 +59,7 @@ LITESUITE_MODEL_DIR = None  # None = use sentence-transformers default cache
 SKIP_PATTERNS = ["litegauntlet", "AppData-Local-Temp"]
 
 # Auto-index staleness
-INDEX_STALENESS_FILE = SCRIPT_DIR / ".last_indexed"
+INDEX_STALENESS_FILE = DATA_DIR / ".last_indexed"
 INDEX_STALENESS_SEC = 300  # 5 minutes
 
 
@@ -99,23 +101,15 @@ def _time_cutoff(hours=None, date=None):
 
 def find_conversations(prefix: str) -> list[dict]:
     prefix = prefix.lower().strip()
-    claude_dir = Path.home() / ".claude" / "projects"
-    if not claude_dir.exists():
-        return []
-
     results = []
-    for project_dir in claude_dir.iterdir():
-        if not project_dir.is_dir():
+    for file in conversation_files():
+        provider, conv_id, project = identity(file)
+        if not conv_id.lower().startswith(prefix):
             continue
-        for f in project_dir.glob(f"{prefix}*.jsonl"):
-            stat = f.stat()
-            results.append({
-                "path": str(f),
-                "project": project_dir.name,
-                "uuid": f.stem,
-                "size_bytes": stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-            })
+        stat = file.stat()
+        results.append({"path": str(file), "project": project, "uuid": conv_id,
+                        "provider": provider, "size_bytes": stat.st_size,
+                        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")})
 
     results.sort(key=lambda r: r["modified"], reverse=True)
     return results
@@ -130,16 +124,7 @@ def format_size(b: int) -> str:
 
 
 def extract_transcript(jsonl_path: str) -> dict:
-    entries = []
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    entries = list(normalized_records(jsonl_path))
 
     type_counts = Counter(e.get("type", "unknown") for e in entries)
     tool_names = []
@@ -269,7 +254,8 @@ def summarize_with_llm(transcript: str, project: str) -> str:
 
 def get_db(create=False):
     """Get database connection, optionally creating schema."""
-    conn = sqlite3.connect(str(DB_PATH))
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), timeout=120)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     if create:
@@ -292,6 +278,7 @@ def get_db(create=False):
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+            CREATE INDEX IF NOT EXISTS messages_file_path ON messages(file_path);
             CREATE TABLE IF NOT EXISTS indexed_files (
                 file_path TEXT PRIMARY KEY,
                 mtime REAL,
@@ -400,106 +387,93 @@ def extract_text_from_content(content):
 
 def parse_jsonl_messages(file_path):
     """Yield (metadata, text) from a JSONL conversation file."""
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("type") not in ("user", "assistant"):
-                    continue
-                if obj.get("isMeta"):
-                    continue
-                message = obj.get("message", {})
-                text = extract_text_from_content(message.get("content", ""))
-                if not text or len(text.strip()) < 10:
-                    continue
-                yield {
-                    "uuid": obj.get("uuid", ""),
-                    "timestamp": obj.get("timestamp", ""),
-                    "type": obj.get("type"),
-                    "text": text,
-                }
-    except Exception as e:
-        print(f"  Warning: {file_path}: {e}", file=sys.stderr)
+    for obj in normalized_records(file_path):
+        if obj.get("isMeta"):
+            continue
+        message = obj.get("message", {})
+        text = extract_text_from_content(message.get("content", ""))
+        if not text or not text.strip():
+            continue
+        yield {"uuid": obj.get("uuid", ""), "timestamp": obj.get("timestamp", ""),
+               "type": obj.get("type"), "text": text}
 
 
+@serialized_index
 def cmd_index(force=False):
     """Build or incrementally update the FTS5 search index."""
     conn = get_db(create=True)
-    if force:
-        print("Force rebuild — clearing index...")
-        conn.executescript(
-            "DELETE FROM messages; DELETE FROM messages_fts; "
-            "DELETE FROM indexed_files; DELETE FROM index_meta;")
+    try:
+        if force:
+            print("Force rebuild — clearing index...")
+            conn.executescript(
+                "DELETE FROM messages; DELETE FROM messages_fts; "
+                "DELETE FROM indexed_files; DELETE FROM index_meta;")
+            conn.commit()
+
+        indexed = dict(conn.execute("SELECT file_path, mtime FROM indexed_files"))
+
+        all_files = list(conversation_files())
+        print(f"Found {len(all_files)} conversation files")
+
+        to_index = [f for f in all_files
+                    if str(f) not in indexed or indexed[str(f)] < f.stat().st_mtime]
+        if not to_index:
+            print("Index is up to date.")
+            _print_stats(conn)
+            conn.close()
+            return
+
+        print(f"Indexing {len(to_index)} new/modified files...")
+        total_msgs = 0
+        t0 = time.time()
+
+        for i, jsonl_path in enumerate(to_index):
+            fp = str(jsonl_path)
+            provider, conv_id, project = identity(jsonl_path)
+            source_mtime = jsonl_path.stat().st_mtime
+
+            # Remove old entries if re-indexing. Delete by file_path instead of
+            # binding every old rowid; huge conversations can exceed SQLite's
+            # variable limit when materialized into a single IN (...) clause.
+            if fp in indexed:
+                conn.execute(
+                    "DELETE FROM messages_fts "
+                    "WHERE rowid IN (SELECT id FROM messages WHERE file_path = ?)",
+                    (fp,))
+                conn.execute("DELETE FROM messages WHERE file_path = ?", (fp,))
+
+            msg_count = 0
+            for msg in parse_jsonl_messages(jsonl_path):
+                conn.execute(
+                    "INSERT INTO messages (conversation_id, project, message_uuid, "
+                    "timestamp, msg_type, file_path) VALUES (?,?,?,?,?,?)",
+                    (conv_id, project, msg["uuid"], msg["timestamp"], msg["type"], fp))
+                rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                conn.execute("INSERT INTO messages_fts (rowid, content) VALUES (?,?)",
+                             (rowid, msg["text"]))
+                msg_count += 1
+
+            conn.execute(
+                "INSERT OR REPLACE INTO indexed_files (file_path, mtime, msg_count) "
+                "VALUES (?,?,?)", (fp, source_mtime, msg_count))
+            total_msgs += msg_count
+            conn.commit()
+
+            if (i + 1) % 50 == 0:
+                conn.commit()
+                print(f"  [{i+1}/{len(to_index)}] {total_msgs:,} messages...")
+
         conn.commit()
-
-    indexed = dict(conn.execute("SELECT file_path, mtime FROM indexed_files"))
-
-    all_files = [f for f in PROJECTS_DIR.rglob("*.jsonl")
-                 if not any(s in str(f) for s in SKIP_PATTERNS)]
-    print(f"Found {len(all_files)} conversation files")
-
-    to_index = [f for f in all_files
-                if str(f) not in indexed or indexed[str(f)] < f.stat().st_mtime]
-    if not to_index:
-        print("Index is up to date.")
+        conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_indexed', ?)",
+                     (datetime.now().isoformat(),))
+        conn.commit()
+        print(f"\nDone: {total_msgs:,} messages from {len(to_index)} files in {time.time()-t0:.1f}s")
         _print_stats(conn)
         conn.close()
-        return
+        _touch_staleness_file()
 
-    print(f"Indexing {len(to_index)} new/modified files...")
-    total_msgs = 0
-    t0 = time.time()
-
-    for i, jsonl_path in enumerate(to_index):
-        fp = str(jsonl_path)
-        rel = jsonl_path.relative_to(PROJECTS_DIR)
-        project = rel.parts[0] if rel.parts else "unknown"
-        conv_id = jsonl_path.stem
-
-        # Remove old entries if re-indexing. Delete by file_path instead of
-        # binding every old rowid; huge conversations can exceed SQLite's
-        # variable limit when materialized into a single IN (...) clause.
-        if fp in indexed:
-            conn.execute(
-                "DELETE FROM messages_fts "
-                "WHERE rowid IN (SELECT id FROM messages WHERE file_path = ?)",
-                (fp,))
-            conn.execute("DELETE FROM messages WHERE file_path = ?", (fp,))
-
-        msg_count = 0
-        for msg in parse_jsonl_messages(jsonl_path):
-            conn.execute(
-                "INSERT INTO messages (conversation_id, project, message_uuid, "
-                "timestamp, msg_type, file_path) VALUES (?,?,?,?,?,?)",
-                (conv_id, project, msg["uuid"], msg["timestamp"], msg["type"], fp))
-            rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute("INSERT INTO messages_fts (rowid, content) VALUES (?,?)",
-                         (rowid, msg["text"]))
-            msg_count += 1
-
-        conn.execute(
-            "INSERT OR REPLACE INTO indexed_files (file_path, mtime, msg_count) "
-            "VALUES (?,?,?)", (fp, jsonl_path.stat().st_mtime, msg_count))
-        total_msgs += msg_count
-
-        if (i + 1) % 50 == 0:
-            conn.commit()
-            print(f"  [{i+1}/{len(to_index)}] {total_msgs:,} messages...")
-
-    conn.commit()
-    conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_indexed', ?)",
-                 (datetime.now().isoformat(),))
-    conn.commit()
-    print(f"\nDone: {total_msgs:,} messages from {len(to_index)} files in {time.time()-t0:.1f}s")
-    _print_stats(conn)
-    conn.close()
-    _touch_staleness_file()
+    finally:
+        conn.close()
 
 
 def cmd_search(query, top_n=10, project_filter=None, msg_type=None, hours=None, date=None):
@@ -612,15 +586,18 @@ def _load_embedder():
 
     Prerequisites: pip install sentence-transformers
     """
-    from sentence_transformers import SentenceTransformer
     if not hasattr(_load_embedder, "_model"):
-        cache_dir = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
-        cache_label = cache_dir if cache_dir else "sentence-transformers default"
-        print(f"Loading embedding model: {EMBEDDING_MODEL} (cache: {cache_label})...")
-        _load_embedder._model = SentenceTransformer(
-            EMBEDDING_MODEL, cache_folder=cache_dir
-        )
-        print(f"  Loaded ({_load_embedder._model.get_sentence_embedding_dimension()} dims)")
+        backend = os.environ.get("LITEHARNESS_CONVO_EMBED_BACKEND", "onnx")
+        if backend == "onnx":
+            from embedding_backend import OnnxEmbedder
+            _load_embedder._model = OnnxEmbedder()
+        elif backend == "sentence-transformers":
+            from sentence_transformers import SentenceTransformer
+            _load_embedder._model = SentenceTransformer(
+                EMBEDDING_MODEL, cache_folder=os.environ.get("SENTENCE_TRANSFORMERS_HOME"))
+        else:
+            raise ValueError("LITEHARNESS_CONVO_EMBED_BACKEND must be onnx or sentence-transformers")
+        print(f"Loaded {EMBEDDING_MODEL} ({backend}, 384 dims)")
     return _load_embedder._model
 
 
@@ -653,107 +630,68 @@ def _chunk_conversation(file_path):
     return chunks
 
 
+@serialized_index
 def cmd_index_embeddings(force=False):
     """Build or incrementally update vector embeddings for conversations."""
     conn = get_db(create=True)
-    _ensure_embedding_tables(conn)
+    try:
+        _ensure_embedding_tables(conn)
 
-    if force:
-        print("Force rebuild — clearing embeddings...")
-        conn.executescript("DELETE FROM embeddings; DELETE FROM embedded_files;")
-        conn.commit()
+        if force:
+            print("Force rebuild — clearing embeddings...")
+            conn.executescript("DELETE FROM embeddings; DELETE FROM embedded_files;")
+            conn.commit()
 
-    embedded = dict(conn.execute("SELECT file_path, mtime FROM embedded_files").fetchall())
+        embedded = dict(conn.execute("SELECT file_path, mtime FROM embedded_files").fetchall())
 
-    all_files = [f for f in PROJECTS_DIR.rglob("*.jsonl")
-                 if not any(s in str(f) for s in SKIP_PATTERNS)]
-    print(f"Found {len(all_files)} conversation files")
+        all_files = list(conversation_files())
+        print(f"Found {len(all_files)} conversation files")
 
-    to_embed = [f for f in all_files
-                if str(f) not in embedded or embedded[str(f)] < f.stat().st_mtime]
-    if not to_embed:
-        print("Embeddings are up to date.")
+        to_embed = [f for f in all_files
+                    if str(f) not in embedded or embedded[str(f)] < f.stat().st_mtime]
+        if not to_embed:
+            print("Embeddings are up to date.")
+            _print_embedding_stats(conn)
+            conn.close()
+            return
+
+        print(f"Embedding {len(to_embed)} new/modified files...")
+        model = _load_embedder()
+        total_chunks = 0
+        t0 = time.time()
+        for i, jsonl_path in enumerate(to_embed):
+            fp = str(jsonl_path)
+            provider, conv_id, project = identity(jsonl_path)
+            source_mtime = jsonl_path.stat().st_mtime
+            chunks = _chunk_conversation(jsonl_path)
+            # Encode before the transaction. A failed batch must not mark the file
+            # complete or destroy the previous vectors.
+            vectors = model.encode([c["text"] for c in chunks],
+                                   convert_to_numpy=True, batch_size=EMBEDDING_BATCH_SIZE) if chunks else []
+            with conn:
+                conn.execute("DELETE FROM embeddings WHERE conversation_id = ?", (conv_id,))
+                for chunk, vector in zip(chunks, vectors):
+                    conn.execute(
+                        "INSERT INTO embeddings (conversation_id, project, chunk_index, chunk_text, "
+                        "timestamp_start, timestamp_end, embedding) VALUES (?,?,?,?,?,?,?)",
+                        (conv_id, project, chunk["index"], chunk["text"], chunk["ts_start"],
+                         chunk["ts_end"], _vec_to_blob(vector.tolist())))
+                conn.execute(
+                    "INSERT OR REPLACE INTO embedded_files (file_path, mtime, chunk_count) VALUES (?,?,?)",
+                    (fp, source_mtime, len(chunks)))
+            total_chunks += len(chunks)
+            if (i + 1) % 10 == 0:
+                elapsed = time.time() - t0
+                print(f"  [{i+1}/{len(to_embed)}] {total_chunks:,} chunks ({total_chunks/max(elapsed,0.001):.0f}/s)...", flush=True)
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_embedded', ?)",
+                         (datetime.now().isoformat(),))
+        print(f"Done: {total_chunks:,} chunks in {time.time()-t0:.1f}s")
         _print_embedding_stats(conn)
         conn.close()
-        return
 
-    print(f"Embedding {len(to_embed)} new/modified files...")
-    model = _load_embedder()
-    total_chunks = 0
-    t0 = time.time()
-
-    batch_texts = []
-    batch_meta = []
-
-    for i, jsonl_path in enumerate(to_embed):
-        fp = str(jsonl_path)
-        rel = jsonl_path.relative_to(PROJECTS_DIR)
-        project = rel.parts[0] if rel.parts else "unknown"
-        conv_id = jsonl_path.stem
-
-        # Remove old embeddings if re-indexing
-        if fp in embedded:
-            conn.execute("DELETE FROM embeddings WHERE conversation_id = ?", (conv_id,))
-
-        chunks = _chunk_conversation(jsonl_path)
-        for chunk in chunks:
-            batch_texts.append(chunk["text"])
-            batch_meta.append({
-                "conv_id": conv_id,
-                "project": project,
-                "chunk_index": chunk["index"],
-                "chunk_text": chunk["text"],
-                "ts_start": chunk["ts_start"],
-                "ts_end": chunk["ts_end"],
-            })
-
-        # Flush batch when large enough
-        if len(batch_texts) >= EMBEDDING_BATCH_SIZE:
-            embeddings = model.encode(batch_texts, convert_to_numpy=True, batch_size=EMBEDDING_BATCH_SIZE)
-            for emb, meta in zip(embeddings, batch_meta):
-                conn.execute(
-                    "INSERT OR REPLACE INTO embeddings "
-                    "(conversation_id, project, chunk_index, chunk_text, "
-                    "timestamp_start, timestamp_end, embedding) VALUES (?,?,?,?,?,?,?)",
-                    (meta["conv_id"], meta["project"], meta["chunk_index"],
-                     meta["chunk_text"], meta["ts_start"], meta["ts_end"],
-                     _vec_to_blob(emb.tolist())))
-            total_chunks += len(batch_texts)
-            batch_texts.clear()
-            batch_meta.clear()
-
-        conn.execute(
-            "INSERT OR REPLACE INTO embedded_files (file_path, mtime, chunk_count) "
-            "VALUES (?,?,?)", (fp, jsonl_path.stat().st_mtime, len(chunks)))
-
-        if (i + 1) % 100 == 0:
-            conn.commit()
-            elapsed = time.time() - t0
-            rate = total_chunks / elapsed if elapsed > 0 else 0
-            print(f"  [{i+1}/{len(to_embed)}] {total_chunks:,} chunks ({rate:.0f} chunks/s)...")
-
-    # Flush remaining
-    if batch_texts:
-        embeddings = model.encode(batch_texts, convert_to_numpy=True, batch_size=EMBEDDING_BATCH_SIZE)
-        for emb, meta in zip(embeddings, batch_meta):
-            conn.execute(
-                "INSERT OR REPLACE INTO embeddings "
-                "(conversation_id, project, chunk_index, chunk_text, "
-                "timestamp_start, timestamp_end, embedding) VALUES (?,?,?,?,?,?,?)",
-                (meta["conv_id"], meta["project"], meta["chunk_index"],
-                 meta["chunk_text"], meta["ts_start"], meta["ts_end"],
-                 _vec_to_blob(emb.tolist())))
-        total_chunks += len(batch_texts)
-
-    conn.commit()
-    conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_embedded', ?)",
-                 (datetime.now().isoformat(),))
-    conn.commit()
-    elapsed = time.time() - t0
-    print(f"\nDone: {total_chunks:,} chunks from {len(to_embed)} files in {elapsed:.1f}s "
-          f"({total_chunks/elapsed:.0f} chunks/s)")
-    _print_embedding_stats(conn)
-    conn.close()
+    finally:
+        conn.close()
 
 
 def cmd_search_semantic(query, top_n=10, project_filter=None, hours=None, date=None):
@@ -890,6 +828,8 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
     # ── Vector pass ──
     emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     vec_scores = {}
+    if emb_count == 0:
+        print("[hybrid] No vectors indexed; returning keyword-only results. Run --index-embeddings.", file=sys.stderr)
     if emb_count > 0:
         model = _load_embedder()
         query_vec = model.encode(query, convert_to_numpy=True)
@@ -939,7 +879,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
         proj, ts, snippet = bm25_snippets.get(cid, ("unknown", "", ""))
         merged.append((cid, proj, ts, snippet, combined))
 
-    merged.sort(key=lambda x: x[4], reverse=True)
+    merged.sort(key=lambda x: (-x[4], x[0]))
     _print_search_results(merged[:top_n], query, "hybrid")
     conn.close()
 
@@ -1007,84 +947,89 @@ def _parse_memory_file(file_path):
     }
 
 
+@serialized_index
 def cmd_index_memory(force=False):
     """Build or incrementally update the memory .md search index."""
     conn = get_db(create=True)
-    _ensure_memory_tables(conn)
+    try:
+        _ensure_memory_tables(conn)
 
-    if force:
-        print("Force rebuild — clearing memory index...")
-        conn.executescript(
-            "DELETE FROM memory_content; DELETE FROM memory_fts; DELETE FROM memory_files;")
-        conn.commit()
+        if force:
+            print("Force rebuild — clearing memory index...")
+            conn.executescript(
+                "DELETE FROM memory_content; DELETE FROM memory_fts; DELETE FROM memory_files;")
+            conn.commit()
 
-    indexed = dict(conn.execute("SELECT file_path, mtime FROM memory_files"))
+        indexed = dict(conn.execute("SELECT file_path, mtime FROM memory_files"))
 
-    # Find all memory .md files across all projects
-    all_memory = []
-    for project_dir in PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        memory_dir = project_dir / "memory"
-        if not memory_dir.is_dir():
-            continue
-        for md_file in memory_dir.glob("*.md"):
-            if md_file.name == "MEMORY.md":
+        # Find all memory .md files across all projects
+        all_memory = []
+        for project_dir in (PROJECTS_DIR.iterdir() if PROJECTS_DIR.exists() else []):
+            if not project_dir.is_dir():
                 continue
-            all_memory.append((md_file, project_dir.name))
+            memory_dir = project_dir / "memory"
+            if not memory_dir.is_dir():
+                continue
+            for md_file in memory_dir.glob("*.md"):
+                if md_file.name == "MEMORY.md":
+                    continue
+                all_memory.append((md_file, project_dir.name))
 
-    print(f"Found {len(all_memory)} memory files")
+        print(f"Found {len(all_memory)} memory files")
 
-    to_index = [(f, p) for f, p in all_memory
-                if str(f) not in indexed or indexed[str(f)] < f.stat().st_mtime]
-    if not to_index:
-        print("Memory index is up to date.")
+        to_index = [(f, p) for f, p in all_memory
+                    if str(f) not in indexed or indexed[str(f)] < f.stat().st_mtime]
+        if not to_index:
+            print("Memory index is up to date.")
+            _print_memory_stats(conn)
+            conn.close()
+            return
+
+        print(f"Indexing {len(to_index)} new/modified memory files...")
+        total = 0
+        t0 = time.time()
+
+        for md_path, project in to_index:
+            fp = str(md_path)
+            parsed = _parse_memory_file(fp)
+            if not parsed:
+                continue
+
+            # Remove old entry if re-indexing
+            if fp in indexed:
+                old = conn.execute(
+                    "SELECT rowid FROM memory_content WHERE file_path = ?", (fp,)).fetchone()
+                if old:
+                    conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (old[0],))
+                    conn.execute("DELETE FROM memory_content WHERE rowid = ?", (old[0],))
+
+            conn.execute(
+                "INSERT INTO memory_content (file_path, name, description, type, body) "
+                "VALUES (?,?,?,?,?)",
+                (fp, parsed["name"], parsed["description"], parsed["type"], parsed["body"]))
+            rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "INSERT INTO memory_fts (rowid, name, description, type, body) VALUES (?,?,?,?,?)",
+                (rowid, parsed["name"], parsed["description"], parsed["type"], parsed["body"]))
+
+            conn.execute(
+                "INSERT OR REPLACE INTO memory_files (file_path, project, name, description, type, mtime) "
+                "VALUES (?,?,?,?,?,?)",
+                (fp, project, parsed["name"], parsed["description"], parsed["type"],
+                 md_path.stat().st_mtime))
+            total += 1
+
+        conn.commit()
+        conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_memory_indexed', ?)",
+                     (datetime.now().isoformat(),))
+        conn.commit()
+        print(f"\nDone: {total} memory files indexed in {time.time()-t0:.1f}s")
         _print_memory_stats(conn)
         conn.close()
-        return
+        _touch_staleness_file()
 
-    print(f"Indexing {len(to_index)} new/modified memory files...")
-    total = 0
-    t0 = time.time()
-
-    for md_path, project in to_index:
-        fp = str(md_path)
-        parsed = _parse_memory_file(fp)
-        if not parsed:
-            continue
-
-        # Remove old entry if re-indexing
-        if fp in indexed:
-            old = conn.execute(
-                "SELECT rowid FROM memory_content WHERE file_path = ?", (fp,)).fetchone()
-            if old:
-                conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (old[0],))
-                conn.execute("DELETE FROM memory_content WHERE rowid = ?", (old[0],))
-
-        conn.execute(
-            "INSERT INTO memory_content (file_path, name, description, type, body) "
-            "VALUES (?,?,?,?,?)",
-            (fp, parsed["name"], parsed["description"], parsed["type"], parsed["body"]))
-        rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute(
-            "INSERT INTO memory_fts (rowid, name, description, type, body) VALUES (?,?,?,?,?)",
-            (rowid, parsed["name"], parsed["description"], parsed["type"], parsed["body"]))
-
-        conn.execute(
-            "INSERT OR REPLACE INTO memory_files (file_path, project, name, description, type, mtime) "
-            "VALUES (?,?,?,?,?,?)",
-            (fp, project, parsed["name"], parsed["description"], parsed["type"],
-             md_path.stat().st_mtime))
-        total += 1
-
-    conn.commit()
-    conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_memory_indexed', ?)",
-                 (datetime.now().isoformat(),))
-    conn.commit()
-    print(f"\nDone: {total} memory files indexed in {time.time()-t0:.1f}s")
-    _print_memory_stats(conn)
-    conn.close()
-    _touch_staleness_file()
+    finally:
+        conn.close()
 
 
 def cmd_search_memory(query, top_n=10, mem_type=None):
@@ -1227,8 +1172,19 @@ def _print_stats(conn):
     # Show embedding stats if table exists
     _ensure_embedding_tables(conn)
     emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-    if emb_count > 0:
-        _print_embedding_stats(conn)
+    _print_embedding_stats(conn)
+    print(f"Shared index: {DB_PATH}")
+    for label, pattern in (("Codex", "%codex%"), ("Claude", "%claude%")):
+        count = conn.execute("SELECT COUNT(*) FROM indexed_files WHERE lower(file_path) LIKE ?", (pattern,)).fetchone()[0]
+        print(f"{label} indexed files: {count:,}")
+    dates = conn.execute("SELECT MIN(timestamp), MAX(timestamp) FROM messages WHERE timestamp != ''").fetchone()
+    print(f"Message dates: {dates[0]} through {dates[1]}")
+    available = list(conversation_files())
+    embedded = dict(conn.execute("SELECT file_path, mtime FROM embedded_files"))
+    current = sum(str(file) in embedded and embedded[str(file)] >= file.stat().st_mtime
+                  for file in available)
+    print(f"Current source files embedded: {current:,}/{len(available):,}")
+
 
     # Show memory stats if table exists
     _print_memory_stats(conn)
@@ -1248,7 +1204,7 @@ def main():
     # ── Auto-index if stale (before any search/lookup) ──────────────────
     is_index_cmd = "--index" in args or "--index-embeddings" in args or "--index-memory" in args
     is_stats_cmd = "--stats" in args
-    if not is_index_cmd and not is_stats_cmd:
+    if not is_index_cmd and not is_stats_cmd and "--no-refresh" not in args:
         _check_and_auto_index()
 
     # ── Search mode ─────────────────────────────────────────────────────
