@@ -9,6 +9,7 @@ Design:
 """
 
 import hashlib
+import time
 from pathlib import Path
 
 from . import config
@@ -150,21 +151,60 @@ def is_name_taken(name: str, exclude_id: str | None = None) -> str | None:
     return None
 
 
-def cleanup_stale_names() -> int:
-    """Remove name overrides for agents that no longer have presence files."""
+#: How long a name override outlives the presence file it belonged to.
+#:
+#: 🔴 T418-A. This used to be zero: the sweep deleted an override the instant no
+#: presence file existed for that id. But a presence file is removed by ORDINARY
+#: SESSION END — `hooks.deregister()`'s own docstring says "Remove agent presence
+#: file when the SESSION ends" — so a seat that shut down cleanly and resumed came
+#: back under `generate_name(<uuid>)` instead of its name. Measured: this repo's
+#: own seats held their overrides only for the two minutes their humans spent
+#: re-taking the names by hand on 2026-09-06.
+#:     A CLEANUP KEYED ON "THE PRESENCE FILE IS GONE" CANNOT TELL A SEAT THAT
+#:     ENDED FROM A SEAT THAT DIED, BECAUSE ENDING IS HOW A SEAT STOPS.
+#: Days rather than hours because the thing protected is an identity a human
+#: chose. The cost of keeping a dead name too long is that nobody can reuse that
+#: word for a while — against a live seat silently losing its name overnight.
+NAME_OVERRIDE_RETENTION_DAYS = 30
+
+
+def cleanup_stale_names(
+    retention_days: float = NAME_OVERRIDE_RETENTION_DAYS,
+    now: float | None = None,
+) -> int:
+    """Remove name overrides long abandoned by agents that no longer exist.
+
+    ⚠️ ABSENCE OF A PRESENCE FILE IS NOT EVIDENCE OF DEATH — it is the normal
+    state of every seat between sessions. The discriminator is AGE: an override
+    whose owner has not registered for `retention_days` is a ghost's; a younger
+    one belongs to a seat that may still come back, and it is kept.
+
+    ⬜ THIS IS NOT THE URGENT PATH FOR RECLAIMING A NAME, deliberately.
+    `cli._evict_agent_records` moves the override out with the presence file the
+    moment an explicit `--takeover` reclaims a dead ghost's name, so nobody has
+    to wait out this window to get a name back.
+    """
     names_dir = config.get_root() / "names"
     agents_dir = config.get_root() / "agents"
 
     if not names_dir.exists():
         return 0
 
+    cutoff = (now if now is not None else time.time()) - retention_days * 86400
     removed = 0
     for f in names_dir.iterdir():
         if not f.is_file():
             continue
         agent_id = f.name
         presence = agents_dir / f"{agent_id}.json"
-        if not presence.exists():
-            f.unlink(missing_ok=True)
-            removed += 1
+        if presence.exists():
+            continue
+        try:
+            touched = f.stat().st_mtime
+        except OSError:
+            continue  # vanished or unreadable mid-sweep — not ours to judge
+        if touched > cutoff:
+            continue  # recent enough that its seat may simply be between sessions
+        f.unlink(missing_ok=True)
+        removed += 1
     return removed
