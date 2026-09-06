@@ -38,6 +38,38 @@ def make_filename(priority: str = "normal") -> str:
     return f"{ts}__{priority}__{uid}.json"
 
 
+#: The label written when a caller names none. Unchanged since the field existed.
+DEFAULT_MSG_TYPE = "notification"
+
+#: The labels `send` accepts, in their canonical spelling.
+#:
+#: A message's `type` was FREE-FORM and the CLI could not set it at all, so every
+#: CLI send wrote DEFAULT_MSG_TYPE and no consumer could ever tell a question from
+#: a result. LiteSuite's voice announcer wanted exactly that distinction and
+#: measured the cost: across 105 live messages on 2026-09-06 the field held only
+#: "seat-message" (93), "notification" (11) and "message" (1) — three labels, none
+#: of them chosen by the sender.
+#:
+#: A CLOSED SET IS THE POINT. Free-form was not a feature; it is why nothing could
+#: be built on the field. A typo like "REUSLT" would otherwise be accepted, stored,
+#: and silently read as an ordinary message forever.
+MESSAGE_TYPES = ("QUESTION", "ANSWER", "TASK", "RESULT", "PROGRESS", DEFAULT_MSG_TYPE)
+
+
+def canonical_msg_type(label: str) -> Optional[str]:
+    """The canonical spelling of `label`, or None when it is not a known type.
+
+    Matching is case-insensitive so a caller need not remember that five labels
+    are upper-case and the default is not; the value STORED is always the
+    canonical one, so consumers can compare exactly.
+    """
+    stripped = label.strip()
+    for known in MESSAGE_TYPES:
+        if stripped.lower() == known.lower():
+            return known
+    return None
+
+
 def send(
     from_agent: str,
     to_agent: str,
@@ -46,7 +78,7 @@ def send(
     thread_id: Optional[str] = None,
     reply_to: Optional[str] = None,
     priority: str = "normal",
-    msg_type: str = "notification",
+    msg_type: str = DEFAULT_MSG_TYPE,
     project: Optional[str] = None,
     ttl_minutes: int = DEFAULT_TTL_MINUTES,
     cli: str = "unknown",
