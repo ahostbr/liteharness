@@ -1376,6 +1376,78 @@ def _resume_startup_predecessors(agent_id: str, session_pid: int | None) -> list
     return predecessors
 
 
+def _watch_identity_after_supersede(auto_id: str) -> tuple[str | None, str]:
+    """Follow a RETIRED id to the registration that replaced it, or refuse.
+
+    🔴 T418. `watch-auto` and `config.get_agent_id()` already share their env
+    chain — same variables, same order. What register has and this does not is
+    the PID-AWARE step: `_adopt_pid_owner` writes its answer into `os.environ`,
+    which is process-local, and the watcher is a SEPARATE PROCESS launched with
+    whatever environment the session had at the time.
+
+    MEASURED on this machine 2026-09-06, one pid (30216), two SessionStart hooks
+    six seconds apart: startup resolved f755a243, resume resolved 11679396. The
+    register side retired the startup record exactly as T363 requires; the
+    watcher, holding the pre-resume environment, armed on the retired id and
+    printed a healthy line while every other seat addressed the live one.
+        A WATCHER ON THE WRONG ID IS INDISTINGUISHABLE FROM A HEALTHY ONE, and
+        the failure is silent at BOTH ends — the sender's `send` succeeds and the
+        recipient never wakes.
+
+    ⬜ IT ASKS THE SAME QUESTION THE ROSTER ASKS, deliberately.
+    `_superseded_by_later_registration` is the single implementation of "a later
+    registration owns this pid", and its own docstring records what happened when
+    that rule had two: `discover` and `register --takeover` disagreed about the
+    same record (T141-P). This is not a fourth opinion.
+
+    Returns `(id_to_watch, message)`. `id_to_watch is None` means REFUSE — never
+    guess, because guessing wrong drains another agent's inbox.
+    """
+    from . import cli as _cli  # local import: cli imports hooks (see cli.py:145)
+
+    data = _read_presence(config.get_root() / "agents" / f"{auto_id}.json")
+    # No record is not evidence of anything. A watcher may legitimately start
+    # before its own registration lands, and refusing here would invent a new
+    # failure mode for every first-run seat rather than guard an existing one.
+    if not data:
+        return auto_id, ""
+    if not _cli._superseded_by_later_registration(auto_id, data):
+        return auto_id, ""
+
+    session_pid = _parse_positive_int(data.get("session_pid"))
+    successors = []
+    for entry in (config.get_root() / "agents").glob("*.json"):
+        if entry.stem == auto_id:
+            continue
+        other = _read_presence(entry)
+        if (
+            not other
+            or other.get("exited_at")
+            or _parse_positive_int(other.get("session_pid")) != session_pid
+            or _cli._superseded_by_later_registration(entry.stem, other)
+        ):
+            continue
+        successors.append(entry.stem)
+
+    if len(successors) == 1:
+        return successors[0], (
+            f"[LITEHARNESS] watch-auto: the environment named {auto_id}, which a later "
+            f"registration on pid {session_pid} has RETIRED. Watching {successors[0]} "
+            "instead — the id this process is actually registered as.\n"
+            "  (A resume rewrites the session id; a watcher launched before it keeps the "
+            "old one. Watching the retired id would leave this seat deaf while looking "
+            "healthy.)"
+        )
+    return None, (
+        f"[LITEHARNESS] watch-auto REFUSED: the environment named {auto_id}, which a later "
+        f"registration on pid {session_pid} has retired, and {len(successors)} live "
+        f"successors were found — {successors or 'none'}. Refusing to guess: watching the "
+        "wrong id delivers another agent's messages here and leaves that agent deaf.\n"
+        "  Start it explicitly instead:\n"
+        "  python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>"
+    )
+
+
 def _adopt_pid_owner(agent_id: str) -> str:
     """Protect explicit takeovers, not whichever startup UUID registered first.
 
@@ -3061,8 +3133,17 @@ def main() -> None:
                 file=sys.stderr,
             )
             return
-        print(f"[LITEHARNESS] watch-auto resolved agent id from environment: {auto_id}")
-        watch_inbox(override_agent_id=auto_id)
+        # 🔴 T418. The env chain above matches config.get_agent_id() exactly, and
+        # that was never the gap — register's PID-AWARE step (_adopt_pid_owner)
+        # writes to os.environ, which this process, launched separately, cannot
+        # see. Reconcile against the registry before arming.
+        resolved, note = _watch_identity_after_supersede(auto_id)
+        if note:
+            print(note, file=sys.stderr)
+        if resolved is None:
+            return
+        print(f"[LITEHARNESS] watch-auto resolved agent id from environment: {resolved}")
+        watch_inbox(override_agent_id=resolved)
     elif action == "deregister":
         deregister()
     elif action == "bridge":
