@@ -2173,7 +2173,55 @@ one as "defaults apply", never as an error, and never block on it.
 """
 
 
-def cmd_bootstrap(project_path: str) -> None:
+_BOARD_SYNC_MARKER = "# liteharness-board-sync"
+
+_BOARD_SYNC_BLOCK = """\
+
+# liteharness-board-sync
+# Installed by `liteharness bootstrap`. Moves a card when its Task-id trailer
+# lands on develop. Never fails the commit/merge — the script exits 0 on error.
+if [ -f "scripts/board_sync_post_commit.py" ]; then
+  python scripts/board_sync_post_commit.py || true
+fi
+"""
+
+
+def _install_board_sync_hooks(project: Path, *, skip: bool = False) -> None:
+    """Append the board-sync call to post-commit and post-merge hooks."""
+    print("Step 6: Installing board-sync git hooks...")
+    if skip:
+        print("  Skipped (--no-git-hooks).")
+        return
+
+    board_script = project / "scripts" / "board_sync_post_commit.py"
+    if not board_script.exists():
+        print(f"  Skipped — {board_script.relative_to(project)} not found in this repo.")
+        return
+
+    git_dir = project / ".git"
+    if not git_dir.is_dir():
+        print("  Skipped — not a git repository (.git/ missing).")
+        return
+
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+
+    for hook_name in ("post-commit", "post-merge"):
+        hook_path = hooks_dir / hook_name
+        if hook_path.exists():
+            content = hook_path.read_text(encoding="utf-8")
+            if _BOARD_SYNC_MARKER in content:
+                print(f"  {hook_name}: already installed, skipping.")
+                continue
+            hook_path.write_text(content + _BOARD_SYNC_BLOCK, encoding="utf-8")
+            print(f"  {hook_name}: appended board-sync block.")
+        else:
+            hook_path.write_text("#!/bin/sh\n" + _BOARD_SYNC_BLOCK, encoding="utf-8")
+            hook_path.chmod(0o755)
+            print(f"  {hook_name}: created with board-sync block.")
+
+
+def cmd_bootstrap(project_path: str, *, no_git_hooks: bool = False) -> None:
     """Bootstrap harness for a project (global init + per-project scaffold)."""
     project = Path(project_path).resolve()
     if not project.is_dir():
@@ -2285,7 +2333,11 @@ def cmd_bootstrap(project_path: str) -> None:
             print(f"  Created {filename}")
     print()
 
-    # Step 6: Save version stamp
+    # Step 6: Install board-sync git hooks (post-commit + post-merge)
+    _install_board_sync_hooks(project, skip=no_git_hooks)
+    print()
+
+    # Step 7: Save version stamp
     cfg = config.load()
     cfg["version"] = HARNESS_VERSION
     cfg["last_bootstrap"] = datetime.now(timezone.utc).isoformat()
@@ -4111,9 +4163,9 @@ def main() -> None:
 
     if cmd == "bootstrap":
         if len(sys.argv) < 3:
-            print("Usage: liteharness bootstrap <project-path>")
+            print("Usage: liteharness bootstrap <project-path> [--no-git-hooks]")
             sys.exit(1)
-        cmd_bootstrap(sys.argv[2])
+        cmd_bootstrap(sys.argv[2], no_git_hooks="--no-git-hooks" in sys.argv[3:])
     elif cmd == "init":
         cmd_init()
     elif cmd == "install-statusline":
