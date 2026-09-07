@@ -1405,11 +1405,37 @@ def _watch_identity_after_supersede(auto_id: str) -> tuple[str | None, str]:
     """
     from . import cli as _cli  # local import: cli imports hooks (see cli.py:145)
 
+    session_pid_now = _resolve_session_pid()
     data = _read_presence(config.get_root() / "agents" / f"{auto_id}.json")
     # No record is not evidence of anything. A watcher may legitimately start
     # before its own registration lands, and refusing here would invent a new
     # failure mode for every first-run seat rather than guard an existing one.
+    #
+    # 🔴 T462. But it is not evidence of NOTHING either, and this is the case
+    # T418 left open. On 2026-09-07 an orchestrator's watcher armed on the new
+    # Claude session uuid while its register path resolved the seat's real id
+    # from a DIFFERENT process environment, and mail sat unread for six minutes.
+    # The env chains are identical (config.get_agent_id() vs SESSION_ENV_VARS,
+    # same variables, same order) — what differs is WHICH PROCESS'S environment
+    # each one reads. The watcher is launched from a shell snapshot taken at
+    # session start; a resume or an explicit takeover rewrites the register
+    # side's environment afterwards, and nothing propagates back.
+    #     TWO RESOLVERS SHARING A RULE STILL DISAGREE WHEN THEY READ DIFFERENT
+    #     ENVIRONMENTS — the shared chain was never the guarantee it looked like.
+    # So ask the register path's OWN question before arming on a name no sender
+    # uses: who holds the explicit takeover on this pid? Same function, so this
+    # is not a fourth opinion about pid ownership.
     if not data:
+        owner = _authoritative_owner_of_pid(session_pid_now, auto_id)
+        if owner and owner != auto_id:
+            return owner, (
+                f"[LITEHARNESS] watch-auto: the environment named {auto_id}, which is not "
+                f"registered. The explicit takeover on pid {session_pid_now} is {owner} — "
+                f"watching {owner} instead.\n"
+                f"  env said {auto_id} / registry says {owner}. A watcher launched from a "
+                "session-start shell snapshot cannot see a later takeover's environment, and "
+                "arming on the unregistered id leaves this seat deaf while looking healthy."
+            )
         return auto_id, ""
     if not _cli._superseded_by_later_registration(auto_id, data):
         return auto_id, ""

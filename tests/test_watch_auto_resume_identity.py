@@ -189,3 +189,86 @@ def test_no_session_id_still_skips_rather_than_dies(identity_root, capsys):
 
     assert watched is None
     assert "skipped" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# T462 — the case T418 left open: the env names an id that was NEVER registered.
+# ---------------------------------------------------------------------------
+
+TAKEOVER = "33333333-3333-4333-8333-333333333333"
+UNREGISTERED = "44444444-4444-4444-8444-444444444444"
+
+
+def register_takeover(ident: str) -> None:
+    """Register `ident` the way an explicit takeover does.
+
+    `_authoritative_owner_of_pid` only honours a record whose
+    `registration_source` is "takeover" (hooks.py:1259) — a plain startup record
+    must never capture a later session on the same pid — and that stamp comes
+    from `_explicit_identity_override()`, i.e. LITEHARNESS_AGENT_ID being set.
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(
+            ("CODEX", "CLAUDE", "LITEHARNESS", "LITESUITE", "COPILOT", "GEMINI", "LITECODE")
+        )
+    }
+    env.update(LITEHARNESS_CLI="claude-code", LITEHARNESS_MODEL="test-model")
+    env["LITEHARNESS_AGENT_ID"] = ident
+    env["CLAUDE_CODE_SESSION_ID"] = ident
+    with mock.patch.dict(os.environ, env, clear=True):
+        hooks._apply_hook_context(
+            {
+                "session_id": ident,
+                "source": "resume",
+                "hook_event_name": "SessionStart",
+                "transcript_path": str(Path("transcripts") / f"{ident}.jsonl"),
+            }
+        )
+        hooks.register_presence()
+
+
+def test_watch_auto_prefers_the_pid_takeover_over_an_unregistered_env_id(
+    identity_root, capsys
+):
+    """🔴 THE 2026-09-07 SHAPE — six minutes of unread mail on an orchestrator.
+
+    The watcher's environment named the new Claude session uuid; the register
+    path, running in a LATER environment, resolved the seat's real id. Both
+    resolvers walk the identical variable list, so the shared chain never made
+    them agree — they were reading different processes' environments. The
+    watcher then armed on an id no sender uses and printed a healthy line.
+
+        A WATCHER ON THE WRONG ID IS INDISTINGUISHABLE FROM A HEALTHY ONE.
+    """
+    register_takeover(TAKEOVER)
+    capsys.readouterr()
+
+    watched, _ = run_watch_auto(UNREGISTERED)
+    out = capsys.readouterr()
+    printed = out.out + out.err
+
+    assert watched != UNREGISTERED, (
+        "watch-auto armed on an id that was never registered while an explicit "
+        "takeover owned this pid — that is the six-minute deafness itself"
+    )
+    assert watched == TAKEOVER, f"expected the pid's takeover owner, watched {watched!r}"
+    # The card's requirement: SAY BOTH. A corrected id that does not name what it
+    # corrected leaves the next reader unable to tell this from a plain start.
+    assert UNREGISTERED in printed and TAKEOVER in printed, printed
+
+
+def test_a_genuine_first_run_still_arms_on_its_own_env_id(identity_root, capsys):
+    """⬜ CONTROL — the fix must not turn "not registered yet" into a failure.
+
+    A watcher may legitimately start before its own registration lands. With no
+    takeover on this pid there is nothing to prefer, and refusing or redirecting
+    here would invent a new failure mode for every first-run seat — which is the
+    reason the `if not data` branch returned early in the first place.
+    """
+    capsys.readouterr()
+    watched, _ = run_watch_auto(UNREGISTERED)
+    assert watched == UNREGISTERED, (
+        "a first-run watcher must still arm on its own id when no takeover owns the pid"
+    )
