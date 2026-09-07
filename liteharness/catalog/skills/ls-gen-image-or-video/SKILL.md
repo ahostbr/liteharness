@@ -1,13 +1,15 @@
 ---
 name: ls-gen-image-or-video
-description: Use when generating AI images or videos — marketing visuals, hero banners, social media assets, product mockups, ad creative, animated backgrounds, exploding views, 3D renders, scroll-synced video assets. Triggers on 'generate an image', 'create an image', 'gen-image', 'make me an image', 'image gen', 'marketing image', 'product mockup', 'hero image', 'generate a video', 'create a video', 'gen-video', 'make me a video', 'video gen', 'animated background', 'exploding view', 'veo', 'video asset', 'scroll animation video', 'chatgpt image', 'gpt image', 'chatgpt flag'.
+description: Use when generating AI images or videos — marketing visuals, hero banners, social media assets, product mockups, ad creative, animated backgrounds, exploding views, 3D renders, scroll-synced video assets. Triggers on 'generate an image', 'create an image', 'gen-image', 'make me an image', 'image gen', 'imagegen', 'codex image', 'marketing image', 'product mockup', 'hero image', 'generate a video', 'create a video', 'gen-video', 'make me a video', 'video gen', 'animated background', 'exploding view', 'veo', 'video asset', 'scroll animation video', 'chatgpt image', 'gpt image'.
 ---
 
 # AI Image & Video Generation
 
 ## Image Generation
 
-Six tiers: **1) Gemini API** (default, Python script) → **2) Codex Desktop** (gpt-image-2 via bridge, free, no API key) → **3) ChatGPT Desktop CDP** (cli-anything-chatgpt, best quality, one command) → **4) ChatGPT Browser** (Claude-in-Chrome fallback) → **5) LiteImage** (local SD) → **6) Local Gateway** (SSE, optional).
+Three tiers: **1) Codex ImageGen** (default — `codex_image.py`, your ChatGPT/Codex login, no API key, no per-image cost) → **2) LiteImage** (local Stable Diffusion) → **3) Local Gateway** (SSE, optional).
+
+Every image that leaves this machine for a cloud model goes through tier 1. There is no Gemini image route, no Codex Desktop bridge, no ChatGPT Desktop CDP driver and no browser automation in this skill any more: the same ChatGPT credit those routes spent is reached directly, with one stdlib script and a real return value.
 
 ## Video Generation
 
@@ -31,13 +33,12 @@ Read the user's request. Determine if they need an **image** or a **video**:
 
 **The ONLY exception:** If the user's message explicitly provides ALL required parameters, skip straight to Step 3.
 
-### For Images — collect these 5:
+### For Images — collect these 4:
 
-1. **Aspect ratio** — `1:1`, `3:4`, `4:3`, `9:16`, `16:9` (default), `21:9`
-2. **Resolution** — `1K` (default), `2K`, `4K` (pro model only)
-3. **Reference images** — paths or "none"
-4. **Purpose** — hero banner, social post, ad, mockup, etc.
-5. **Save location** — default: `~/Pictures/gen-image/`
+1. **Aspect ratio** — `1:1`, `3:4`, `4:3`, `9:16`, `16:9` (default), `21:9`. On this route the ratio is WRITTEN INTO THE PROMPT ("wide 16:9 banner", "square", "tall 9:16 story"); size and quality are `auto` on the wire.
+2. **Reference images** — paths or "none" (a reference turns the call into an EDIT: the model sees the picture)
+3. **Purpose** — hero banner, social post, ad, mockup, icon set, etc.
+4. **Save location** — default: `~/Pictures/gen-image/`
 
 ### For Videos — collect these 6:
 
@@ -58,10 +59,9 @@ Read the user's request. Determine if they need an **image** or a **video**:
 Before I generate the image:
 
 1. **Aspect ratio?** 16:9 (banner), 1:1 (social), 9:16 (story)? [default: 16:9]
-2. **Resolution?** 1K, 2K, or 4K? [default: 1K]
-3. **Reference images?** Any existing images to match the style? (paste paths or "none")
-4. **Purpose?** Hero banner, social post, ad, mockup, etc.?
-5. **Save to?** [default: ~/Pictures/gen-image/]
+2. **Reference images?** Any existing images to match or edit? (paste paths or "none")
+3. **Purpose?** Hero banner, social post, ad, mockup, icon set, etc.?
+4. **Save to?** [default: ~/Pictures/gen-image/]
 ```
 
 **Video:**
@@ -96,132 +96,103 @@ After generating, you remain in generation mode. Any follow-up questions — reg
 
 ## Step 3: Generate
 
-### Image — Gemini API (Default)
+### Image — Codex ImageGen (Tier 1, DEFAULT)
+
+Generates or edits PNGs through the user's Codex/ChatGPT login: the script presents itself as the `codex_cli_rs` client to `https://chatgpt.com/backend-api/codex`, so the images are paid for by the ChatGPT subscription Codex already uses. **Stdlib-only Python, no `OPENAI_API_KEY`, no desktop app, no browser.** Origin: the LiteTUI seat's `skills/codex-imagegen` (LiteTUI 7a273be, measured 2026-09-05); the copy that ships is the one beside this file.
+
+**Requirements:** Codex CLI has been logged in once on this machine (`codex login`), so `~/.codex/auth.json` holds `tokens.{access_token, refresh_token, account_id}`. Nothing else.
 
 ```bash
-# Requires: pip install google-genai Pillow python-dotenv
-# Env var: GOOGLE_AI_API_KEY (get from https://aistudio.google.com/apikey)
-GEN="python ${CLAUDE_SKILL_DIR}/gen_image.py"
+GEN="python ${CLAUDE_SKILL_DIR}/codex_image.py"
 
-# Generate
-$GEN output.png "SaaS dashboard, dark theme, modern UI" --aspect 16:9
-$GEN output.png "Epic dragon" --aspect 16:9 --size 4K --model pro
+# Generate (default backend `responses`, model gpt-5.5 with its native image_generation tool)
+$GEN "SaaS dashboard, dark theme, modern UI, wide 16:9 banner" --out ~/Pictures/gen-image/dashboard.png
 
-# Reference images for style consistency (up to 14)
-$GEN out.png "Same style, new subject" --ref style_ref.png
+# Typed endpoint (OpenAI-style JSON, model gpt-image-2)
+$GEN "Epic dragon over a medieval city, cinematic, 16:9" --backend images --out dragon.png
+$GEN "..." --backend images --model gpt-image-2
 
-# Batch variations
-$GEN out.png "cube" "sphere" "pyramid" --aspect 1:1
+# EDIT with reference image(s) — repeatable, png/jpg/gif/webp; the model genuinely sees them
+$GEN "restyle this fox in watercolor, keep the pose" --image fox.png --out fox-watercolor.png
+$GEN "merge these two art styles into one poster" --image a.png --image b.png --out merged.png
 
-# Style template (.md with {subject} placeholder)
-$GEN out.png "gear icon" --style styles/blue_glass_3d.md
-
-# Edit existing image(s) — style transfer, multi-image mixing
-$GEN edit out.png "Change background to blue" -i input.png
-$GEN edit out.png "Merge these art styles" -i style1.png -i style2.png
-
-# Describe / analyze images
-$GEN describe image.png
-$GEN describe a.png b.png --prompt "Compare these two images"
+# Token only: refresh the OAuth token and write it back to ~/.codex/auth.json
+$GEN --refresh-only
 ```
 
-#### Image Models
+`--image` chooses the edit shape automatically: `responses` sends inline `input_image` parts in the user message; `images` posts to `/images/edits`. `--out` defaults to `codex-image-<timestamp>.png` in the cwd; `--timeout` defaults to 300 s. The script prints the output path on stdout and its log lines on stderr (`[codex_image] ...`), and exits 1 on any failure.
 
-| Alias    | Model ID                     | Quality        | Max Resolution |
-| -------- | ---------------------------- | -------------- | -------------- |
-| `flash`  | `gemini-2.5-flash-image`     | Fast (default) | 1K             |
-| `pro`    | `gemini-3-pro-image-preview` | Best           | 4K             |
-| `legacy` | `gemini-2.0-flash-exp`       | Fallback       | 1K             |
+#### Backends
 
-**Resolution:** `--size 1K` (default), `2K`, `4K` (pro only)
-**Aspect ratios:** `1:1`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9` (default), `21:9`
-**References:** Up to 14 images for style/composition guidance.
+| `--backend`           | Endpoint             | Model (default) | Use it for                                                                          |
+| --------------------- | -------------------- | --------------- | ----------------------------------------------------------------------------------- |
+| `responses` (default) | `/responses`         | `gpt-5.5`       | everything — the model reads the prompt like a chat turn and calls image generation |
+| `images`              | `/images/generations`| `gpt-image-2`   | the typed OpenAI shape; the retry when `responses` answers in text instead          |
 
-#### Model Selection Rules
+Both backends were measured on 2026-09-05: real PNGs in ~20–30 s each; both edit paths kept an exact pose and composition from the reference. **Model gotcha:** `gpt-5.4` returns HTTP 400 on this account — use `gpt-5.5` (responses) or `gpt-image-2` (images). The account's model list is in `~/.codex/models_cache.json`.
 
-Auto-select model based on quality signals in the user's message — no need to ask:
+**Size and quality are `auto` on the wire** (`build_images_body` sends `background/quality/size: auto`). Put the ratio and the resolution wish in the prompt: "wide 16:9", "square 1:1", "tall 9:16 story", "high detail, 4K-grade". A `--size` passthrough for the `images` backend (gpt-image-2 accepts `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `3840x2160`) is not exposed yet.
 
-| Signal             | Model             | Examples                                                                                                                                                        |
-| ------------------ | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Cheap / fast**   | `flash` (default) | "go cheap", "don't spend a lot", "quick image", "test this", "rough draft"                                                                                      |
-| **High quality**   | `pro`             | "go big", "best quality", "really good", "4K", "hero image", "final version", "production ready", "make it perfect"                                             |
-| **Codex / OpenAI** | `codex`           | "codex", "use codex", "openai image", "gpt-image-2", "codex desktop" — free via Codex Desktop bridge, gpt-image-2, up to 4K                                     |
-| **ChatGPT / GPT**  | `chatgpt`         | "chatgpt", "gpt image", "use chatgpt", "chatgpt flag", "5.5 image", "use gpt" — CDP CLI (preferred) or browser automation fallback, best photorealistic quality |
-| **No signal**      | `flash`           | default — save money unless quality is explicitly needed                                                                                                        |
+#### Route Selection Rules
 
----
+The words that used to pick between clouds now all land on this one route — no need to ask:
 
-### Image — Codex Desktop Bridge (Tier 2, FREE)
+| Signal                                                                | Route                          |
+| --------------------------------------------------------------------- | ------------------------------ |
+| "codex", "codex image", "imagegen", "gpt image", "chatgpt image", "use gpt", "openai image", "gpt-image-2", "go big", "best quality", "hero image", "final version", "quick image", "rough draft", no signal | `codex_image.py` (`responses`) |
+| "gpt-image-2", "typed", or `responses` answered in text               | `codex_image.py --backend images` |
+| "local", "offline", "stable diffusion", "SD", or the machine is offline | LiteImage (tier 2)             |
 
-**Use when:** User says "codex", "openai image", "gpt-image-2", or you want gpt-image-2 quality without API key cost. Routes through the Codex Desktop app via LiteHarness bridge — uses your logged-in Codex Desktop OAuth session, zero API cost.
+#### How auth works (measured 2026-09-05)
 
-**Requirements:** Codex Desktop app installed and running with an active OpenAI account. LiteHarness bridge operational (requires LiteSuite running with the Mon1 bridge active).
+- Tokens live in `~/.codex/auth.json` → `tokens.{access_token, refresh_token, account_id}`.
+- Access tokens are short-lived (~15 min). The script checks the JWT `exp`; on a 401 it force-refreshes via `POST https://auth.openai.com/oauth/token` (`grant_type=refresh_token`, the `codex_cli_rs` client id) and retries once.
+- The refresh token ROTATES — the script writes both back, so the Codex CLI stays logged in too.
 
-**How it works:**
+#### Prompt Tips
 
-1. Format a structured prompt using the Codex imagegen prompt schema
-2. Send to Codex Desktop via `liteharness codex-desktop-send`
-3. Codex generates using built-in `image_gen` tool (gpt-image-2, OAuth auth)
-4. Output lands in `~/.codex/generated_images/<session-id>/`
-5. Copy the output to the target save location
-
-**Prompt Schema (from Codex imagegen skill):**
+- Be extremely descriptive — it follows instructions precisely.
+- Specify style: "photorealistic", "infographic", "illustration", "3D render", "watercolor".
+- For text in images: spell out exactly what text should appear, in quotes.
+- For UI mockups: describe colors (#hex), fonts, layout, spacing in detail.
+- A structured prompt still helps on the `responses` backend:
 
 ```text
-Use case: <taxonomy slug>
+Use case: <photorealistic-natural | product-mockup | ui-mockup | infographic-diagram | ads-marketing | logo-brand | illustration-story | stylized-concept>
 Asset type: <where the asset will be used>
-Primary request: <user's main prompt>
-Scene/backdrop: <environment>
-Subject: <main subject>
-Style/medium: <photo/illustration/3D/etc>
-Composition/framing: <wide/close/top-down; placement>
-Lighting/mood: <lighting + mood>
-Color palette: <palette notes>
+Primary request: <the main prompt>
+Subject / Scene / Style / Composition / Lighting / Palette
 Text (verbatim): "<exact text>"
-Constraints: <must keep/must avoid>
-Avoid: <negative constraints>
+Constraints: <must keep / must avoid>
 ```
 
-**Use-case taxonomy slugs:** `photorealistic-natural`, `product-mockup`, `ui-mockup`, `infographic-diagram`, `ads-marketing`, `logo-brand`, `illustration-story`, `stylized-concept`, `historical-scene`
-
-**Workflow:**
-
-```bash
-# 1. Find Codex Desktop
-python -m liteharness.cli codex-desktop-list
-
-# 2. Send structured prompt (auto-submits, no separate Enter)
-python -m liteharness.cli codex-desktop-send "Generate an image: <structured prompt>"
-
-# 3. Wait for generation (15-60s), then find output
-ls -t ~/.codex/generated_images/*/  # most recent session dir
-
-# 4. Copy to target location
-cp ~/.codex/generated_images/<session>/<file>.png <save_location>/
-```
-
-**Sizes (gpt-image-2):** `1024x1024` (square), `1536x1024` (landscape), `1024x1536` (portrait), `2048x2048` (2K), `3840x2160` (4K landscape), `auto`
-
-**Quality tiers:** `low` (fast drafts), `medium`, `high`, `auto` (final assets)
-
-**Transparent images via chroma-key removal:**
+#### Transparent images via chroma-key removal
 
 ```bash
 # Generate on green screen
-python -m liteharness.cli codex-desktop-send "Generate the subject on a perfectly flat solid #00ff00 chroma-key background. No shadows, gradients, or reflections."
+$GEN "<subject>, isolated on a perfectly flat solid #00ff00 chroma-key background, no shadows, no gradients, no reflections, no text" --out raw.png
 
-# Remove background using Codex's installed helper
+# Remove the background with Codex's installed helper (present wherever the Codex CLI is)
 python "$USERPROFILE/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py" \
-  --input source.png --out final.png \
-  --auto-key border --soft-matte --despill
+  --input raw.png --out final.png --auto-key border --soft-matte --despill --force
 ```
 
-**Limitations:**
+Without `--force` it refuses to overwrite. Keep the green-screen raw as a fallback; commit only the transparent final. If the helper is absent, the PIL snippet under Post-Processing does the flat-colour case.
 
-- Async — no direct return value, must poll output directory
-- One image at a time (sequential, not batch)
-- Codex Desktop must be running and visible
-- Output dir changes per Codex session
+#### Batch generation & reliability (hard-won on a 75-asset game UI run, then moved to this route)
+
+One request per asset, in a loop — the API route has no conversation, so the old thread-context drift is gone, but three of the old traps survive because they live in the account, not the app:
+
+- **Sprite-sheet drift** still happens on icon prompts. Keep the hardened tail: "a SINGLE emblem, ONE icon centered, NOT a sprite sheet, NOT a grid, NOT a set, no second icon."
+- **The image cap is ACCOUNT-WIDE (~50 gens/burst).** Onset is silent — a call returns text instead of an image, or `stream ended without a completed image_generation_call` — then the API refuses outright. Resubmits do not help; only a cooldown clears it (observed 30–120+ min). **During onset gens can come back wrong and look "successful"**, so the worst corruption clusters on whichever batch ran as the cap hit. Probe with one cheap gen every ~10 min to detect the lift.
+- **ALWAYS eyeball a contact sheet after a batch — exit codes lie.** Montage the finals, audit every cell, and regen only the multi-icon / wrong-subject ones. A contact-sheet script to copy: `C:\Projects\private\TypeOrDie\scripts\genui\contact_sheet.py`.
+
+#### Troubleshooting
+
+- **HTTP 401 twice / refresh failed** — no usable `refresh_token` in `auth.json`: re-login with `codex login`, then retry.
+- **HTTP 400 on a model name** — wrong model for the account; check `~/.codex/models_cache.json`.
+- **"stream ended without a completed image_generation_call"** — the model answered in text instead of calling the tool: retry once, or force `--backend images`.
+- **No `~/.codex/auth.json`** — Codex CLI was never logged in on this machine; there is no key-based fallback in this skill by design.
 
 ---
 
@@ -285,217 +256,11 @@ $VEO extend longer.mp4 --input clip.mp4 "Continue the camera movement"
 
 ---
 
-### Image — ChatGPT Desktop CDP (Tier 3, PREFERRED for ChatGPT)
-
-**Use when:** User says "chatgpt", "gpt image", "use chatgpt", "chatgpt flag", "5.5 image", "use gpt". Controls ChatGPT Desktop (Electron) directly via Chrome DevTools Protocol — no browser extension needed.
-
-**Requirements:** ChatGPT Desktop installed (Windows Store), Pro account logged in, `cli-anything-chatgpt` installed.
-
-> **Install:** Clone https://github.com/cli-anything/chatgpt-agent-harness and run `pip install -e .` from the repo root, or check PyPI for `cli-anything-chatgpt` if a published package is available.
-
-**Cost:** Included in ChatGPT Pro subscription. No per-image cost.
-
-**Quality:** Best photorealistic image gen available. Perfect text rendering, complex infographics.
-
-#### Protocol (ONE COMMAND)
-
-```bash
-# Launch ChatGPT Desktop with CDP enabled
-cli-anything-chatgpt launch
-
-# Generate an image
-cli-anything-chatgpt image "A dark cockpit UI for an AI agent swarm wizard" -o ~/Pictures/gen-image/wizard.png
-
-# JSON output for agents
-cli-anything-chatgpt --json image "epic sunset" -o ~/Pictures/gen-image/sunset.png
-
-# Send any text prompt
-cli-anything-chatgpt chat "Explain this architecture..."
-
-# Read latest response
-cli-anything-chatgpt read
-
-# New conversation
-cli-anything-chatgpt new
-
-# Check status
-cli-anything-chatgpt status
-```
-
-#### How It Works
-
-1. Kills existing ChatGPT Desktop, relaunches with `--remote-debugging-port=9223`
-2. Connects via CDP WebSocket to the Electron renderer
-3. Types into chat textarea via `Runtime.evaluate` (React-compatible native setter)
-4. Polls DOM for generated `<img>` elements (up to 120s timeout)
-5. Downloads image URL to target path
-
-Auth persists — Electron user data dir keeps OAuth tokens across relaunches.
-
-#### Prompt Tips
-
-- Be extremely descriptive — it follows instructions precisely
-- Specify style: "photorealistic", "infographic", "illustration", "3D render"
-- For text in images: spell out exactly what text should appear
-- For UI mockups: describe colors (#hex), fonts, layout, spacing in detail
-
-#### Batch generation & reliability (hard-won on a 75-asset game UI run)
-
-The stock `cli-anything-chatgpt image` one-shot is fine for a single image. For BATCHES
-(icon sets, per-era kits, sprite libraries) the ChatGPT-Desktop path has sharp edges — a
-small purpose-built driver beats the stock CLI. A reference implementation of the whole
-driver (submit → count-baseline detect → in-app download → chroma-key → per-era/per-icon
-batching → contact sheet) lives at `C:\Projects\private\TypeOrDie\scripts\genui\`
-(`gen_hud.py`, `batch_era.py`, `batch_icons.py`, `regen_one.py`, `contact_sheet.py`) —
-copy and adapt rather than rebuilding from scratch. The traps it solves:
-
-- **Resolve the exe via the app-execution alias, never a hardcoded path.** The Store app
-  auto-updates: the versioned `WindowsApps\OpenAI.ChatGPT-Desktop_<ver>\app\` path changes
-  AND the exe has been renamed (`ChatGPT.exe` → `ChatGPT Classic.exe`). Direct-spawning the
-  packaged exe = `WinError 5` (ACL). Launch
-  `%LOCALAPPDATA%\Microsoft\WindowsApps\chatgpt-classic.exe` (the alias forwards
-  `--remote-debugging-port=9223`). If `cli-anything-chatgpt launch` fails with
-  FileNotFound/AccessDenied, this is why — patch `core/cdp.py`'s `CHATGPT_EXE`.
-- **Download inside the session.** Generated URLs (`chatgpt.com/backend-api/estuary/…`)
-  are `403` outside the app — fetch via CDP `fetch(url,{credentials:'include'})` → blob →
-  base64 → write bytes. `urllib`/`curl` from the shell fails.
-- **Detect completion by image COUNT, not the last `<img>`.** Popping the last conversation
-  image false-matches the PREVIOUS asset (and can grab the account avatar — filter to
-  `main img` with `naturalWidth ≥ 512`). Record the count of ≥512px images, submit, wait for
-  the count to INCREASE. Stabilize the baseline first (a prior timed-out gen may land late
-  and get claimed by the next request — the off-by-one straggler-shift).
-- **Sprite-sheet drift is the #1 batch failure.** A long thread OR the image cap engaging
-  makes ChatGPT render 2–4 emblems in one image instead of one. Defenses, escalating:
-  (a) fresh thread per batch/era so context can't pile past ~9 assets; (b) fresh thread per
-  SINGLE icon for stragglers (bulletproof — zero context to drift); (c) a hardened prompt
-  tail: "a SINGLE emblem, ONE icon centered, NOT a sprite sheet, NOT a grid, NOT a set, no
-  second icon." Reuse one thread to cut churn, but **reset per era**.
-- **The image cap is ACCOUNT-WIDE (~50 gens/burst), not per-thread.** Onset is silent
-  (submissions get no assistant turn), then the thread answers "You've hit your limit. Please
-  try again later." Resubmits and app relaunch don't help — only a cooldown clears it
-  (observed 30–120+ min). **During onset gens don't cleanly fail; they grab stale/multi
-  images and look "successful,"** so the worst corruption clusters on whichever batch ran as
-  the cap hit. Probe with one cheap gen every ~10 min to detect the lift.
-- **ALWAYS eyeball a contact sheet after a batch — exit codes lie.** Montage the finals,
-  audit every cell, and regen only the multi-icon / wrong-subject ones, one fresh thread each.
-- **Transparent output:** prompt "isolated on a flat solid #00ff00 green chroma-key
-  background, no shadows, no text" then
-  `~/.codex/skills/.system/imagegen/scripts/remove_chroma_key.py --input raw.png --out
-final.png --auto-key border --soft-matte --despill --force` (without `--force` it refuses
-  to overwrite). Keep the green-screen raw as a fallback; commit only the transparent final.
-
----
-
-### Image — ChatGPT Browser (Tier 4, FALLBACK)
-
-**Use when:** ChatGPT Desktop CDP is unavailable. Falls back to Claude-in-Chrome browser automation.
-
-**Requirements:** Chrome with Claude-in-Chrome extension, logged into chatgpt.com with Pro account.
-
-**Cost:** Included in ChatGPT Pro subscription ($200/mo). No per-image cost.
-
-**Quality:** Currently the best photorealistic image gen available. Perfect text rendering, complex infographics, photorealistic subjects.
-
-#### Protocol
-
-1. **Get browser context:**
-
-   ```
-   mcp__claude-in-chrome__tabs_context_mcp({ createIfEmpty: true })
-   ```
-
-2. **Find or create a ChatGPT tab:**
-   - If an existing tab has `chatgpt.com` in the URL, use it
-   - Otherwise create a new tab and navigate to `https://chatgpt.com`
-
-   ```
-   mcp__claude-in-chrome__tabs_create_mcp()
-   mcp__claude-in-chrome__navigate({ tabId: <id>, url: "https://chatgpt.com" })
-   ```
-
-3. **Type the prompt into the chat input:**
-
-   ```
-   mcp__claude-in-chrome__form_input({
-     tabId: <id>,
-     ref_id: "<textbox ref for 'Chat with ChatGPT'>",
-     value: "<user's image prompt>"
-   })
-   ```
-
-4. **Submit the prompt** — click the send button or press Enter:
-
-   ```
-   mcp__claude-in-chrome__computer({
-     tabId: <id>,
-     action: "key",
-     key: "Return"
-   })
-   ```
-
-5. **Poll for image completion** — ChatGPT takes 15-60s to generate. Poll every 10s:
-
-   ```
-   mcp__claude-in-chrome__read_page({
-     tabId: <id>,
-     filter: "all",
-     depth: 5
-   })
-   ```
-
-   Look for `img[alt="Generated image"]` in the accessibility tree. Keep polling until it appears or a text response indicates failure.
-
-6. **Download the generated image:**
-
-   ```
-   mcp__claude-in-chrome__javascript_tool({
-     action: "javascript_exec",
-     tabId: <id>,
-     text: `
-       const img = document.querySelector('img[alt="Generated image"]');
-       if (img) {
-         const a = document.createElement('a');
-         a.href = img.src;
-         a.download = '<filename>.png';
-         document.body.appendChild(a);
-         a.click();
-         document.body.removeChild(a);
-         'Download triggered';
-       } else { 'No image found'; }
-     `
-   })
-   ```
-
-7. **Move from Downloads to target directory:**
-   ```bash
-   mv ~/Downloads/<filename>.png <save_location>/<filename>.png
-   ```
-
-#### ChatGPT Prompt Tips
-
-- ChatGPT excels at infographics, photorealistic scenes, text-heavy images, and complex compositions
-- Be extremely descriptive — it follows instructions precisely
-- Specify style: "photorealistic", "infographic", "illustration", "3D render", "watercolor"
-- For infographics: describe sections, data points, layout, color scheme
-- For text in images: spell out exactly what text should appear
-- Can do image editing via "Edit image" button on existing generations
-
-#### Limitations
-
-- No API — browser automation only, requires active Chrome session
-- One image at a time (no batch)
-- No programmatic seed control
-- Download lands in browser's default Downloads folder — must move after
-- Session/auth can expire — may need to re-login
-- Rate limits unclear — Pro tier is generous but not unlimited
-
----
-
-### Image Fallback 3: LiteImage API (Local SD)
+### Image — LiteImage API (Tier 2, local Stable Diffusion)
 
 > **Requirements:** LiteImage app running locally (part of LiteSuite — requires LiteSuite running). Exposes local Stable Diffusion on port **7426**.
 
-If LiteImage is running — local Stable Diffusion on port **7426**.
+Use it when the user says "local", "offline" or "stable diffusion", or when tier 1 is unreachable.
 
 ```bash
 curl -s -X POST http://127.0.0.1:7426/generate \
@@ -538,7 +303,7 @@ curl -s http://127.0.0.1:7426/models  # Available models
 | Blog / presentation             | 1024  | 768    | 4:3   |
 | Pinterest / Facebook ad         | 768   | 1024   | 3:4   |
 
-### Image Fallback 4: Local Gateway (SSE, Optional)
+### Image — Local Gateway (Tier 3, SSE, optional)
 
 If you have a local image-generation gateway running on port **8200** that exposes an SSE endpoint:
 
@@ -553,7 +318,7 @@ curl -X POST http://127.0.0.1:8200/v1/marketing/generate/image \
 
 **Example gateway styles:** `photorealistic`, `illustration`, `3d-render`, `flat-design`, `cinematic`
 
-> **Note:** This tier requires a custom local gateway server on port 8200. It is optional — skip to Tier 1 (Gemini API) if you don't have one configured.
+> **Note:** This tier requires a custom local gateway server on port 8200. It is optional — skip to Tier 1 (Codex ImageGen) if you don't have one configured.
 
 ---
 
@@ -561,11 +326,11 @@ curl -X POST http://127.0.0.1:8200/v1/marketing/generate/image \
 
 ### Image Prompts
 
-**Structure:** `[Subject] + [Context/Setting] + [Style] + [Mood] + [Technical quality]`
+**Structure:** `[Subject] + [Context/Setting] + [Style] + [Mood] + [Technical quality] + [Frame]`
 
 ```
 "Young professional using laptop at modern coworking space,
- natural light, confident expression, photorealistic, 8k"
+ natural light, confident expression, photorealistic, 8k, wide 16:9"
 ```
 
 ### Video Prompts
@@ -603,7 +368,7 @@ curl -X POST http://127.0.0.1:8200/v1/marketing/generate/image \
 
 **After EVERY image generation, remove the background unless the user explicitly says to keep it.**
 
-Gemini-generated images always have a solid background (usually white or light gray corners on icons/logos). Strip it immediately:
+Generated icons and logos come on a solid background (usually white or light grey corners). For a clean cut, generate on green and use the chroma-key helper above; for a flat white/grey background, strip it immediately:
 
 ```python
 python -c "
@@ -652,7 +417,7 @@ ffmpeg -i hero.mp4 -vcodec libx264 -crf 28 -preset slow -an hero_compressed.mp4
 
 1. Detect media type (image vs video)
 2. Gather parameters via AskUserQuestion
-3. **Image:** run `gen_image.py` (Gemini default) or LiteImage/Gateway fallback
+3. **Image:** run `codex_image.py` (Codex ImageGen, default) or LiteImage/Gateway fallback
 4. **Image:** remove background (MANDATORY — see Post-Processing section)
 5. **Video:** run `gen_video.py` (Veo default)
 6. Review output (use Read tool on saved path)
