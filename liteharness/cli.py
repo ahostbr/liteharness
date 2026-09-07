@@ -4,6 +4,7 @@ LiteHarness CLI — liteharness init|status|send|list|discover
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -2370,12 +2371,48 @@ MODEL_ALIASES = {
     "opus-5": "claude-opus-5[1m]",
     "opus-4.8": "claude-opus-4-8[1m]",
     "opus-4.8-200k": "claude-opus-4-8",
+    "opus-4.6": "claude-opus-4-6[1m]",
+    "opus-4.6-1m": "claude-opus-4-6[1m]",
+    "opus-4.6-200k": "claude-opus-4-6",
     "fable": "claude-fable-5",
+    "fable-5.1": "claude-fable-5-1",
     "sonnet": "claude-sonnet-5",
     "sonnet-5": "claude-sonnet-5",
     "sonnet-4.6": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5-20251001",
 }
+
+# Regex: a valid Claude Code model id is claude-<family>-<version> optionally
+# with a bracketed context-window suffix like [1m].
+_CLAUDE_MODEL_RE = re.compile(
+    r"^claude-[a-z]+-[\d][\w.-]*(\[\w+\])?$"
+)
+
+
+def _normalize_model_id(model: str) -> str:
+    """Normalise common mis-spellings of Claude model ids.
+
+    The most frequent mistake is writing the context-window suffix with a
+    hyphen (`-1m`) instead of the bracket form (`[1m]`) that the CLI expects.
+    """
+    if model.startswith("claude-") and model.endswith("-1m"):
+        return model[:-3] + "[1m]"
+    return model
+
+
+def _validate_model_id(model: str) -> str:
+    """Resolve alias, normalise, and refuse an id that cannot be valid."""
+    resolved = MODEL_ALIASES.get(model, model)
+    resolved = _normalize_model_id(resolved)
+    if not _CLAUDE_MODEL_RE.match(resolved):
+        accepted = ", ".join(sorted(MODEL_ALIASES.keys()))
+        raise SystemExit(
+            f"Unknown model: {model!r} (resolved to {resolved!r}).\n"
+            f"  Accepted aliases: {accepted}\n"
+            f"  Or a full Claude model id like: claude-opus-4-6[1m], claude-sonnet-5, claude-fable-5-1\n"
+            f"  Note: use [1m] not -1m for the context-window suffix."
+        )
+    return resolved
 
 
 def _build_claude_cmd(
@@ -2386,7 +2423,7 @@ def _build_claude_cmd(
     name: str | None = None,
 ) -> str:
     """Build the claude CLI command string with bootstrap instructions."""
-    resolved_model = MODEL_ALIASES.get(model, model) if model else None
+    resolved_model = _validate_model_id(model) if model else None
 
     bootstrap = (
         "MANDATORY FIRST STEPS: "
