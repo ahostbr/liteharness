@@ -1484,10 +1484,29 @@ def _adopt_pid_owner(agent_id: str) -> str:
     global _IDENTITY_DECISION
     session_pid = _resolve_session_pid()
     _IDENTITY_DECISION = {"source": _identity_input_source(), "replaced": []}
-    # Codex Desktop tasks share a backend PID. This policy is Claude-specific.
+    # 🔴 T441. "unknown" IS NOT "NOT CLAUDE", and reading it that way turned this
+    # protection OFF exactly when it was needed. The gate here used to be
+    # `config.get_cli() == "claude-code"`; `get_cli()` (config.py:257-274) is
+    # purely environmental, so a hook that runs with a bare environment — which
+    # PostCompact does — gets "unknown" and the owner lookup was SKIPPED. The
+    # retired id the environment still carried was then written back as a fresh
+    # presence file: two records for one seat, `discover` showing a ghost row and
+    # hiding the live seat behind "superseded on the same PID", and a `send` to
+    # the ghost accepted by a maildir with no consumer.
+    #     A GUARD KEYED ON DETECTION FAILS OPEN WHEN DETECTION IS BLIND.
+    # MEASURED 2026-09-07: with every CLI variable stripped, `get_cli()` returns
+    # "unknown" and the old condition evaluated False.
+    # ⬜ THE CODEX REASON THE GATE EXISTED IS KEPT. Codex Desktop tasks share a
+    # backend PID, so a Codex session must never be adopted into a Claude seat —
+    # but a Codex session sets CODEX_SESSION_ID and therefore detects as
+    # "codex-cli", never as "unknown". A KNOWN non-Claude CLI is still excluded;
+    # only the blind case now reaches the lookup, which does its own per-record
+    # check (a record whose `cli` is not claude-code is skipped there).
+    current_cli = config.get_cli()
     owner = (
         _authoritative_owner_of_pid(session_pid, agent_id)
-        if config.get_cli() == "claude-code" else None
+        if current_cli in ("claude-code", "unknown")
+        else None
     )
     if owner and _record_belongs_to_process(owner, session_pid):
         os.environ["LITEHARNESS_AGENT_ID"] = owner
