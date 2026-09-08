@@ -3252,7 +3252,8 @@ def cmd_spawn(
         # stays on argv here — no PTY channel exists to type into.
         term_env = {**os.environ, **context_env}
         if sys.platform == "win32":
-            spawn_cmd = f'start wt -d "{target_dir}" cmd /k {claude_str}'
+            wt_title = name or "agent"
+            spawn_cmd = f'start wt --title "{wt_title}" --suppressApplicationTitle -d "{target_dir}" cmd /k {claude_str}'
             subprocess.Popen(
                 spawn_cmd, shell=True, env=term_env,
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,

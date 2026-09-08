@@ -705,6 +705,7 @@ def _wt_segment(session, action="new-tab", split=None):
         segment.append(split)
     segment.extend([
         "--title", _terminal_title(session),
+        "--suppressApplicationTitle",
         "-d", session["cwd"],
         "--",
     ])
