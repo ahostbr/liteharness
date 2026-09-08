@@ -1474,6 +1474,33 @@ def _watch_identity_after_supersede(auto_id: str) -> tuple[str | None, str]:
     )
 
 
+def _current_session_is_newer(
+    current_id: str, takeover_id: str, session_pid: int | None
+) -> bool:
+    """True when current_id has a live presence on session_pid newer than takeover_id's.
+
+    T512: after /clear the predecessor's takeover record survives while the
+    successor registers under its own id. The PostCompact hook then finds the
+    stale record and would resurrect the dead id. This guard keeps the newer
+    live session by comparing registered_at timestamps.
+    """
+    agents_dir = config.get_root() / "agents"
+    current_path = agents_dir / f"{current_id}.json"
+    takeover_path = agents_dir / f"{takeover_id}.json"
+    try:
+        current_data = json.loads(current_path.read_text(encoding="utf-8"))
+        takeover_data = json.loads(takeover_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, FileNotFoundError):
+        return False
+    if current_data.get("exited_at"):
+        return False
+    if _parse_positive_int(current_data.get("session_pid")) != session_pid:
+        return False
+    current_stamp = str(current_data.get("registered_at") or "")
+    takeover_stamp = str(takeover_data.get("registered_at") or "")
+    return current_stamp > takeover_stamp
+
+
 def _adopt_pid_owner(agent_id: str) -> str:
     """Protect explicit takeovers, not whichever startup UUID registered first.
 
@@ -1509,10 +1536,18 @@ def _adopt_pid_owner(agent_id: str) -> str:
         else None
     )
     if owner and _record_belongs_to_process(owner, session_pid):
-        os.environ["LITEHARNESS_AGENT_ID"] = owner
-        _IDENTITY_DECISION["source"] = f"protected explicit takeover {owner}"
-        _obs_identity(owner, adopted_from=agent_id, session_pid=session_pid)
-        return owner
+        # T512: a stale takeover record must not replace a NEWER live session on
+        # the same pid. After /clear the predecessor's takeover record survives
+        # while the successor registers under its own id; the PostCompact hook
+        # then finds the old record and resurrects the dead id, orphaning the
+        # live watcher and maildir. Guard: if agent_id already has a presence
+        # file on this pid that's newer than the owner's record, skip adoption.
+        if not _current_session_is_newer(agent_id, owner, session_pid):
+            os.environ["LITEHARNESS_AGENT_ID"] = owner
+            _IDENTITY_DECISION["source"] = f"protected explicit takeover {owner}"
+            _obs_identity(owner, adopted_from=agent_id, session_pid=session_pid)
+            return owner
+        _IDENTITY_DECISION["source"] = f"stale takeover {owner} — kept {agent_id}"
     _IDENTITY_DECISION["replaced"] = _resume_startup_predecessors(agent_id, session_pid)
     _obs_identity(agent_id, adopted_from=None, session_pid=session_pid)
     return agent_id
