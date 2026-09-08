@@ -108,9 +108,10 @@ GEN="python ${CLAUDE_SKILL_DIR}/codex_image.py"
 # Generate (default backend `responses`, model gpt-5.5 with its native image_generation tool)
 $GEN "SaaS dashboard, dark theme, modern UI, wide 16:9 banner" --out ~/Pictures/gen-image/dashboard.png
 
-# Typed endpoint (OpenAI-style JSON, model gpt-image-2)
+# Typed endpoint (OpenAI-style JSON, ChatGPT Images 2.5: gpt-image-2.5-flare; --image edits use -sunburst)
 $GEN "Epic dragon over a medieval city, cinematic, 16:9" --backend images --out dragon.png
-$GEN "..." --backend images --model gpt-image-2
+$GEN "..." --backend images --quality xhigh --size 1536x1024     # quality/size pass through on this backend only
+$GEN "..." --backend images --model gpt-image-2.5-sunburst        # precision over speed for a generation too
 
 # EDIT with reference image(s) — repeatable, png/jpg/gif/webp; the model genuinely sees them
 $GEN "restyle this fox in watercolor, keep the pose" --image fox.png --out fox-watercolor.png
@@ -127,11 +128,13 @@ $GEN --refresh-only
 | `--backend`           | Endpoint             | Model (default) | Use it for                                                                          |
 | --------------------- | -------------------- | --------------- | ----------------------------------------------------------------------------------- |
 | `responses` (default) | `/responses`         | `gpt-5.5`       | everything — the model reads the prompt like a chat turn and calls image generation |
-| `images`              | `/images/generations`| `gpt-image-2`   | the typed OpenAI shape; the retry when `responses` answers in text instead          |
+| `images`              | `/images/generations`| `gpt-image-2.5-flare` (`-sunburst` with `--image`) | the typed OpenAI shape; the retry when `responses` answers in text instead |
 
-Both backends were measured on 2026-09-05: real PNGs in ~20–30 s each; both edit paths kept an exact pose and composition from the reference. **Model gotcha:** `gpt-5.4` returns HTTP 400 on this account — use `gpt-5.5` (responses) or `gpt-image-2` (images). The account's model list is in `~/.codex/models_cache.json`.
+Both backends were measured on 2026-09-05: real PNGs in ~20–30 s each; both edit paths kept an exact pose and composition from the reference. **Model gotcha:** `gpt-5.4` returns HTTP 400 on this account — use `gpt-5.5` (responses) or a `gpt-image` id (images). The account's model list is in `~/.codex/models_cache.json`.
 
-**Size and quality are `auto` on the wire** (`build_images_body` sends `background/quality/size: auto`). Put the ratio and the resolution wish in the prompt: "wide 16:9", "square 1:1", "tall 9:16 story", "high detail, 4K-grade". A `--size` passthrough for the `images` backend (gpt-image-2 accepts `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `3840x2160`) is not exposed yet.
+**ChatGPT Images 2.5 (OpenAI 2026-09-08; measured through the bridge the same day):** two ids, same endpoints — `gpt-image-2.5-flare` (fast; higher quality than gpt-image-2 at half the latency; the `images` default) and `gpt-image-2.5-sunburst` (editing precision; the default once `--image` makes it an edit). Measured: flare 27.6 s, sunburst 33.1 s on `/images/generations`. The `responses` backend now names `gpt-image-2.5-flare` on its `image_generation` tool — the bridge accepts the field; whether it is honoured is unproven (the reply names no model).
+
+**Size and quality pass through on the `images` backend** (`--quality auto|low|medium|high|xhigh|max` — `xhigh` and `max` are new with 2.5; `--size auto|1024x1024|1536x1024|1024x1536|WIDTHxHEIGHT`, multiples of 16, 1:3..3:1, max 3840 per edge). On `responses` both stay `auto` on the wire: put the ratio and the resolution wish in the prompt ("wide 16:9", "square 1:1", "tall 9:16 story", "high detail, 4K-grade").
 
 #### Route Selection Rules
 
@@ -139,8 +142,8 @@ The words that used to pick between clouds now all land on this one route — no
 
 | Signal                                                                | Route                          |
 | --------------------------------------------------------------------- | ------------------------------ |
-| "codex", "codex image", "imagegen", "gpt image", "chatgpt image", "use gpt", "openai image", "gpt-image-2", "go big", "best quality", "hero image", "final version", "quick image", "rough draft", no signal | `codex_image.py` (`responses`) |
-| "gpt-image-2", "typed", or `responses` answered in text               | `codex_image.py --backend images` |
+| "codex", "codex image", "imagegen", "gpt image", "chatgpt image", "use gpt", "openai image", "images 2.5", "go big", "best quality", "hero image", "final version", "quick image", "rough draft", no signal | `codex_image.py` (`responses`) |
+| "gpt-image", "flare", "sunburst", "typed", "xhigh", "max quality", an exact size, or `responses` answered in text | `codex_image.py --backend images` (`--model gpt-image-2.5-sunburst` for precision) |
 | "local", "offline", "stable diffusion", "SD", or the machine is offline | LiteImage (tier 2)             |
 
 #### How auth works (measured 2026-09-05)

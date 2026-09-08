@@ -4,8 +4,10 @@
 Spoofs the codex_cli_rs client against https://chatgpt.com/backend-api/codex.
 
 Backends:
-  responses  POST /responses          native image_generation tool (default; model gpt-5.5)
-  images     POST /images/generations typed endpoint, OpenAI-style JSON (model gpt-image-2)
+  responses  POST /responses          native image_generation tool (default; model gpt-5.5,
+                                      tool model gpt-image-2.5-flare)
+  images     POST /images/generations typed endpoint, OpenAI-style JSON
+                                      (gpt-image-2.5-flare; --image edits default to -sunburst)
 
 Reference images (--image PATH, repeatable) turn generation into an EDIT:
   responses  input_image content parts with data URLs in the user message
@@ -16,7 +18,7 @@ Expired tokens are refreshed via https://auth.openai.com/oauth/token and written
 
 Usage:
   python codex_image.py "a red fox on a mossy rock at dawn" --out fox.png
-  python codex_image.py "..." --backend images --model gpt-image-2
+  python codex_image.py "..." --backend images --quality xhigh --size 1536x1024
   python codex_image.py "restyle this fox in watercolor" --image fox.png
   python codex_image.py --refresh-only
 """
@@ -38,7 +40,10 @@ BASE_URL = "https://chatgpt.com/backend-api/codex"
 REFRESH_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # codex_cli_rs client id (matches Ryan's token)
 
-DEFAULT_MODELS = {"responses": "gpt-5.5", "images": "gpt-image-2"}
+DEFAULT_MODELS = {"responses": "gpt-5.5", "images": "gpt-image-2.5-flare"}
+EDIT_MODEL = "gpt-image-2.5-sunburst"  # editing precision; the default for --image on the images backend
+IMAGE_TOOL_MODEL = "gpt-image-2.5-flare"  # accepted by the bridge 2026-09-08; honouring unproven (the reply names no model)
+QUALITIES = ("auto", "low", "medium", "high", "xhigh", "max")
 
 _MIME_BY_EXT = {
     ".png": "image/png",
@@ -173,7 +178,7 @@ def build_responses_body(prompt: str, model: str, request_id: str, stream: bool 
         "input": [
             {"type": "message", "role": "user", "content": content},
         ],
-        "tools": [{"type": "image_generation", "output_format": "png"}],
+        "tools": [{"type": "image_generation", "output_format": "png", "model": IMAGE_TOOL_MODEL}],
         "tool_choice": "auto",
         "parallel_tool_calls": False,
         "prompt_cache_key": request_id,
@@ -183,13 +188,13 @@ def build_responses_body(prompt: str, model: str, request_id: str, stream: bool 
     }
 
 
-def build_images_body(prompt: str, model: str) -> dict:
+def build_images_body(prompt: str, model: str, quality: str = "auto", size: str = "auto") -> dict:
     return {
         "model": model,
         "prompt": prompt,
         "background": "auto",
-        "quality": "auto",
-        "size": "auto",
+        "quality": quality,
+        "size": size,
     }
 
 
@@ -298,9 +303,10 @@ def _extract_images(data, timeout: float) -> list[bytes]:
     return out
 
 
-def generate_images(auth: dict, prompt: str, model: str, timeout: float) -> list[bytes]:
+def generate_images(auth: dict, prompt: str, model: str, timeout: float,
+                    quality: str = "auto", size: str = "auto") -> list[bytes]:
     url = f"{BASE_URL}/images/generations"
-    body = json.dumps(build_images_body(prompt, model)).encode()
+    body = json.dumps(build_images_body(prompt, model, quality, size)).encode()
     log(f"POST {url} (model={model})")
 
     with do_request(url, base_headers(auth), body, timeout) as resp:
@@ -309,14 +315,10 @@ def generate_images(auth: dict, prompt: str, model: str, timeout: float) -> list
 
 
 def generate_edits(auth: dict, prompt: str, model: str, refs: list[str],
-                   timeout: float) -> list[bytes]:
+                   timeout: float, quality: str = "auto", size: str = "auto") -> list[bytes]:
     url = f"{BASE_URL}/images/edits"
     body = json.dumps({
-        "model": model,
-        "prompt": prompt,
-        "background": "auto",
-        "quality": "auto",
-        "size": "auto",
+        **build_images_body(prompt, model, quality, size),
         "images": [{"image_url": u} for u in refs],
     }).encode()
     log(f"POST {url} (model={model}, {len(refs)} ref(s))")
@@ -329,18 +331,20 @@ def generate_edits(auth: dict, prompt: str, model: str, refs: list[str],
 # ---------------------------------------------------------------- main
 
 def generate(prompt: str, backend: str, model: str | None, timeout: float,
-             refs: list[str] | None) -> list[bytes]:
+             refs: list[str] | None, quality: str = "auto", size: str = "auto") -> list[bytes]:
     auth = load_auth()
     if not auth.get("access_token"):
         raise RuntimeError(f"no access_token in {auth['path']}")
 
-    model = model or DEFAULT_MODELS[backend]
     if backend == "responses":
+        model = model or DEFAULT_MODELS[backend]
         gen = lambda a, p, m, t: generate_responses(a, p, m, t, refs=refs)
     elif refs:
-        gen = lambda a, p, m, t: generate_edits(a, p, m, refs, t)
+        model = model or EDIT_MODEL
+        gen = lambda a, p, m, t: generate_edits(a, p, m, refs, t, quality, size)
     else:
-        gen = generate_images
+        model = model or DEFAULT_MODELS[backend]
+        gen = lambda a, p, m, t: generate_images(a, p, m, t, quality, size)
 
     for attempt in (1, 2):
         try:
@@ -363,7 +367,13 @@ def main() -> int:
     ap.add_argument("prompt", nargs="?", help="image prompt")
     ap.add_argument("--out", default=None, help="output PNG path (default: codex-image-<ts>.png in cwd)")
     ap.add_argument("--backend", choices=["responses", "images"], default="responses")
-    ap.add_argument("--model", default=None, help=f"override model (defaults: {DEFAULT_MODELS})")
+    ap.add_argument("--model", default=None,
+                    help=f"override model (defaults: {DEFAULT_MODELS}; --image on images: {EDIT_MODEL})")
+    ap.add_argument("--quality", choices=QUALITIES, default="auto",
+                    help="images backend only: low/medium/high/xhigh/max (2.5 adds xhigh and max)")
+    ap.add_argument("--size", default="auto",
+                    help="images backend only: 1024x1024, 1536x1024, 1024x1536, or WIDTHxHEIGHT "
+                         "(multiples of 16, 1:3..3:1, max 3840 per edge)")
     ap.add_argument("--image", action="append", default=[], metavar="PATH",
                     help="reference image for an EDIT; repeatable (png/jpg/gif/webp)")
     ap.add_argument("--timeout", type=float, default=300.0)
@@ -382,7 +392,8 @@ def main() -> int:
     refs = [image_data_url(p) for p in args.image]
 
     started = time.time()
-    images = generate(args.prompt, args.backend, args.model, args.timeout, refs or None)
+    images = generate(args.prompt, args.backend, args.model, args.timeout, refs or None,
+                      args.quality, args.size)
 
     out_path = args.out or f"codex-image-{int(time.time())}.png"
     for i, img in enumerate(images):
