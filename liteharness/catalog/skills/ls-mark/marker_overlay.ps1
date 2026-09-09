@@ -76,6 +76,45 @@ $f.KeyPreview = $true
 $f.Size = New-Object System.Drawing.Size($size, ($size + $labelH + $btnH))
 $f.Location = New-Object System.Drawing.Point(([int]($gx - $size / 2)), ([int]($gy - $size / 2)))
 
+# Ryan 2026-09-08 23:2x: "update /ls-mark with taht golden bullseye icon thats sick".
+# ring.png ships INSIDE this skill dir, never borrowed from another skill — ls-mark is the
+# model for a self-contained catalog skill and a cross-skill path would be a dead pointer on
+# any box but this one. Absent art falls back to the drawn ring, so the skill still works.
+#
+# 🔴 FLATTENED AGAINST THE KEY COLOUR, not drawn with its alpha: WinForms TransparencyKey is
+# all-or-nothing, so an anti-aliased gold edge over a magenta key shows as a magenta halo.
+# Same rule as the gold glide sprite and the typing strip.
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ringPath = Join-Path $here 'ring.png'
+$ringBmp = $null
+$ringPx = [int]($size - 20 + 12)   # the exact rect Add_Paint draws into
+if (Test-Path $ringPath) {
+    try {
+        $src = [System.Drawing.Bitmap]::FromFile($ringPath)
+        # 🔴 SCALE FIRST, FLATTEN SECOND. Flattening then letting DrawImage
+        # scale blends key-colour pixels with gold and the in-between colours
+        # are NOT the key, so they survive TransparencyKey as a magenta halo
+        # around the ring. Resampling while the alpha is still real, then
+        # keying the result, leaves every transparent pixel exactly the key.
+        $scaled = New-Object System.Drawing.Bitmap($ringPx, $ringPx)
+        $sg = [System.Drawing.Graphics]::FromImage($scaled)
+        $sg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $sg.Clear([System.Drawing.Color]::Transparent)
+        $sg.DrawImage($src, 0, 0, $ringPx, $ringPx)
+        $sg.Dispose(); $src.Dispose()
+
+        $ringBmp = New-Object System.Drawing.Bitmap($ringPx, $ringPx)
+        for ($iy = 0; $iy -lt $ringPx; $iy++) {
+            for ($ix = 0; $ix -lt $ringPx; $ix++) {
+                $p = $scaled.GetPixel($ix, $iy)
+                if ($p.A -lt 128) { $ringBmp.SetPixel($ix, $iy, $key) }
+                else { $ringBmp.SetPixel($ix, $iy, [System.Drawing.Color]::FromArgb(255, $p.R, $p.G, $p.B)) }
+            }
+        }
+        $scaled.Dispose()
+    } catch { $ringBmp = $null }
+}
+
 $f.Add_Paint({
     param($s, $e)
     $g = $e.Graphics
@@ -84,6 +123,15 @@ $f.Add_Paint({
     $pen = New-Object System.Drawing.Pen($mc, $penW)
     $brush = New-Object System.Drawing.SolidBrush($mc)
     $cx = [int]($size / 2); $cy = [int]($size / 2); $r = [int]($size / 2 - 10)
+    if ($null -ne $ringBmp) {
+        # 1:1, no scaling here — the bitmap was already built at $ringPx.
+        $g.DrawImageUnscaled($ringBmp, ($cx - [int]($ringPx / 2)), ($cy - [int]($ringPx / 2)))
+        if ($Label -ne '') {
+            $lf = New-Object System.Drawing.Font('Consolas', 9, [System.Drawing.FontStyle]::Bold)
+            $g.DrawString($Label, $lf, $brush, 2, ($size - 2))
+        }
+        return
+    }
     $g.DrawEllipse($pen, ($cx - $r), ($cy - $r), (2 * $r), (2 * $r))
     $g.FillEllipse($brush, ($cx - 4), ($cy - 4), 8, 8)
     $g.DrawLine($pen, $cx, ($cy - $r - 7), $cx, ($cy - $r + 7))
