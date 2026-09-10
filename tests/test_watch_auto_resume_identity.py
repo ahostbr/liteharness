@@ -272,3 +272,203 @@ def test_a_genuine_first_run_still_arms_on_its_own_env_id(identity_root, capsys)
     assert watched == UNREGISTERED, (
         "a first-run watcher must still arm on its own id when no takeover owns the pid"
     )
+
+
+# ---------------------------------------------------------------------------
+# T563 — the guard was never wrong, it was asked TOO EARLY.
+# ---------------------------------------------------------------------------
+#
+# 🔴 MEASURED on Ryan's seat, 2026-09-10: claude.exe 29436 started 08:58:42, the
+# watcher armed 08:58:46 on the STARTUP uuid, and the seat's real presence
+# registered 08:59:07 — TWENTY-ONE SECONDS AFTER THE WATCHER. Every arm above
+# passes in that scenario, because at the moment they run the successor record
+# does not exist yet: `_superseded_by_later_registration` is correctly False and
+# `_watch_identity_after_supersede` correctly returns the env id.
+#
+#     A GUARD EVALUATED ONCE RACES ANY FACT THAT LANDS AFTER IT. The tests above
+#     construct the world and THEN arm; the failure constructs it the other way
+#     round, which is why a green file sat over four live sightings in one day.
+#
+# So these arms run the REAL `watch_inbox` loop with a fake filesystem watcher,
+# and land the takeover BETWEEN two iterations of it.
+
+import pytest as _pytest
+
+from liteharness import inbox as _inbox
+
+
+class _StopWatching(BaseException):
+    """Ends the watcher loop from inside `watcher.wait()`.
+
+    BaseException DELIBERATELY: the loop body ends in `except Exception: pass`,
+    so an ordinary exception is swallowed and the test would hang forever rather
+    than fail. The thing that stops the loop must be the one thing it does not
+    catch.
+    """
+
+
+class _ScriptedWatcher:
+    """Runs one scripted side effect per loop iteration, then stops the loop."""
+
+    def __init__(self, steps):
+        self._steps = list(steps)
+        self.waits = 0
+
+    def wait(self, timeout=None):
+        if self.waits >= len(self._steps):
+            raise _StopWatching
+        step = self._steps[self.waits]
+        self.waits += 1
+        if step is not None:
+            step()
+        # Truthy = "a real event fired", which skips the loop's 2 s quiet sleep.
+        return True
+
+
+def _drive_watch(tmp_path, steps, *, watch_id, reresolve_auto_id):
+    """Run the real loop over a real maildir until the script runs out."""
+    new = tmp_path / "inbox" / "new"
+    done = tmp_path / "inbox" / "done"
+    new.mkdir(parents=True, exist_ok=True)
+
+    with mock.patch.object(_inbox, "INBOX_ROOT", tmp_path / "inbox"), mock.patch.object(
+        _inbox, "INBOX_NEW", new
+    ), mock.patch.object(_inbox, "INBOX_DONE", done), mock.patch.object(
+        hooks, "_create_watcher", lambda _root: _ScriptedWatcher(steps)
+    ), mock.patch.object(
+        # The cadence exists so a busy maildir cannot spin this question; the
+        # test removes it rather than faking a clock, because patching
+        # time.monotonic globally would reach pytest's own internals.
+        hooks,
+        "WATCH_AUTO_RERESOLVE_EVERY_S",
+        0.0,
+    ):
+        with _pytest.raises(_StopWatching):
+            hooks.watch_inbox(override_agent_id=watch_id, reresolve_auto_id=reresolve_auto_id)
+
+
+def _put_message(tmp_path, to: str, body: str, msg_id: str = "m1") -> None:
+    (tmp_path / "inbox" / "new").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "inbox" / "new" / f"{msg_id}.json").write_text(
+        json.dumps({"id": msg_id, "to": to, "from": "sender-seat", "body": body}),
+        encoding="utf-8",
+    )
+
+
+def test_a_takeover_landing_after_the_arm_repoints_the_watcher(identity_root, capsys):
+    """🔴 THE CARD'S ACCEPTANCE: mail sent to the registered id is DELIVERED.
+
+    The order here is the measured order, and it is the whole point: the watcher
+    arms first, the message is sent to the id the sender can see, and only THEN
+    does the registration the watcher needs appear.
+    """
+    register(STARTUP, "startup")
+    capsys.readouterr()
+
+    steps = [
+        # Iteration 1 — the message arrives addressed to the id the SENDER sees.
+        # The watcher is still on STARTUP, so its scan skips this file.
+        lambda: _put_message(identity_root, RESUMED, "the message that was going nowhere"),
+        # Iteration 2 — 21 seconds later in real life: the takeover lands.
+        lambda: register(RESUMED, "resume"),
+    ]
+    _drive_watch(identity_root, steps, watch_id=STARTUP, reresolve_auto_id=STARTUP)
+
+    out = capsys.readouterr()
+    printed = out.out + out.err
+
+    assert "the message that was going nowhere" in printed, (
+        "the watcher never delivered mail addressed to the id it was registered as — "
+        "this is the deaf-seat failure T563 exists to close"
+    )
+    assert "RE-POINTED" in printed and STARTUP in printed and RESUMED in printed, (
+        f"the re-point was not reported with both ids: {printed!r}"
+    )
+
+
+def test_mail_that_was_already_waiting_is_recovered_not_just_future_mail(identity_root, capsys):
+    """The message PREDATES the re-point, and is still delivered.
+
+    ⬜ It works because of where the recipient check sits: a message skipped for
+    the wrong recipient is NOT added to `seen_ids` (the `continue` happens
+    first), so the next scan reconsiders it. That is load-bearing and easy to
+    break by "tidying" the skip into the seen set — this arm is what would go
+    red if somebody did.
+    """
+    register(STARTUP, "startup")
+    _put_message(identity_root, RESUMED, "waiting in new/ before anything moved")
+    capsys.readouterr()
+
+    steps = [None, lambda: register(RESUMED, "resume")]
+    _drive_watch(identity_root, steps, watch_id=STARTUP, reresolve_auto_id=STARTUP)
+
+    assert "waiting in new/ before anything moved" in capsys.readouterr().out
+
+
+def test_an_explicit_agent_id_watcher_is_never_repointed(identity_root, capsys):
+    """🔴 CONTROL — the fix must not become the same bug pointing the other way.
+
+    An explicit `--agent-id` is somebody's DECISION (the successor pointer after
+    a /clear arms exactly this way). Silently moving it because the registry
+    disagrees would drain a seat's inbox into another seat, which is worse than
+    the deafness being fixed.
+    """
+    register(STARTUP, "startup")
+    _put_message(identity_root, RESUMED, "not for this watcher")
+    capsys.readouterr()
+
+    steps = [None, lambda: register(RESUMED, "resume")]
+    _drive_watch(identity_root, steps, watch_id=STARTUP, reresolve_auto_id=None)
+
+    printed = capsys.readouterr().out
+    assert "RE-POINTED" not in printed, "an explicitly-addressed watcher was moved"
+    assert "not for this watcher" not in printed, "it delivered another id's mail"
+
+
+def test_the_window_closes(identity_root, capsys):
+    """CONTROL — this is a bounded reconciliation, not a permanent poll.
+
+    Without this the arms above pass for an implementation that re-resolves
+    forever, which would keep asking the registry for the life of every seat on
+    the machine.
+    """
+    register(STARTUP, "startup")
+    capsys.readouterr()
+
+    with mock.patch.object(hooks, "WATCH_AUTO_RERESOLVE_WINDOW_S", 0.0):
+        steps = [lambda: register(RESUMED, "resume"), None]
+        _drive_watch(identity_root, steps, watch_id=STARTUP, reresolve_auto_id=STARTUP)
+
+    assert "RE-POINTED" not in capsys.readouterr().out, (
+        "the watcher re-resolved after its window had closed"
+    )
+
+
+def test_watch_auto_actually_enables_the_reresolve(identity_root, capsys):
+    """🔴 THE WIRING ARM — without it the loop feature above can be DEAD CODE.
+
+    Everything else here calls `watch_inbox` directly. If `main("watch-auto")`
+    stopped passing `reresolve_auto_id`, every arm above would still pass and no
+    real seat would ever re-point. That is the shape this repo has been bitten by
+    before: a helper proven in isolation that its only caller never invokes.
+    """
+    register(STARTUP, "startup")
+    captured: dict = {}
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(
+            ("CODEX", "CLAUDE", "LITEHARNESS", "LITESUITE", "COPILOT", "GEMINI", "LITECODE")
+        )
+    }
+    env.update(LITEHARNESS_CLI="claude-code")
+    env["CLAUDE_CODE_SESSION_ID"] = STARTUP
+    with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+        hooks, "watch_inbox", lambda **kw: captured.update(kw)
+    ), mock.patch.object(hooks.sys, "argv", ["hooks", "watch-auto"]):
+        hooks.main()
+
+    assert captured.get("reresolve_auto_id") == STARTUP, (
+        f"watch-auto did not arm the re-resolve; it passed {captured!r}"
+    )

@@ -2805,7 +2805,30 @@ def compose_notification(
     return "\n".join([head, *body_lines, *tail])
 
 
-def watch_inbox(override_agent_id: str = None, ignore_senders: set[str] | None = None) -> None:
+WATCH_AUTO_RERESOLVE_WINDOW_S = 60.0
+"""How long a watch-auto watcher keeps re-asking who owns its pid.
+
+🔴 T563. `_watch_identity_after_supersede` answers correctly — ONCE, AT ARM TIME
+— and on a `/resume` the answer it needs DOES NOT EXIST YET. Measured on Ryan's
+seat 2026-09-10: claude.exe 29436 started 08:58:42, watch-auto armed 08:58:46 on
+the STARTUP uuid, and the seat's real presence registered 08:59:07 — 21 SECONDS
+AFTER THE WATCHER. The guard did not fail; it was asked too early.
+    A GUARD EVALUATED ONCE RACES ANY FACT THAT LANDS AFTER IT.
+So the question is asked again for a bounded window instead of once. 60 s is
+three times the measured 21 s gap, and the window exists so this cannot become a
+permanent poll: after it closes the watcher is exactly what it was before.
+"""
+
+WATCH_AUTO_RERESOLVE_EVERY_S = 3.0
+"""Cadence inside the window. The loop wakes on every filesystem event, which on
+a busy maildir is far more often than this question can change its answer."""
+
+
+def watch_inbox(
+    override_agent_id: str = None,
+    ignore_senders: set[str] | None = None,
+    reresolve_auto_id: str | None = None,
+) -> None:
     """
     Long-running inbox watcher — event-driven, not timer-based.
 
@@ -2814,6 +2837,12 @@ def watch_inbox(override_agent_id: str = None, ignore_senders: set[str] | None =
     Falls back to inotify/ReadDirectoryChangesW when available.
 
     Args:
+        reresolve_auto_id: WATCH-AUTO ONLY — the id the environment named. When
+            set, the watcher re-asks `_watch_identity_after_supersede` for
+            `WATCH_AUTO_RERESOLVE_WINDOW_S` and re-points itself if a takeover
+            lands after it armed (T563). Deliberately NOT set for an explicit
+            `--agent-id` watcher: that id is somebody's decision, and silently
+            moving it would be a second bug of the same shape as the first.
         override_agent_id: Explicit agent ID to watch. Required in multi-session
             environments because watch runs as a long-lived subprocess that can't
             read stdin JSON from the parent CLI. Without this, it falls back to
@@ -2831,6 +2860,11 @@ def watch_inbox(override_agent_id: str = None, ignore_senders: set[str] | None =
 
     seen_ids: set[str] = set()
 
+    reresolve_deadline = (
+        time.monotonic() + WATCH_AUTO_RERESOLVE_WINDOW_S if reresolve_auto_id else 0.0
+    )
+    next_reresolve = 0.0
+
     # Watch the entire inbox root (new/, cur/, done/) — not just new/
     # The agent decides what to do with messages, not the watcher
     watcher = _create_watcher(str(inbox.INBOX_ROOT))
@@ -2841,6 +2875,37 @@ def watch_inbox(override_agent_id: str = None, ignore_senders: set[str] | None =
             # Wait for change — blocks until something happens or timeout.
             # Returns truthy if a real filesystem event fired, falsy on plain timeout.
             changed = bool(watcher.wait(timeout=5.0))
+
+            if reresolve_auto_id and time.monotonic() < reresolve_deadline:
+                now = time.monotonic()
+                if now >= next_reresolve:
+                    next_reresolve = now + WATCH_AUTO_RERESOLVE_EVERY_S
+                    try:
+                        moved, note = _watch_identity_after_supersede(reresolve_auto_id)
+                    except Exception as err:  # a registry read must never kill the watcher
+                        moved, note = None, ""
+                        print(
+                            f"[LITEHARNESS] watch-auto re-resolve failed (still watching "
+                            f"{agent_id}): {err}",
+                            file=sys.stderr,
+                        )
+                    # `moved is None` is the REFUSE answer (several live successors).
+                    # Staying put is right: watching a guessed id drains someone
+                    # else's inbox, which is worse than this seat staying deaf.
+                    if moved and moved != agent_id:
+                        if note:
+                            print(note, file=sys.stderr)
+                        print(
+                            f"[LITEHARNESS] watch-auto RE-POINTED: {agent_id} -> {moved}. "
+                            "A registration landed after this watcher armed; mail addressed "
+                            "to the new id is delivered from here on, including anything "
+                            "already waiting in new/.",
+                            flush=True,
+                        )
+                        agent_id = moved
+                        # Nothing is replayed and nothing needs to be: a message
+                        # skipped for the wrong recipient was never added to
+                        # `seen_ids`, so the next scan picks it up.
 
             # Scan only new/ — cur/ is for claimed messages owned by other watchers
             if not inbox.INBOX_NEW.exists():
@@ -3229,7 +3294,10 @@ def main() -> None:
         if resolved is None:
             return
         print(f"[LITEHARNESS] watch-auto resolved agent id from environment: {resolved}")
-        watch_inbox(override_agent_id=resolved)
+        # T563: keep asking. On a /resume the registration this resolution needs
+        # lands ~21 s AFTER this point, so the answer above can be right-by-rule
+        # and wrong-in-fact.
+        watch_inbox(override_agent_id=resolved, reresolve_auto_id=auto_id)
     elif action == "deregister":
         deregister()
     elif action == "bridge":

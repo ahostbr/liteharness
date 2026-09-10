@@ -144,7 +144,16 @@ class PresenceLivenessTests(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
-        watch_inbox.assert_called_once_with(override_agent_id="agent-123")
+        # T563 added `reresolve_auto_id`: watch-auto now keeps asking who owns
+        # its pid for a bounded window, because on a /resume the registration it
+        # needs lands ~21 s AFTER it arms. This arm is about WHICH ID watch-auto
+        # resolves, and that is unchanged — the extra kwarg is asserted here
+        # rather than loosened away with ANY, so that silently dropping the
+        # re-resolve (which would make the whole feature dead code) fails here
+        # too and not only in test_watch_auto_resume_identity.py.
+        watch_inbox.assert_called_once_with(
+            override_agent_id="agent-123", reresolve_auto_id="agent-123"
+        )
 
 
 if __name__ == "__main__":
