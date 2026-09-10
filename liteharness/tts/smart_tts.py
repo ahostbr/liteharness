@@ -157,13 +157,24 @@ def generate_summary(
         import requests
 
         prompt = _build_summary_prompt(task_description, summary_type, agent_name, user_name)
+        # The origin header is what lets LiteSuite apply Voice > Hooks to this call
+        # (2026-09-10): without it the summary loaded the voice LLM on every hook fire
+        # with every announcement toggle off.
+        headers = {"X-LiteSuite-Origin": f"smart-tts/{summary_type}"}
+        if agent_name:
+            headers["X-LiteSuite-Agent"] = agent_name
         response = requests.post(
             _voice_url("/v1/llm/generate", port),
             json={"prompt": prompt, "max_tokens": 100, "temperature": 0.7},
+            headers=headers,
             timeout=15,
         )
         if response.status_code == 200:
-            text = response.json().get("text", "").strip()
+            payload = response.json()
+            if payload.get("dropped"):
+                print(f"[SmartTTS] Summary refused by LiteSuite Voice > Hooks: {payload['dropped']}", file=sys.stderr)
+                return None
+            text = payload.get("text", "").strip()
             if text:
                 return text
         else:
@@ -220,7 +231,12 @@ def speak_via_litesuite(
             timeout=5,
         )
         if response.status_code == 200:
-            print(f"[SmartTTS] Sent to LiteSuite voice: {text[:80]}", file=sys.stderr)
+            dropped = response.json().get("dropped") if response.content else None
+            if dropped:
+                # 200 on purpose: refused by Voice > Hooks is DONE, not "fall back to edge-tts".
+                print(f"[SmartTTS] Refused by LiteSuite Voice > Hooks: {dropped}", file=sys.stderr)
+            else:
+                print(f"[SmartTTS] Sent to LiteSuite voice: {text[:80]}", file=sys.stderr)
             return True
         else:
             print(
