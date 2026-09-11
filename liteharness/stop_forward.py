@@ -98,6 +98,52 @@ def remove_watch(seat_id: str, orchestrator_id: Optional[str] = None) -> dict[st
     return data
 
 
+#: One id per seat — the last turn whose stop was forwarded.
+SEEN_PATH = config.HARNESS_ROOT / "stop-forward-seen.json"
+
+
+def _turn_id(transcript_path: str) -> Optional[str]:
+    """The API message id of the transcript's last assistant turn.
+
+    Imported from `hooks` rather than reimplemented: it is the same question,
+    and two copies of a dedupe key are two chances to disagree about what
+    counts as the same event.
+    """
+    if not transcript_path:
+        return None
+    try:
+        from .hooks import _last_assistant_event_id
+
+        return _last_assistant_event_id(transcript_path)
+    except Exception:
+        return None
+
+
+def _already_forwarded(seat_id: str, event_id: str) -> bool:
+    try:
+        seen = json.loads(SEEN_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(seen, dict) and seen.get(seat_id) == event_id
+
+
+def _record_forwarded(seat_id: str, event_id: str) -> None:
+    try:
+        seen = json.loads(SEEN_PATH.read_text(encoding="utf-8"))
+        if not isinstance(seen, dict):
+            seen = {}
+    except (OSError, ValueError):
+        seen = {}
+    seen[seat_id] = event_id
+    try:
+        SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SEEN_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(seen), encoding="utf-8")
+        os.replace(tmp, SEEN_PATH)
+    except OSError:
+        pass
+
+
 def _transcript_tail(path: str) -> list[dict[str, Any]]:
     """The last few JSONL records, read from the END of the file.
 
@@ -151,7 +197,9 @@ def last_assistant_text(records: list[dict[str, Any]]) -> str:
     return ""
 
 
-def last_inbox_send(records: list[dict[str, Any]]) -> Optional[str]:
+def last_inbox_send(
+    records: list[dict[str, Any]], seat_id: Optional[str] = None
+) -> Optional[str]:
     """Who the seat's last tool call messaged, or None if it was not a send.
 
     🔴 THE DISCRIMINATOR THE ORCHESTRATOR ACTUALLY WANTS. A seat that stopped
@@ -170,13 +218,50 @@ def last_inbox_send(records: list[dict[str, Any]]) -> Optional[str]:
         # The LAST tool call in the LAST turn that made one.
         call = uses[-1]
         blob = json.dumps(call.get("input") or {})
-        if "liteharness.cli send" in blob or "inbox" in str(call.get("name", "")).lower():
-            for token in blob.replace('"', " ").replace(",", " ").split():
-                if len(token) == 36 and token.count("-") == 4:
-                    return token
-            return "unknown"
+        name = str(call.get("name", ""))
+        # 🔴 THE TOOL, NOT THE TEXT. Scanning the blob alone read a `Write` of a
+        # file that merely MENTIONS `liteharness.cli send` as a send — measured
+        # over 115 real send-shaped calls in a live transcript, one of them a
+        # test fixture being written. A call is a send because of what it IS.
+        if name not in ("Bash", "BashOutput") and "inbox" not in name.lower():
+            return None
+        if "liteharness.cli send" in blob or "inbox" in name.lower():
+            return _recipient_of(blob, seat_id)
         return None
     return None
+
+
+def _looks_like_id(token: str) -> bool:
+    return len(token) == 36 and token.count("-") == 4
+
+
+def _recipient_of(blob: str, seat_id: Optional[str]) -> str:
+    """Who a send was addressed TO.
+
+    🔴 THE FIRST VERSION TOOK THE FIRST UUID IT SAW AND REPORTED THE SENDER.
+    Live on 2026-09-11 it told the orchestrator "inbox send -> c30dbfa8…", which
+    is the seat's OWN id, for a message actually sent to 2dc57f3e. Every arm
+    passed: the fixtures were built from a clean `send <target> hi` command, and
+    the real call carries `--from <seat>` and a `--body-file` path that itself
+    contains the seat id. A positional scan cannot tell an argument's ROLE from
+    its shape.
+
+    ⬜ SO IT READS THE POSITION THE CLI DEFINES: the token after `send`. The
+    seat's own id is refused outright as a second guard — whatever the parse
+    finds, "you sent a message to yourself" is never the fact being reported.
+    """
+    tokens = blob.replace('"', " ").replace(",", " ").replace("\\", " ").split()
+    for i, token in enumerate(tokens):
+        if token != "send":
+            continue
+        for candidate in tokens[i + 1 : i + 3]:
+            if _looks_like_id(candidate) and candidate != seat_id:
+                return candidate
+    # No positional match — fall back to any id that is not the seat's own.
+    for token in tokens:
+        if _looks_like_id(token) and token != seat_id:
+            return token
+    return "unknown"
 
 
 def seconds_since_inbox_received(seat_id: str) -> Optional[int]:
@@ -291,15 +376,37 @@ def forward_stop(hook_input: dict[str, Any]) -> Optional[str]:
     if hook_input.get("stop_hook_active"):
         return None
 
-    records = _transcript_tail(hook_input.get("transcript_path") or "")
+    # 🔴 THE SAME STOP FIRES THIS HOOK TWICE ON THIS BOX. settings.json's Stop
+    # and the plugin's hooks.json Stop both run `obs Stop`, so one stop produced
+    # two byte-identical messages seconds apart (98a1beb9 / 063fc934, live
+    # 2026-09-11). That is NOT the consecutive-stops case the card deliberately
+    # keeps: it is one event delivered twice.
+    #
+    # ⬜ KEYED ON THE TURN, NOT THE CALL — the rule `_last_assistant_event_id`
+    # (hooks.py:2166) already states for this exact duplicate: both registrations
+    # read the SAME transcript entry and compute the same id, while a genuine
+    # second stop is a different turn with its own id. A minted uuid would differ
+    # per run and dedupe nothing; a content hash could not tell a duplicate
+    # delivery from a seat saying the same thing twice.
+    transcript_path = hook_input.get("transcript_path") or ""
+    event_id = _turn_id(transcript_path)
+    if event_id and _already_forwarded(seat_id, event_id):
+        return None
+
+    records = _transcript_tail(transcript_path)
     body = compose_body(
         name=seat_name(seat_id),
         seat_id=seat_id,
         last_text=last_assistant_text(records),
-        sent_to=last_inbox_send(records),
+        sent_to=last_inbox_send(records, seat_id),
         since_received=seconds_since_inbox_received(seat_id),
         branch=current_branch(hook_input.get("cwd")),
     )
+
+    # Recorded BEFORE sending: a crash mid-send must not licence a second
+    # report of the same turn.
+    if event_id:
+        _record_forwarded(seat_id, event_id)
 
     last_id = None
     for watcher in watchers:
