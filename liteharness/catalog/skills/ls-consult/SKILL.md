@@ -27,10 +27,10 @@ Read the file `.claude/consult-config.json` to get the model panel configuration
   },
   "presets": {
     "quick": ["cc-sonnet"],
-    "default": ["cc-sonnet", "lms-local"],
-    "wide": ["cc-sonnet", "cc-opus", "lms-local"],
+    "default": ["cc-sonnet", "lt-lmstudio"],
+    "wide": ["cc-sonnet", "cc-opus", "lt-codex", "lt-lmstudio"],
     "claude-family": ["cc-haiku", "cc-sonnet", "cc-opus"],
-    "full": ["cc-haiku", "cc-sonnet", "cc-opus", "lms-local"]
+    "full": ["cc-haiku", "cc-sonnet", "cc-opus", "lt-codex", "lt-lmstudio", "lt-llamacpp"]
   },
   "alwaysInclude": [],
   "providers": {
@@ -38,9 +38,9 @@ Read the file `.claude/consult-config.json` to get the model panel configuration
       "type": "cli",
       "enabled": true
     },
-    "lmstudio": {
-      "baseUrl": "http://localhost:1234/v1",
-      "auth": null,
+    "litetui": {
+      "type": "litetui",
+      "command": "litetui",
       "enabled": true
     }
   },
@@ -60,12 +60,38 @@ Read the file `.claude/consult-config.json` to get the model panel configuration
       "name": "Claude Opus 4.8 (CLI)",
       "provider": "claude-cli"
     },
-    "lms-local": { "id": "local-model", "name": "LM Studio (local)", "provider": "lmstudio" }
+    "lt-codex": {
+      "id": "codex",
+      "name": "Codex (via LiteTUI)",
+      "provider": "litetui",
+      "backend": "codex"
+    },
+    "lt-lmstudio": {
+      "id": "",
+      "name": "LM Studio (via LiteTUI)",
+      "provider": "litetui",
+      "backend": "lmstudio"
+    },
+    "lt-llamacpp": {
+      "id": "",
+      "name": "llama.cpp (via LiteTUI)",
+      "provider": "litetui",
+      "backend": "llamacpp"
+    }
   }
 }
 ```
 
-> **Note:** Edit `.claude/consult-config.json` to add your own API keys and provider URLs (OpenAI, Gemini, etc.). The default config only includes Claude CLI models (uses your Claude subscription) and LM Studio (local, no key needed).
+> **Note.** Ryan, 2026-09-10: *"i only want claude / codex / lmstudio or our litesuite
+> lamma.cpp and everything but claude can go threw litetui now."* The shipped panel is
+> Claude through the CLI (your subscription) plus everything else through a headless
+> LiteTUI child. There are no HTTP provider entries and no API keys: `cliproxy`,
+> `openai`, `gemini` and friends were removed rather than disabled, because a disabled
+> entry is one edit away from being back in the panel by accident.
+>
+> `"id": ""` on the litetui models is deliberate. **The model is whatever is already
+> loaded** — see the loading rule in Step 3. A hard-coded id here is exactly what
+> caused a second 27B to be loaded beside someone's running model on 2026-09-10.
 
 ## Step 2: Parse Arguments
 
@@ -87,16 +113,58 @@ If no question is found, ask the user what they'd like to consult about and stop
 1. If `--models` was provided, use those model keys (comma-separated).
 2. Otherwise, use the preset from `--preset` (or `"default"` if not specified) — look up the preset in `config.presets`.
 3. Merge in `config.alwaysInclude` models (deduplicate).
-4. If `--no-local` is set, remove any models whose provider is `"lmstudio"`.
+4. If `--no-local` is set, remove any models whose provider is `"litetui"`.
 5. If `--no-cli` is set, remove any models whose provider is `"claude-cli"`.
 6. Look up each model key in `config.models` to get `id`, `name`, and `provider`.
 7. Look up each provider in `config.providers` to get `baseUrl` and `auth`.
 
-For providers with a `chatPath` field, append that to `baseUrl` for the completions endpoint. Otherwise use the standard `/chat/completions` path. Skip providers where `enabled` is explicitly `false`. Providers with `"type": "cli"` use a completely different invocation path (see Step 5).
+Skip providers where `enabled` is explicitly `false`. Neither shipped provider type is
+HTTP: `"type": "cli"` and `"type": "litetui"` each have their own invocation path
+(Step 5). A config that adds an HTTP provider still works — append `chatPath` to
+`baseUrl`, or use `/chat/completions` — but none ships.
+
+### The loading rule for `litetui` models (read this before Step 4)
+
+**A consult NEVER causes a model to be loaded into VRAM.** Ryan, 2026-09-10, after a
+seat's probe put a second 27B beside the one he was running: *"no model is loaded into
+VRAM without first confirming none is loaded and getting explicit approval."*
+
+LM Studio JIT-loads whatever model a completion request names — so naming a model is
+itself a load, and nothing in the output says one happened. For `litetui` models:
+
+1. Ask what is resident, at run time, every run: `lms ps` (or
+   `GET http://localhost:1234/api/v0/models` and take the entries with a
+   `loaded_context_length`).
+2. Use the id that comes back. **Never** a stored id and never one from this file —
+   the user switches models mid-session, which is why `"id"` is empty in the template.
+3. If nothing is resident, **SKIP that model and print why**. Do not load one.
+
+LiteTUI enforces the same rule from its side as of T594, so a `--rpc` child cannot load
+a model even if asked: it substitutes the resident one (and says so in `ready` via
+`model_note`) or refuses with `{"type": "error", "kind": "model_not_loaded"}`. Treat
+that error as a SKIP with its message printed — never a retry, and never a fallback
+that names a different model.
 
 ## Step 4: Health Check
 
-For each unique **HTTP** provider in the panel, run a quick connectivity check:
+For each unique **`litetui`** provider in the panel:
+
+```bash
+# is the backend up at all, and what is loaded?
+lms ps                      # lmstudio  — a row means up; no rows means SKIP
+curl -s -m 3 http://localhost:7470/health   # llamacpp — LiteSuite LocalAdapter
+```
+
+A backend that does not answer is a **SKIP with the reason printed**, never a hang and
+never a retry loop. As measured 2026-09-10 22:2x, nothing was listening on 7470 — the
+llama.cpp row is expected to skip on a box where LiteSuite is not running it, and a
+panel that silently dropped it would look like the model simply had no opinion.
+
+For `codex`, health is the child itself: it authenticates over OAuth, so the only honest
+check is the `ready` line arriving (Step 5). ⚠️ UNMEASURED as of this edit — nobody has
+run a codex consult end to end; say so rather than reporting a clean run.
+
+For each unique **HTTP** provider in the panel (none ship), run a quick connectivity check:
 
 ```bash
 curl -s --max-time 5 -o /dev/null -w "%{http_code}" PROVIDER_BASE_URL/models
@@ -138,6 +206,56 @@ curl -s --max-time TIMEOUT PROVIDER_BASE_URL/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"MODEL_ID","messages":[{"role":"system","content":"SYSTEM_PROMPT"},{"role":"user","content":"QUESTION"}],"temperature":TEMP,"max_tokens":MAX_TOKENS}'
 ```
+
+### Command pattern for `litetui` providers (headless child, JSON lines)
+
+One child per consulted model. **The shape below is MEASURED** (2026-09-10, LiteTUI
+0.22.2) — do not infer it from this description, and if it stops matching, re-measure
+before changing the parser.
+
+```bash
+litetui --rpc \
+  --tool-profile scheduled \
+  --model "<the id lms ps reported just now>" \
+  --cwd "<a scratch dir, NOT the project>" \
+  --prompt "<the consult question>"
+```
+
+`--tool-profile scheduled` is REQUIRED and is not a style choice. Scheduled is the only
+profile with an EMPTY confirm set that still refuses: `allow={READ_ONLY, SELF_STORE}`,
+and its own source says *"every other authority is refused rather than opening a modal
+nobody is present to answer."* Without it a consulted model can reach the tool-approval
+branch and the consult parks forever waiting for a human who is not watching.
+
+#### The lines it emits
+
+```json
+{"type": "ready", "version": "0.22.2", "model": "...", "cwd": "...", "tool_profile": "scheduled"}
+{"type": "turn_start", "model": "...", "thinking_level": "xhigh"}
+{"type": "reasoning_delta", "text": "The"}
+{"type": "text_delta", "text": "ok"}
+{"type": "turn_end", "stopReason": "stop"}
+```
+
+#### Parsing, and the three ways it goes wrong
+
+1. **The answer is `text_delta` only.** `reasoning_delta` carries a `.text` too, so a
+   parser that concatenates every `.text` returns the model's chain of thought as its
+   answer. Measured: one run answered `ok` behind 91 characters of reasoning. Select on
+   `type`, never on the presence of `text`.
+2. **Hold stdin OPEN until `turn_end`, then close it.** Measured both failures: with
+   stdin at `/dev/null` the child exits 0 having emitted NOTHING — a silent empty
+   answer, the worst shape for a panel — and with stdin left open afterwards it never
+   exits at all (one probe had to be killed at 150 s).
+3. **`ready` may not name the model you asked for.** It can carry `model_note` when
+   LiteTUI substituted the resident model, and `{"type": "error", "kind":
+   "model_not_loaded"}` means SKIP with the message printed. Report the model from
+   `turn_start`, which is emitted after resolution — `ready` is emitted before it.
+
+Answer = `"".join(e["text"] for e in events if e["type"] == "text_delta")`.
+
+A child that has not reached `turn_end` within the timeout is a SKIP with the reason
+printed, and the process is killed. Never report a partial turn as an opinion.
 
 ### Command pattern for `claude-cli` providers (Visible Window Process):
 
