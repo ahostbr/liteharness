@@ -30,14 +30,6 @@ def home(tmp_path, monkeypatch):
     (root / "agents").mkdir(parents=True)
     monkeypatch.setattr(config, "HARNESS_ROOT", root, raising=False)
     monkeypatch.setattr(config, "get_root", lambda: root, raising=False)
-    monkeypatch.setattr(stop_forward, "CONFIG_PATH", root / "stop-forward.json", raising=False)
-    # 🔴 BOTH paths, not just the config one. SEEN_PATH is computed at IMPORT
-    # time from the real HARNESS_ROOT, so patching the constant alone left the
-    # dedupe file pointing at ~/.liteharness — one arm's write leaked into the
-    # next and the genuine-second-stop control failed for a reason that had
-    # nothing to do with the code under test. A test that writes to the real
-    # home is a test that can corrupt the box it is meant to measure.
-    monkeypatch.setattr(stop_forward, "SEEN_PATH", root / "stop-forward-seen.json", raising=False)
     monkeypatch.setattr(config, "get_agent_id", lambda: SEAT, raising=False)
     for name, folder in (
         ("INBOX_NEW", root / "inbox" / "new"),
