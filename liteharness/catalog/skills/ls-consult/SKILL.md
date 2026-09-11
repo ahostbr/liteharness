@@ -1,6 +1,6 @@
 ---
 name: ls-consult
-description: Query external LLM APIs (GPT, Gemini, LM Studio) and Claude CLI for opinions. Only invoke when the user explicitly says 'consult', 'ask GPT', 'ask Gemini', or specifically requests external model comparison. For expert analysis, code review, or architecture opinions, prefer /consult-polymaths instead — it uses internal agents and works without any external services.
+description: Ask several models the same question and compare them — Claude through the Claude CLI, and codex / LM Studio / llama.cpp through a headless LiteTUI child. Only invoke when the user explicitly says 'consult', 'ask the other models', names a model in the panel, or asks for an external model comparison. For expert analysis, code review, or architecture opinions, prefer /consult-polymaths instead — it uses internal agents and works without any external services.
 allowed-tools: Bash, Read
 ---
 
@@ -161,8 +161,14 @@ llama.cpp row is expected to skip on a box where LiteSuite is not running it, an
 panel that silently dropped it would look like the model simply had no opinion.
 
 For `codex`, health is the child itself: it authenticates over OAuth, so the only honest
-check is the `ready` line arriving (Step 5). ⚠️ UNMEASURED as of this edit — nobody has
-run a codex consult end to end; say so rather than reporting a clean run.
+check is the `ready` line arriving (Step 5). **MEASURED 2026-09-10 23:1x**, end to end,
+no VRAM involved: model `gpt-6-astra`, answer `ok`, `turn_end` with `stopReason: "stop"`,
+exits rc 0 on stdin close, 6.5 s total — about a third of the LM Studio run.
+
+🔴 **CODEX EMITS NO `reasoning_delta` AT ALL.** The whole turn was `ready`,
+`turn_start`, ONE `text_delta`, `turn_end`. A parser that waits for reasoning before
+accepting an answer, or that reports "the model did not think", is wrong on this
+backend. Reasoning deltas are optional on every backend and absent on this one.
 
 For each unique **HTTP** provider in the panel (none ship), run a quick connectivity check:
 
@@ -214,6 +220,7 @@ One child per consulted model. **The shape below is MEASURED** (2026-09-10, Lite
 before changing the parser.
 
 ```bash
+LITETUI_BACKEND=lmstudio \
 litetui --rpc \
   --tool-profile scheduled \
   --model "<the id lms ps reported just now>" \
@@ -221,11 +228,35 @@ litetui --rpc \
   --prompt "<the consult question>"
 ```
 
+🔴 **`LITETUI_BACKEND` IS NOT OPTIONAL, AND IT IS THE ONLY LEVER.** The model entries
+above carry `"backend"`, and **there is no `--backend` flag** — `cli.py` has `--rpc`,
+`--model`, `--prompt`, `--system-prompt`, `--cwd`, `--tool-profile`, `--mode`, `--convo`
+and nothing else. Without the env var the child reads `<install>/settings.json`, a file
+no consult controls, and talks to whatever THAT says. Measured 2026-09-10 23:0x: a run
+gated on "LM Studio is up, model resident" launched a child that went to llama.cpp
+(down) and returned `turn_end` with `stopReason: "error"`. **"The service is up" and
+"the child is pointed at it" are two conditions**; checking only the first produces
+confident findings about a backend nobody was talking to.
+
 `--tool-profile scheduled` is REQUIRED and is not a style choice. Scheduled is the only
 profile with an EMPTY confirm set that still refuses: `allow={READ_ONLY, SELF_STORE}`,
 and its own source says *"every other authority is refused rather than opening a modal
 nobody is present to answer."* Without it a consulted model can reach the tool-approval
 branch and the consult parks forever waiting for a human who is not watching.
+
+⚠️ **AND AS OF LiteTUI 0.22.2 THE FLAG DOES NOT REACH THE TURN. PASS IT ANYWAY, BUT
+DO NOT RELY ON IT.** Measured 2026-09-10 23:1x: the profile is installed at construction
+(`app.py:1209-1215`) and then `_submit_text` overwrites it with
+`settings.tool_policy_profile` (`app.py:4272` → `:4296`) before the turn streams — so the
+turn runs tools under whatever the install's settings say, `interactive` or
+`autonomous`, never `scheduled`. The `ready` line is no witness either: the same
+`--tool-profile scheduled` reported `"scheduled"` under lmstudio and `"interactive"`
+under codex, depending on which side of that overwrite won the startup race below.
+
+Until that is fixed, **the timeout is the real guard**, not the profile. Bound every
+child, kill it on expiry, and treat a consult that asks for a tool as a SKIP rather
+than something to wait out. Reported for triage; not a reason to omit the flag, which
+is correct and will start working.
 
 #### The lines it emits
 
@@ -237,20 +268,36 @@ branch and the consult parks forever waiting for a human who is not watching.
 {"type": "turn_end", "stopReason": "stop"}
 ```
 
-#### Parsing, and the three ways it goes wrong
+#### Parsing, and the four ways it goes wrong
 
 1. **The answer is `text_delta` only.** `reasoning_delta` carries a `.text` too, so a
    parser that concatenates every `.text` returns the model's chain of thought as its
-   answer. Measured: one run answered `ok` behind 91 characters of reasoning. Select on
-   `type`, never on the presence of `text`.
+   answer. Measured across runs of the SAME one-word prompt: `ok` arrived as a single
+   `text_delta` behind 22 reasoning deltas / 86 chars, then 68 chars on the next run,
+   and 0 on codex. Treat the volume as unbounded and variable — select on `type`,
+   never on the presence of `text`, and never size a buffer from a past run.
 2. **Hold stdin OPEN until `turn_end`, then close it.** Measured both failures: with
    stdin at `/dev/null` the child exits 0 having emitted NOTHING — a silent empty
    answer, the worst shape for a panel — and with stdin left open afterwards it never
    exits at all (one probe had to be killed at 150 s).
 3. **`ready` may not name the model you asked for.** It can carry `model_note` when
    LiteTUI substituted the resident model, and `{"type": "error", "kind":
-   "model_not_loaded"}` means SKIP with the message printed. Report the model from
-   `turn_start`, which is emitted after resolution — `ready` is emitted before it.
+   "model_not_loaded"}` means SKIP with the message printed. Post-T594 both `ready`
+   and `turn_start` carry the RESOLVED id, so either will do — read whichever arrives,
+   and prefer `turn_start` only because it cannot be emitted before resolution.
+4. **🔴 `ready` IS NOT RELIABLY THE FIRST LINE. NEVER INDEX `events[0]`.** Measured
+   2026-09-10 23:1x, identical flags, three backends:
+
+   | backend | order |
+   | --- | --- |
+   | lmstudio | `ready` @7.6 s, then `turn_start` |
+   | codex | `turn_start` @1.1 s, then `ready` |
+   | llamacpp (down) | `turn_start`, then `ready` |
+
+   `--model`/`--prompt` and the `ready` emitter are two workers started back to back,
+   each waiting on the model list; which finishes first is decided by how long connect
+   takes. A parser that assumed `ready` was line 1 was green on LM Studio purely
+   because its connect is slow. Select every event by `type`.
 
 Answer = `"".join(e["text"] for e in events if e["type"] == "text_delta")`.
 
@@ -390,7 +437,7 @@ After presenting all raw responses, provide a synthesis:
 - {Points where 2+ models converge on the same conclusion}
 
 ### Disagreement
-- {Points where models diverge, with attribution — e.g., "GPT recommends X while Gemini prefers Y"}
+- {Points where models diverge, with attribution — e.g., "cc-opus recommends X while lt-lmstudio prefers Y"}
 
 ### Unique Insights
 - {Points only one model raised that are worth noting}
