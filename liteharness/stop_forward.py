@@ -39,7 +39,9 @@ from typing import Any, Optional
 from . import config, inbox
 
 #: `{enabled: bool, watch: {<seat-id>: [<orchestrator-id>, ...]}}`
-CONFIG_PATH = config.HARNESS_ROOT / "stop-forward.json"
+def config_path() -> Path:
+    """Resolved per call, for the same reason `claims_dir` is."""
+    return config.HARNESS_ROOT / "stop-forward.json"
 
 #: How much of the seat's last message travels. Enough to see what it was doing,
 #: short enough that a chatty seat cannot flood an orchestrator's inbox.
@@ -52,7 +54,7 @@ TAIL_BYTES = 256_000
 
 def load() -> dict[str, Any]:
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        data = json.loads(config_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"enabled": False, "watch": {}}
     if not isinstance(data, dict):
@@ -64,10 +66,10 @@ def load() -> dict[str, Any]:
 
 
 def save(data: dict[str, Any]) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    config_path().parent.mkdir(parents=True, exist_ok=True)
+    tmp = config_path().with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, CONFIG_PATH)
+    os.replace(tmp, config_path())
 
 
 def set_enabled(on: bool) -> dict[str, Any]:
@@ -98,8 +100,31 @@ def remove_watch(seat_id: str, orchestrator_id: Optional[str] = None) -> dict[st
     return data
 
 
-#: One id per seat — the last turn whose stop was forwarded.
-SEEN_PATH = config.HARNESS_ROOT / "stop-forward-seen.json"
+#: One marker file per (seat, turn) whose stop has been claimed.
+#:
+#: 🔴 A DIRECTORY OF MARKERS, NOT A JSON FILE, BECAUSE THE TWO HOOKS ARE TWO
+#: PROCESSES. The first version kept `{seat: last_turn_id}` and did read-then-
+#: write: load the file, compare, send, save. That is atomic against a CRASH and
+#: useless against a RACE — settings.json's Stop and the plugin's hooks.json Stop
+#: run concurrently, so both read "not yet recorded" before either wrote, and the
+#: stop still arrived twice (1dff3f6d / e9247fab, live 2026-09-11, with the
+#: read-then-write version running). Writing earlier does not help: there is no
+#: point in a load/compare/store sequence that two processes cannot both pass.
+#:
+#: `os.open(O_CREAT | O_EXCL)` has no such point. The kernel decides, exactly
+#: once, which process creates the file; the loser gets FileExistsError and
+#: stops. The claim IS the dedupe rather than a record of it.
+#: ⚠️ A FUNCTION, NOT A MODULE CONSTANT, AND THAT IS A BUG FIX. A constant is
+#: computed at IMPORT time from the real home, so it keeps pointing there after a
+#: test relocates the root — my arms wrote to the live ~/.liteharness twice
+#: before I stopped writing path constants. Resolving per call means the path
+#: always follows the config, and no caller has to remember to patch it.
+def claims_dir() -> Path:
+    return config.HARNESS_ROOT / "stop-forward" / "claims"
+
+#: Claims are worthless once their turn is past; a day is long enough that no
+#: live stop is ever pruned and short enough that the directory stays small.
+CLAIM_TTL_SECONDS = 24 * 60 * 60
 
 
 def _turn_id(transcript_path: str) -> Optional[str]:
@@ -119,29 +144,45 @@ def _turn_id(transcript_path: str) -> Optional[str]:
         return None
 
 
-def _already_forwarded(seat_id: str, event_id: str) -> bool:
+def _prune_claims() -> None:
+    """Drop markers older than a day. Best-effort: a failure here must never
+    stop a stop being reported."""
+    cutoff = time.time() - CLAIM_TTL_SECONDS
     try:
-        seen = json.loads(SEEN_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(seen, dict) and seen.get(seat_id) == event_id
-
-
-def _record_forwarded(seat_id: str, event_id: str) -> None:
-    try:
-        seen = json.loads(SEEN_PATH.read_text(encoding="utf-8"))
-        if not isinstance(seen, dict):
-            seen = {}
-    except (OSError, ValueError):
-        seen = {}
-    seen[seat_id] = event_id
-    try:
-        SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = SEEN_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(seen), encoding="utf-8")
-        os.replace(tmp, SEEN_PATH)
+        entries = list(claims_dir().iterdir())
     except OSError:
-        pass
+        return
+    for path in entries:
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _claim_turn(seat_id: str, event_id: str) -> bool:
+    """True for the ONE process that claims this turn; False for every other.
+
+    The whole guard is `O_CREAT | O_EXCL`: the kernel picks a winner, and the
+    loser's FileExistsError is the answer rather than an error to handle.
+    """
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{seat_id}__{event_id}")
+    try:
+        target = claims_dir()
+        target.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(target / safe), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    except OSError:
+        # Cannot claim at all (read-only home, permissions). Reporting twice is
+        # better than reporting never, so the caller proceeds.
+        return True
+    try:
+        os.write(fd, str(int(time.time())).encode("ascii"))
+    finally:
+        os.close(fd)
+    _prune_claims()
+    return True
 
 
 def _transcript_tail(path: str) -> list[dict[str, Any]]:
@@ -390,7 +431,7 @@ def forward_stop(hook_input: dict[str, Any]) -> Optional[str]:
     # delivery from a seat saying the same thing twice.
     transcript_path = hook_input.get("transcript_path") or ""
     event_id = _turn_id(transcript_path)
-    if event_id and _already_forwarded(seat_id, event_id):
+    if event_id and not _claim_turn(seat_id, event_id):
         return None
 
     records = _transcript_tail(transcript_path)
@@ -402,11 +443,6 @@ def forward_stop(hook_input: dict[str, Any]) -> Optional[str]:
         since_received=seconds_since_inbox_received(seat_id),
         branch=current_branch(hook_input.get("cwd")),
     )
-
-    # Recorded BEFORE sending: a crash mid-send must not licence a second
-    # report of the same turn.
-    if event_id:
-        _record_forwarded(seat_id, event_id)
 
     last_id = None
     for watcher in watchers:
