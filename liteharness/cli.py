@@ -3631,6 +3631,47 @@ def cmd_codex_desktop_target(window_handle: int | None = None) -> None:
     print(f"Codex Desktop target set: {selected.get('handle')} -> {target_path}")
 
 
+def cmd_stop_watch(args: list[str]) -> None:
+    """`liteharness stop-watch on|off|add|remove|list` (T660).
+
+    The flag is separate from the watch list on purpose: turning forwarding off
+    must not cost anyone their list, and turning it on must not start forwarding
+    for seats nobody asked about.
+    """
+    from . import stop_forward
+
+    sub = args[0] if args else "list"
+    if sub == "on":
+        stop_forward.set_enabled(True)
+        print("stop forwarding: ENABLED")
+    elif sub == "off":
+        stop_forward.set_enabled(False)
+        print("stop forwarding: disabled")
+    elif sub == "add":
+        if len(args) < 3:
+            print("Usage: liteharness stop-watch add <seat-id> <orchestrator-id>")
+            sys.exit(1)
+        stop_forward.add_watch(args[1], args[2])
+        print(f"watching {args[1][:8]} -> {args[2][:8]}")
+    elif sub == "remove":
+        if len(args) < 2:
+            print("Usage: liteharness stop-watch remove <seat-id> [orchestrator-id]")
+            sys.exit(1)
+        stop_forward.remove_watch(args[1], args[2] if len(args) > 2 else None)
+        print(f"stopped watching {args[1][:8]}")
+    elif sub == "list":
+        data = stop_forward.load()
+        print(f"enabled: {data.get('enabled')}")
+        watch = data.get("watch") or {}
+        if not watch:
+            print("  (no seats watched)")
+        for seat, watchers in sorted(watch.items()):
+            print(f"  {seat} -> {', '.join(watchers)}")
+    else:
+        print("Usage: liteharness stop-watch on|off|add|remove|list")
+        sys.exit(1)
+
+
 def cmd_pty_list() -> None:
     """List all PTY sessions."""
     from . import pty_daemon
@@ -4181,6 +4222,7 @@ def main() -> None:
         print("  pty-daemon                     Start the PTY daemon (background process)")
         print("  send-input <agent-id> <text>   Send text to a PTY session's stdin")
         print("  read-output <agent-id> [lines] Read recent output from a PTY session")
+        print("  stop-watch on|off|add|remove|list  Forward Stop events to a watcher")
         print("  pty-list                       List all PTY sessions")
         print("  pty-kill <agent-id>            Kill a PTY session")
         print()
@@ -4569,6 +4611,8 @@ def main() -> None:
             probe_only=probe_only,
             verify_paste=verify_paste,
         )
+    elif cmd == "stop-watch":
+        cmd_stop_watch(sys.argv[2:])
     elif cmd == "pty-list":
         cmd_pty_list()
     elif cmd == "pty-kill":

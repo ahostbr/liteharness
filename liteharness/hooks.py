@@ -3316,6 +3316,17 @@ def main() -> None:
         memory_nudge()
     elif action == "obs":
         event_type = sys.argv[2] if len(sys.argv) > 2 else hook_input.get("hook_event_name", "")
+        if event_type == "Stop":
+            # T660: a seat that stops looks exactly like a seat that is waiting,
+            # and the orchestrator only finds out by noticing. Rides the same
+            # universally-wired obs dispatch the kanban bridge does, so it is
+            # live for every seat with no hooks.json change.
+            from .stop_forward import forward_stop
+
+            try:
+                forward_stop(hook_input)
+            except Exception as exc:  # a hook must never take the seat down
+                print(f"[stop-forward] {exc}")
         if event_type == "TaskCompleted":
             # Kanban bridge rides the universally-wired obs dispatch — live for
             # every session immediately, no hooks.json change needed.
