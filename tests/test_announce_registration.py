@@ -86,6 +86,12 @@ class AnnounceRegistrationTests(unittest.TestCase):
         cli.cmd_register("orch-1", cli="claude-code", tier="orchestrator", name="Sentinel")
         self.assertEqual(self.messages(), [])
 
+    def test_no_announce_env_keeps_test_children_quiet(self):
+        self.orchestrator()
+        with mock.patch.dict(os.environ, {"LITEHARNESS_NO_ANNOUNCE": "1"}):
+            cli.cmd_register("seat-1", cli="litetui", name="JadePack")
+        self.assertEqual(self.messages(), [])
+
     def test_two_live_orchestrators_both_hear_it(self):
         self.orchestrator("orch-1")
         self.orchestrator("orch-2")

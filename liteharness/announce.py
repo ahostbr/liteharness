@@ -62,6 +62,11 @@ def announce_registration(presence: dict, *, event: str) -> list[str]:
     agent_id = str(presence.get("agent_id") or "")
     if not agent_id:
         return []
+    # Test fixtures spawn real headless children (LiteSuite's LiteTuiAdapter
+    # tests: four LiteTUI seats per gate run, measured 2026-09-12 12:0x) that
+    # register like any seat. The fixture sets this so the board is not told.
+    if os.environ.get("LITEHARNESS_NO_ANNOUNCE", "").strip() not in ("", "0", "false"):
+        return []
     sent: list[str] = []
     try:
         targets = live_orchestrators(exclude_id=agent_id)
