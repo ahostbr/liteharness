@@ -1088,6 +1088,10 @@ def cmd_register(
     from .hooks import _read_presence, _write_json_atomic
 
     presence = _read_presence(path)
+    # For the orchestrator alert below: a first registration and a rename are
+    # events; a heartbeat-style re-register of the same seat is not.
+    was_new = not presence
+    old_name = presence.get("name") if presence else None
     if not presence:
         presence = {"agent_id": agent_id, "started_at": datetime.now(timezone.utc).isoformat()}
 
@@ -1200,6 +1204,14 @@ def cmd_register(
     # `liteharness register` never did, and it is invoked by the SessionStart and
     # PostCompact hooks on every seat.
     _write_json_atomic(path, presence)
+    # Push the arrival to every live orchestrator (Ryan 2026-09-12): discover
+    # only answers when asked, and a seat that nobody asked about worked for an
+    # hour unseen. Same message shape as any other inbox traffic.
+    from .announce import announce_registration
+    if was_new:
+        announce_registration(presence, event="registered")
+    elif old_name and resolved_name != old_name:
+        announce_registration(presence, event=f"took the name {resolved_name} (was {old_name})")
     team_str = f", team={presence['team']}" if presence.get("team") else ""
     spatial_str = f", pane={pane_id}" if pane_id else ""
     print(f"Registered agent {agent_id}: cli={presence.get('cli', '?')}, model={presence.get('model', '?')}, tier={presence.get('tier', 'worker')}, name={resolved_name}{team_str}{spatial_str}")

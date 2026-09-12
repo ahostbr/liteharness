@@ -1929,6 +1929,12 @@ def register_presence() -> None:
     except OSError as exc:
         print(f"[LITEHARNESS] presence write skipped ({exc.__class__.__name__}) — "
               f"the inbox watcher rewrites it on its next heartbeat.")
+    else:
+        # A FIRST registration is pushed to every live orchestrator (Ryan
+        # 2026-09-12); resume/compaction re-registrations of a known id are not.
+        if not existing:
+            from .announce import announce_registration
+            announce_registration(presence, event="registered")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Spatial Bootstrap — inject canvas context for agents inside LiteSuite
