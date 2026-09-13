@@ -275,6 +275,216 @@ def test_a_genuine_first_run_still_arms_on_its_own_env_id(identity_root, capsys)
 
 
 # ---------------------------------------------------------------------------
+# T601 — the case T462 left open: the pid's live owner registered by RESUME,
+# not by an explicit takeover, so the preference above never fires.
+# ---------------------------------------------------------------------------
+#
+# 🔴 MEASURED on SilverBolt's own seat, 2026-09-13 01:15, coming back from a PC
+# restart Ryan ordered. One claude.exe (pid 32844):
+#
+#     SessionStart resolved 1ccbc1d5-… from the CLI environment and wrote a
+#         presence file with registration_source "resume".
+#     monitors.json armed `watch-auto`, whose environment named the NEW session
+#         uuid 55c2b769-…, for which NO presence file exists.
+#     _authoritative_owner_of_pid(32844, "55c2b769-…") -> None
+#     _watch_identity_after_supersede("55c2b769-…") -> ("55c2b769-…", "")
+#
+# So the watcher armed on a mailbox nobody writes to and printed the ordinary
+# healthy line — no warning, because the guard had nothing to say. The seat was
+# deaf until it noticed by hand.
+#
+# WHY T462'S FIX DID NOT COVER IT: `_authoritative_owner_of_pid` only considers
+# records whose registration_source is "takeover" (hooks.py:1259), and that
+# filter is CORRECT for its other caller — `_adopt_pid_owner` must not let an
+# ordinary startup record capture a later session on the same pid (T363). A
+# resume writes "resume" (hooks.py:1794), so the live owner is invisible to the
+# watcher's question while being the only seat on the pid.
+#
+#     THE TWO CALLERS ASK DIFFERENT QUESTIONS. Choosing an IDENTITY may not
+#     follow a weak signal — a wrong adoption renames a live seat. Choosing a
+#     MAILBOX may, when the alternative is an id with no presence file at all,
+#     because there is no competing claim to respect and arming on it is
+#     guaranteed useless.
+
+RESUMED_OWNER = "55555555-5555-4555-8555-555555555555"
+SECOND_OWNER = "66666666-6666-4666-8666-666666666666"
+
+
+def test_watch_auto_prefers_the_pid_s_live_resume_owner_over_an_unregistered_env_id(
+    identity_root, capsys
+):
+    """🔴 THE 2026-09-13 SHAPE — a reboot, and a seat that could not hear.
+
+    Identical in every respect to the T462 arm above EXCEPT that the pid's owner
+    registered through a resume rather than an explicit takeover. That one
+    difference was the whole gap.
+    """
+    register(RESUMED_OWNER, "resume")
+    capsys.readouterr()
+
+    watched, _ = run_watch_auto(UNREGISTERED)
+    out = capsys.readouterr()
+    printed = out.out + out.err
+
+    assert watched != UNREGISTERED, (
+        "watch-auto armed on an id that was never registered while a live resume "
+        "registration owned this pid — that is the deaf seat itself"
+    )
+    assert watched == RESUMED_OWNER, f"expected the pid's live owner, watched {watched!r}"
+    assert UNREGISTERED in printed and RESUMED_OWNER in printed, (
+        f"the correction did not name both ids: {printed!r}"
+    )
+
+
+def test_the_survivor_is_followed_not_the_record_it_retired(identity_root, capsys):
+    """⬜ The fallback must obey the supersede rule, not "first file found".
+
+    🔴 I ASSUMED THIS ARM WAS ABOUT AMBIGUITY AND IT IS NOT. Two registrations
+    on one pid are the ORDINARY case — `_superseded_by_later_registration`
+    retires the earlier one on a strictly-greater `registered_at`, which is how
+    T363 keeps a startup record from outliving the resume that replaced it. So
+    there is exactly one live owner here and following it is correct, not a
+    guess. Written down because the arm I first wrote asserted a refusal and
+    would have forced the fix to refuse the commonest resume on the machine.
+    """
+    register(SECOND_OWNER, "startup")
+    register(RESUMED_OWNER, "resume")
+    import json as _json
+
+    retired = _json.loads((identity_root / "agents" / f"{SECOND_OWNER}.json").read_text())
+    assert cli._superseded_by_later_registration(SECOND_OWNER, retired), (
+        "the premise changed: the earlier registration is no longer retired"
+    )
+    capsys.readouterr()
+
+    watched, _ = run_watch_auto(UNREGISTERED)
+
+    assert watched == RESUMED_OWNER, (
+        f"followed {watched!r} — a watcher must not arm on a record another "
+        "registration has already retired"
+    )
+
+
+def test_two_UNRETIRED_owners_on_one_pid_refuse_rather_than_guess(identity_root, capsys):
+    """🔴 CONTROL — the fallback must never DRAIN ANOTHER SEAT'S INBOX.
+
+    A weaker signal is acceptable only while it is unambiguous. Neither record
+    retires the other only when their `registered_at` compare equal (the rule is
+    strictly-greater, cli.py), so that is constructed directly here rather than
+    pretended into existence with two ordinary registrations — which, per the
+    arm above, would not be ambiguous at all.
+
+    It is a defensive path, and it is the one that decides whether this fix is a
+    guard or a new way to lose mail: picking either id delivers that seat's
+    messages here and leaves it deaf.
+    """
+    import json as _json
+
+    register(RESUMED_OWNER, "resume")
+    row = identity_root / "agents" / f"{RESUMED_OWNER}.json"
+    data = _json.loads(row.read_text())
+    twin = dict(data)  # same pid, same stamp: neither is "later"
+    (identity_root / "agents" / f"{SECOND_OWNER}.json").write_text(
+        _json.dumps(twin), encoding="utf-8"
+    )
+    assert not cli._superseded_by_later_registration(RESUMED_OWNER, data), (
+        "the twin retired the original — this arm is no longer about ambiguity"
+    )
+    capsys.readouterr()
+
+    watched, _ = run_watch_auto(UNREGISTERED)
+    printed = "".join(capsys.readouterr())
+
+    assert watched is None, f"watch-auto guessed between two unretired owners: {watched!r}"
+    assert "--agent-id" in printed, (
+        "a refusal must name the explicit command that resolves it, or the reader is "
+        f"left with a dead watcher and no next step: {printed!r}"
+    )
+
+
+def test_an_explicit_takeover_still_decides_what_the_weak_rule_would_refuse(
+    identity_root, capsys
+):
+    """🔴 THE ARM THAT MAKES T462'S PREFERENCE LOAD-BEARING AGAIN.
+
+    Found by mutation, not by reading: deleting the `_authoritative_owner_of_pid`
+    preference left all 17 arms GREEN, because the new fallback answers the same
+    way whenever the takeover record is also the only live one — which is every
+    case T462 built. The stronger rule had become code defended by nothing.
+
+    It earns its place in exactly one place: where the WEAK rule must refuse. Two
+    unretired records on the pid is an ambiguity the fallback cannot resolve, but
+    an explicit takeover is somebody's DECISION about who this seat is, so it
+    settles it. Order matters and this is what proves it — strong signal first,
+    weak fallback only when the strong one is silent.
+    """
+    import json as _json
+
+    register_takeover(TAKEOVER)
+    # A twin with the same pid and the same stamp: neither retires the other, so
+    # the fallback alone would see an ambiguity and refuse.
+    row = identity_root / "agents" / f"{TAKEOVER}.json"
+    twin = dict(_json.loads(row.read_text()))
+    twin["registration_source"] = "resume"
+    (identity_root / "agents" / f"{SECOND_OWNER}.json").write_text(
+        _json.dumps(twin), encoding="utf-8"
+    )
+    capsys.readouterr()
+
+    watched, _ = run_watch_auto(UNREGISTERED)
+
+    assert watched == TAKEOVER, (
+        f"watched {watched!r} — an explicit takeover must outrank the weaker "
+        "one-live-record rule, which cannot choose here and would refuse"
+    )
+
+
+def test_a_codex_record_on_the_same_pid_is_not_adopted(identity_root, capsys):
+    """⬜ CONTROL — Codex Desktop tasks SHARE a backend pid (T441).
+
+    Following "the one live record on this pid" must stay Claude-only, or a
+    Claude watcher adopts a Codex seat's id the first time they land on one
+    process. The per-record cli check is what prevents it, and this arm is what
+    goes red if a later tidy-up drops it.
+    """
+    register(RESUMED_OWNER, "resume")
+    row = identity_root / "agents" / f"{RESUMED_OWNER}.json"
+    import json as _json
+
+    data = _json.loads(row.read_text())
+    data["cli"] = "codex-cli"
+    row.write_text(_json.dumps(data), encoding="utf-8")
+    capsys.readouterr()
+
+    watched, _ = run_watch_auto(UNREGISTERED)
+
+    assert watched == UNREGISTERED, (
+        "a Claude watcher adopted a non-Claude record that happened to share the pid"
+    )
+
+
+def test_an_exited_owner_is_not_followed(identity_root, capsys):
+    """⬜ CONTROL — a dead seat's mailbox is not this watcher's to drain.
+
+    `exited_at` is how a seat says it is gone. Following one would resurrect a
+    dead id's inbox on a live process, which is how ghost rows appear in
+    discover (T441's two-records-for-one-seat).
+    """
+    register(RESUMED_OWNER, "resume")
+    row = identity_root / "agents" / f"{RESUMED_OWNER}.json"
+    import json as _json
+
+    data = _json.loads(row.read_text())
+    data["exited_at"] = "2026-09-13T00:00:00+00:00"
+    row.write_text(_json.dumps(data), encoding="utf-8")
+    capsys.readouterr()
+
+    watched, _ = run_watch_auto(UNREGISTERED)
+
+    assert watched == UNREGISTERED, "the watcher followed a seat that had already exited"
+
+
+# ---------------------------------------------------------------------------
 # T563 — the guard was never wrong, it was asked TOO EARLY.
 # ---------------------------------------------------------------------------
 #
