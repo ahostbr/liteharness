@@ -801,6 +801,98 @@ def _verify_recipient(
     return known, error, to in known
 
 
+#: A sender id this close to a registered one is a TYPO, not a new agent.
+#: Both are the 36-char uuid shape and differ in at most this many positions.
+SENDER_NEAR_MISS_MAX_DIFF = 12
+_UUID_LEN = 36
+
+
+def _verify_sender(agent_id: str, force: bool = False) -> None:
+    """Say something when `--from` names an id the registry does not know (T841).
+
+    🔴 THE TWO ENDS OF ONE ENVELOPE WERE VALIDATED DIFFERENTLY, AND THE
+    UNVALIDATED ONE IS THE ONE THAT SAYS WHO SPOKE. `--to` has been checked
+    since T238: two reads, did-you-mean, refuse, `--force` to override. `--from`
+    was passed straight through to `inbox.send`, so a typo produced a normal
+    "Sent message <id>" from an id that has never existed.
+
+    MEASURED 2026-09-17: message `874dd34b` reached Sentinel `--from
+    c8f7ae56-4748-41e4-abba-d977ea56e7ec` — the sender's own id with the last
+    twelve characters wrong. Nothing printed. He asked whether an unknown agent
+    was impersonating a live seat, which is the right question and one the
+    channel gave him no way to answer.
+
+        A RECIPIENT TYPO FAILS LOUDLY; A SENDER TYPO SUCCEEDED AND CREATED A
+        GHOST. The check that would have caught it did not exist, and its
+        absence is indistinguishable from the interesting case.
+
+    ⚠️ WHY THIS IS NOT SYMMETRIC WITH `--to`, WHICH REFUSES OUTRIGHT: `--from`
+    has a legitimate unknown case that `--to` does not. A seat that has not
+    registered yet — or whose record the hook sweep removed — really does send
+    under an id the registry cannot confirm, and refusing there would break a
+    live path to close a typo hole. So (Sentinel's ruling, 716463bb):
+
+      unknown, NO near match  -> SEND, with a loud warning. The new seat works.
+      unknown, NEAR MISS      -> REFUSE and name the neighbour. Nobody's first
+                                 registration is one character off a live id;
+                                 that shape is a typo every time.
+
+    An unreadable registry says nothing at all here: `--to`'s own check already
+    warns about that once, and twice is noise.
+    """
+    if force or not agent_id:
+        return
+    # ONE read here, not `_verify_recipient`'s two. Its second read exists to
+    # avoid refusing a live agent on a mid-heartbeat listing miss, and it pays
+    # RECIPIENT_RECHECK_DELAY_S to get it — a cost the recipient check takes only
+    # when it is about to BLOCK. Reusing it here charged that delay to every
+    # send whose sender was not in the registry, which `test_send_recipient_
+    # recheck.py` caught immediately: three arms that pin the sleep ledger went
+    # red. The escalation below pays it only on the path that refuses.
+    known, registry_error = _known_agent_ids()
+    if registry_error or agent_id in known:
+        return
+
+    near = [
+        candidate
+        for candidate in sorted(known)
+        if len(candidate) == len(agent_id) == _UUID_LEN
+        and sum(a != b for a, b in zip(candidate, agent_id)) <= SENDER_NEAR_MISS_MAX_DIFF
+    ]
+    if near:
+        # 🔴 ABOUT TO BLOCK A SEND, SO ASK TWICE. A `glob` that runs inside a
+        # heartbeat rewrite can miss the very record being rewritten (T238), and
+        # refusing a LIVE seat's own message on one sample is a worse failure
+        # than the typo this catches. `_verify_recipient` is that second read.
+        known, registry_error, sender_known = _verify_recipient(agent_id)
+        if registry_error or sender_known:
+            return
+        near = [
+            candidate
+            for candidate in sorted(known)
+            if len(candidate) == len(agent_id) == _UUID_LEN
+            and sum(a != b for a, b in zip(candidate, agent_id)) <= SENDER_NEAR_MISS_MAX_DIFF
+        ]
+    if near:
+        listed = "".join(f"    {candidate}\n" for candidate in near[:3])
+        print(
+            f"Error: --from {agent_id!r} is not registered, and it is one typo away "
+            f"from an id that is. NOTHING WAS SENT.\n"
+            f"  Did you mean:\n{listed}"
+            f"  A message sent under an unregistered id cannot be answered or "
+            f"attributed, and the recipient has no way to tell it from an intruder.\n"
+            f"  Pass --force if you really mean this id.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(
+        f"Warning: --from {agent_id!r} is not registered. Sending anyway "
+        f"(a seat may send before it registers), but nothing can reply to it.",
+        file=sys.stderr,
+    )
+
+
 def cmd_send(
     to: str,
     body: str,
@@ -873,6 +965,7 @@ def cmd_send(
             sys.exit(1)
 
     agent_id = from_id or config.get_agent_id()
+    _verify_sender(agent_id, force=force)
     resolved_thread = thread_id or os.environ.get("LITEHARNESS_THREAD_ID", "") or None
     msg_id = inbox.send(
         from_agent=agent_id,
@@ -4292,7 +4385,15 @@ def main() -> None:
                 "[--thread-id <id>] [--type <label>] [--force]\n"
                 "   or: liteharness send <to-agent-id> --body-file <path> [--from <your-id>]\n"
                 "       Use --body-file for anything containing code, backticks or $ -- "
-                "the shell edits an inline body silently and still reports success."
+                "the shell edits an inline body silently and still reports success.\n"
+                "\n"
+                "  --from is CHECKED against the registry (T841), in two tiers, because a\n"
+                "  sender typo used to send cleanly under an id that never existed:\n"
+                "    unknown id, no near match -> SENT, with a warning. A seat that has\n"
+                "      not registered yet is a real case and stays open.\n"
+                "    unknown id that is a NEAR MISS of a registered one -> REFUSED, naming\n"
+                "      the neighbour. Nobody's first registration is a few characters off\n"
+                "      a live id; that shape is a typo every time. --force overrides."
             )
             sys.exit(1)
         # Consume flags by ARGV POSITION, never by string-matching the joined body.
