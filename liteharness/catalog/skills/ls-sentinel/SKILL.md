@@ -185,6 +185,52 @@ means looping and guessing, and a guess made with real input overshoots.
 silently dropped one — `"ctl"` for `"ctrl"` would otherwise send a bare Enter
 and look like the key did nothing.
 
+### Monitors, moving and arranging (T785)
+
+```bash
+B=$(cat ~/.litesuite/bridge-token)
+
+# Which monitors exist. workArea excludes the taskbar; bounds does not.
+curl -H "Authorization: Bearer $B" http://127.0.0.1:7423/displays
+
+# GET /context now tells you which monitor each pane is on: pane.monitorId
+# (absent on zen panes, which have no canvas geometry — absent means
+#  "no answer", not "no monitor").
+
+# Send a pane to a monitor. `monitor` takes a display id, an INDEX (0,1,2…) or
+# "primary"; `anchor` is "center" (default) or "topleft".
+curl -X POST http://127.0.0.1:7423/canvas/pane/move-to-monitor \
+  -H "Authorization: Bearer $B" -d '{"paneId": "canvas-pane-53", "monitor": 1}'
+
+# Resize, in CANVAS units (what pane.width is in)
+curl -X POST http://127.0.0.1:7423/canvas/pane/resize \
+  -H "Authorization: Bearer $B" -d '{"paneId": "canvas-pane-53", "width": 900, "height": 700}'
+
+# Tile several panes across one monitor: grid | row | column
+curl -X POST http://127.0.0.1:7423/canvas/arrange \
+  -H "Authorization: Bearer $B" \
+  -d '{"paneIds": ["canvas-pane-48","canvas-pane-53"], "layout": "row", "monitor": 0}'
+
+# Move the WINDOW to a monitor (keeps its size; does not maximize)
+curl -X POST http://127.0.0.1:7423/window/move-to-monitor \
+  -H "Authorization: Bearer $B" -d '{"monitor": 2}'
+```
+
+🔴 **NONE OF THESE MOVE THE CAMERA.** Ryan's T260 ruling: *"i full screen a panel
+and it takes over the monitor but the canvas flys away and repositions"*.
+Arranging writes pane rects and leaves the viewport where you put it, so panes on
+OTHER monitors do not slide. If you want the camera moved, that is
+`/canvas/focus-pane`, and it is a separate decision.
+
+⬜ `move-to-monitor` answers with `monitorId` (where it LANDED) beside
+`requestedMonitorId` and `onRequestedMonitor`. If those disagree the projection
+is off and the reply says so, rather than reporting a success you would have to
+go and check.
+
+⬜ **Arrange does not remember the previous layout.** There is no undo, on
+purpose: an undo means a second stored copy of every rect, and this codebase has
+already paid for a stash that fell out of step with what it shadowed.
+
 ## Prompt Cascade
 
 When spawning agents, include the appropriate skill content in the spawn prompt:
