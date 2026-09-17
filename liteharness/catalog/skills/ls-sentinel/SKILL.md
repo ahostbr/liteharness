@@ -101,6 +101,51 @@ curl -X POST http://127.0.0.1:7423/pty/talk \
   -d '{"session_id": "<sessionId>", "command": "/clear"}'
 ```
 
+## Driving the Canvas — you do not need pccontrol for this
+
+🔴 **THE VERBS ARE NAMED AFTER THE STORE ACTION, NOT AFTER WHAT YOU WANT.** That
+is why this section exists: the capability was already there and was read past.
+In plain words —
+
+| you want | the endpoint | note |
+| --- | --- | --- |
+| **fullscreen a pane** | `POST /canvas/maximize` `{paneId}` | this IS fullscreen |
+| **un-fullscreen / minimize it** | `POST /canvas/unmaximize` `{paneId}` | Ryan: *"unfullscreen = minimize essentially is what makes sense on the infinite canvas"*. Omit `paneId` to restore ALL |
+| **move the viewport to a pane** | `POST /canvas/focus-pane` `{paneId}` | the camera bounce; the pane does not move, you do |
+| **move a pane** | `POST /canvas/move-pane` `{paneId, x, y}` | |
+| **close a pane** | `POST /canvas/remove-pane` `{paneId}` | |
+| **see what is open** | `GET /context` | `activeThread` → `paneCount` → `activePanes[]`, each with `maximized` and `inViewport` |
+
+```bash
+# Fullscreen Model Hub, having found its paneId in GET /context
+curl -X POST http://127.0.0.1:7423/canvas/maximize \
+  -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)" \
+  -d '{"paneId": "canvas-pane-53"}'
+```
+
+### Clicking inside a pane (T783)
+
+```bash
+# 1. Read it — indexed controls + visible text, scoped to THAT pane
+curl -X POST http://127.0.0.1:7423/canvas/pane/read \
+  -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)" \
+  -d '{"paneId": "canvas-pane-53"}'
+
+# 2. Click one, by index / data-testid / pane-local x,y
+curl -X POST http://127.0.0.1:7423/canvas/pane/click \
+  -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)" \
+  -d '{"paneId": "canvas-pane-53", "index": 4}'
+# Replies with the painted screenshot, so you see the result in the same answer.
+```
+
+⚠️ **A 409 IS THE FEATURE, NOT AN OUTAGE.** The click is a real
+`sendInputEvent`, so it refuses rather than pretending when the screen is not in
+a state where a user could have made it: the pane is **offscreen** (normal on an
+infinite canvas — `focus-pane` or `maximize` first), the target is **scrolled
+out** of the pane, or the point is **covered** by something painted on top. A
+synthetic DOM click would "succeed" in all three and change nothing, which is
+the false pass screenshots were being used to catch.
+
 ## Prompt Cascade
 
 When spawning agents, include the appropriate skill content in the spawn prompt:
