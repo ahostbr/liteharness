@@ -146,6 +146,45 @@ out** of the pane, or the point is **covered** by something painted on top. A
 synthetic DOM click would "succeed" in all three and change nothing, which is
 the false pass screenshots were being used to catch.
 
+### Scrolling, typing and keys (T783 B)
+
+```bash
+B=$(cat ~/.litesuite/bridge-token)
+P='{"paneId": "canvas-pane-53"'
+
+# Wheel at a point in the pane (defaults to its centre)
+curl -X POST http://127.0.0.1:7423/canvas/pane/scroll \
+  -H "Authorization: Bearer $B" -d "$P, \"dy\": 400}"
+
+# Or bring an indexed target into view, and get back where it landed
+curl -X POST http://127.0.0.1:7423/canvas/pane/scroll \
+  -H "Authorization: Bearer $B" -d "$P, \"toIndex\": 12}"
+
+# Type into a NAMED field — it is clicked to focus it first
+curl -X POST http://127.0.0.1:7423/canvas/pane/type \
+  -H "Authorization: Bearer $B" -d "$P, \"testid\": \"composer\", \"text\": \"hello\"}"
+
+# One key, with modifiers
+curl -X POST http://127.0.0.1:7423/canvas/pane/key \
+  -H "Authorization: Bearer $B" -d "$P, \"key\": \"Enter\"}"
+curl -X POST http://127.0.0.1:7423/canvas/pane/key \
+  -H "Authorization: Bearer $B" -d "$P, \"key\": \"a\", \"modifiers\": [\"control\"]}"
+```
+
+⚠️ **`type` REFUSES UNLESS YOU SAY WHERE.** Typing goes wherever focus already
+is, and focus is not a parameter of the keyboard — characters aimed at a pane
+with no focused field land on whatever the window last focused, possibly another
+pane. So pass `index` or `testid` (it clicks to focus first), or
+`"assumeFocus": true` if you focused the field yourself.
+
+⬜ `toIndex` is `scrollIntoView`, not a wheel, and it needs the pane **read**
+first so the index exists. Reaching an unknown distance with real wheel events
+means looping and guessing, and a guess made with real input overshoots.
+
+⬜ An unrecognised modifier is a **400 listing the accepted set**, not a
+silently dropped one — `"ctl"` for `"ctrl"` would otherwise send a bare Enter
+and look like the key did nothing.
+
 ## Prompt Cascade
 
 When spawning agents, include the appropriate skill content in the spawn prompt:
