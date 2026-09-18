@@ -96,8 +96,35 @@ class TestRecordShapeUnchanged:
         assert len(row["pattern_id"]) == 36
 
     def test_supersedes_still_rides_along(self, project):
+        """
+        The ride-along contract, re-seated on a REAL id (T878).
+
+        🔴 THIS ARM PREDATED THE CONTRACT AND ENCODED THE OLD ONE. It passed a
+        fabricated `some-earlier-id` into a fresh tmp project, which by
+        construction can contain no such record — and since T878 that is exactly
+        the call the writer refuses (`SystemExit: 2`, nothing written). The arm
+        was not wrong about its SUBJECT: `supersedes` must still reach the row.
+        It was wrong about the only INPUT it had ever been given, because an
+        unresolvable id is no longer a legal way to ask the question.
+
+            AN ARM THAT PREDATES A CONTRACT ENCODES THE OLD ONE, AND IT FAILS AT
+            THE MOMENT THE CONTRACT IMPROVES — which reads exactly like a
+            regression and is the opposite of one.
+
+        So it now records a first pattern, reads ITS id back out of the store,
+        and supersedes that. The assertion is unchanged and is finally being
+        asked with an input the writer accepts. The refusal of an unresolvable
+        id has its own arms in `test_pattern_supersedes_reference.py`; this file
+        keeps its own subject.
+        """
+        cli.cmd_record_pattern(
+            outcome="success", agent_id=AGENT, task_desc="the record being retired",
+            project=str(project),
+        )
+        earlier = rows_in(project)[0]["pattern_id"]
+
         cli.cmd_record_pattern(
             outcome="failure", agent_id=AGENT, task_desc="t", project=str(project),
-            supersedes=["some-earlier-id"],
+            supersedes=[earlier],
         )
-        assert rows_in(project)[0]["supersedes"] == ["some-earlier-id"]
+        assert rows_in(project)[1]["supersedes"] == [earlier]
