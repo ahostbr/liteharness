@@ -1901,6 +1901,42 @@ def cmd_embed_query(
         print(f"  [{marker}] {ts} ({complexity}) {desc}")
 
 
+def _known_pattern_ids(patterns_path: Path) -> set[str]:
+    """Every id a `supersedes` array may legitimately name, under EITHER handle.
+
+    Reads the RAW lines rather than the validated view, deliberately: a
+    retirement target is still a real record when its row trips a schema. The
+    TS reader's own history is the argument -- zod's `.datetime()` rejected this
+    CLI's `+00:00` timestamps, so every Python-written row was silently skipped
+    on read, and a reference check built on that reader would have refused every
+    retirement of a CLI-recorded pattern and called the store empty.
+
+    Historical arrays name task_ids and new ones name pattern_ids (see
+    `_pattern_fts5_query`, which tests both), so both are collected. A check
+    that knows one handle refuses every historical retirement.
+    """
+    ids: set[str] = set()
+    try:
+        with open(patterns_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue   # an unparseable line names nothing
+                if not isinstance(row, dict):
+                    continue
+                for key in ("pattern_id", "task_id"):
+                    val = row.get(key)
+                    if isinstance(val, str) and val:
+                        ids.add(val)
+    except OSError:
+        return ids   # no store yet: nothing can be retired, and the caller says so
+    return ids
+
+
 def _coerce_id_list(value: object, field: str) -> list[str]:
     """Accept a bare id, require a list of ids, refuse anything else LOUDLY.
 
@@ -2029,6 +2065,37 @@ def cmd_record_pattern(
     patterns_dir = Path(project_root) / ".liteharness"
     patterns_dir.mkdir(parents=True, exist_ok=True)
     patterns_path = patterns_dir / "patterns.jsonl"
+
+    # 🔴 T878 — A SUPERSEDES ID IS A REFERENCE, AND NOTHING RESOLVED IT.
+    # `_coerce_id_list` above checks the SHAPE, and its own docstring records
+    # what happens when a shape-valid array names nothing: 47 one-character ids
+    # that "retired NOTHING, while reading back as a perfectly well-formed
+    # list". That fix removed the CAUSE it had seen (a string iterated
+    # character-wise) and never added the PROPERTY it needed, so the same
+    # outcome stayed reachable by a different route — on 2026-09-18 a seat that
+    # could not find the real id typed a plausible UUID
+    # (a7ad9c4e-0000-0000-0000-000000000000) and it was written as a COMPLETED
+    # retirement. The field then reads as satisfied while the record it was
+    # meant to retire stays live beside its own correction.
+    #
+    #     A SHAPE FIX FOR A REFERENCE BUG CLOSES THE ROUTE, NOT THE HOLE.
+    #     A DEAD POINTER IS NOT A CORRUPT FILE. IT IS A WELL-FORMED LIE.
+    if supersedes:
+        missing = [i for i in supersedes
+                   if i not in _known_pattern_ids(patterns_path)]
+        if missing:
+            print(
+                "[record-pattern] REFUSED: supersedes names "
+                f"{len(missing)} id(s) no record in this store carries:\n"
+                f"  {', '.join(missing)}\n"
+                f"  store: {patterns_path}\n"
+                "  A retirement that points at nothing READS AS DONE and retires\n"
+                "  nothing. Copy the id from a `query-patterns` result -- pattern_id,\n"
+                "  or task_id for a historical row -- rather than typing it. If you\n"
+                "  meant to retire nothing, omit --supersedes.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     # Read the task description from stdin ONLY when the caller opts in with `--task -`.
     # This used to fire whenever --task was merely ABSENT, which deadlocked any caller that
