@@ -5,6 +5,28 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-09-18
+
+### Added
+- **`ls-youtube`** replaces `ls-youtube-transcript`: one skill downloads the video (yt-dlp,
+  best video+audio merged), the transcript, and ffmpeg frames (`-Fps` / `-Interval`), with
+  `-NoVideo` / `-NoFrames` keeping the old transcript-only contract. yt-dlp gets a JS runtime
+  (`--js-runtimes`, deno > node > bun, `YT_DLP_JS_RUNTIME` override); diagnostics put the
+  decisive ERROR first; exit 3 means the subtitle fetch FAILED (retryable), exit 2 means none.
+- `inbox send --from` is checked in two tiers; a seat that joins the board or takes a name
+  tells every live orchestrator by inbox; `LITEHARNESS_NO_ANNOUNCE=1` keeps test-spawned
+  children quiet.
+
+### Fixed
+- **watch-auto after a resume** follows the pid's live owner, not the environment's dead uuid
+  (T601) — a resumed seat's watcher used to consume mail for a session that no longer existed.
+- `pattern record` refuses an outcome no reader will accept and names the mistake (T884); a
+  `supersedes` id is resolved against the store, not its shape (T878).
+
+### Notes
+- 0.3.x–0.4.1 (2026-06 → 2026-09-11) were released without entries here: the stop-forward
+  verbs, the fleet registry, pattern attestation, the PII gate. This file resumes at 0.4.2.
+
 ## [0.2.0] — 2026-05-28
 
 Universal CLI installer release. Ships the LiteHarness skills + agents catalog as bundled package data and adds opt-in install commands for every coding CLI that doesn't have a native plugin system.
