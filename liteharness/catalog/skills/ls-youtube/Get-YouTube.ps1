@@ -1,8 +1,39 @@
-# Get-YouTubeTranscript.ps1 — Full pipeline: metadata, subtitles, parse, DB save, output
+# Get-YouTube.ps1 — Full pipeline: metadata, VIDEO, subtitles, parse, FRAMES, DB save, output
+#
+# T894, RYAN 2026-09-18: "grab this video down the vdieo and transript . extract
+# the frames with ffmpeg ... then edit the skill to include this workflow and
+# rename it only ls-youtube drop the rest".
+#
+# The three artefacts land under one folder per video so they can be found
+# together later: <MediaRoot>/<video_id>/{video.mp4, frames/%05d.jpg}. The
+# transcript keeps its existing home (stdout, plus -OutputPath when given) —
+# see the note on -OutputPath below.
 param(
     [Parameter(Mandatory)]
     [string]$Url,
-    [string]$OutputPath
+
+    # The MARKDOWN transcript file. Unchanged meaning from the transcript-only
+    # skill this grew out of: callers and SKILL.md both already pass a FILE path
+    # here, so repurposing it as a directory for the whole set would have broken
+    # every existing invocation silently — the write would just land somewhere
+    # else. Video and frames get their own root below.
+    [string]$OutputPath,
+
+    # Where <video_id>/ is created for the video and frames.
+    [string]$MediaRoot = (Join-Path $HOME '.litesuite/youtube'),
+
+    # Frames per second handed to ffmpeg's fps filter. 1 = one frame per second
+    # of runtime (846 frames for a 14:06 video, measured on Ryan's URL).
+    [double]$Fps = 1,
+
+    # Seconds between frames, as an alternative spelling of -Fps for sparse
+    # sampling: -Interval 5 is one frame every 5s. Wins over -Fps when both are
+    # given, because it is the more specific request.
+    [double]$Interval = 0,
+
+    # The transcript-only path this skill used to be. Both still work alone.
+    [switch]$NoVideo,
+    [switch]$NoFrames
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -48,6 +79,87 @@ try {
     $ChannelHandle = ''
     if ($ChannelUrl -match '/@([^/\s]+)') {
         $ChannelHandle = "@$($Matches[1])"
+    }
+
+    # ── 2b. Download the video ────────────────────────────────────────────────
+    # RYAN: "grab this video down the vdieo". Muxed mp4 preferred, falling back
+    # to bestvideo+bestaudio and then to whatever exists, because a 1080p+ stream
+    # on YouTube is video-only and the plain `b[ext=mp4]` would silently hand
+    # back a lower-resolution copy instead. Measured on 1vw39QCcQjg: 1920x1080,
+    # 160,942,386 bytes.
+
+    $MediaDir  = Join-Path $MediaRoot $VideoId
+    $VideoPath = Join-Path $MediaDir 'video.mp4'
+    $FramesDir = Join-Path $MediaDir 'frames'
+    $videoStatus = 'Skipped (-NoVideo)'
+    $frameStatus = 'Skipped (-NoFrames)'
+
+    if (-not $NoVideo) {
+        if (-not (Test-Path $MediaDir)) { New-Item -ItemType Directory -Path $MediaDir -Force | Out-Null }
+        if (Test-Path $VideoPath) {
+            # Idempotent like the DB inserts below: re-running to refresh a
+            # transcript must not re-pull 150 MB.
+            $videoStatus = "Already downloaded: $VideoPath"
+            Write-Host "Video: $videoStatus" -ForegroundColor Green
+        } else {
+            & yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" --merge-output-format mp4 -o (Join-Path $MediaDir 'video.%(ext)s') $Url
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $VideoPath)) {
+                # NOT fatal. The transcript is the older contract and still the
+                # thing most callers want; a failed video download must not take
+                # it down with it.
+                $videoStatus = "Download failed (yt-dlp exit $LASTEXITCODE)"
+                Write-Host "Video: $videoStatus" -ForegroundColor Yellow
+            } else {
+                $bytes = (Get-Item $VideoPath).Length
+                $videoStatus = "$VideoPath ($([math]::Round($bytes / 1MB, 1)) MB)"
+                Write-Host "Video: $videoStatus" -ForegroundColor Green
+            }
+        }
+    }
+
+    # ── 2c. Extract frames with ffmpeg ────────────────────────────────────────
+    # RYAN: "extract the frames with ffmpeg". One jpg per sampled instant into
+    # <video_id>/frames/%05d.jpg. -q:v 2 is ffmpeg's near-best JPEG quality; the
+    # frames are for reading slides and UI out of a screencast, and the default
+    # quantiser blurs small text.
+
+    if (-not $NoFrames) {
+        if ($NoVideo -and -not (Test-Path $VideoPath)) {
+            # Say WHICH switch caused it. "0 frames" with no reason reads as a
+            # broken ffmpeg rather than a choice the caller made.
+            $frameStatus = 'Skipped (-NoVideo, and no video already on disk to read)'
+            Write-Host "Frames: $frameStatus" -ForegroundColor Yellow
+        } elseif (-not (Test-Path $VideoPath)) {
+            $frameStatus = 'Skipped (no video file — the download above did not produce one)'
+            Write-Host "Frames: $frameStatus" -ForegroundColor Yellow
+        } elseif (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            # Named, not vendored. An ffmpeg this script downloaded would be a
+            # second unmanaged copy of a tool most boxes already have.
+            $frameStatus = 'Skipped (ffmpeg not on PATH — install it, e.g. winget install Gyan.FFmpeg)'
+            Write-Host "Frames: $frameStatus" -ForegroundColor Yellow
+        } else {
+            if (-not (Test-Path $FramesDir)) { New-Item -ItemType Directory -Path $FramesDir -Force | Out-Null }
+            # -Interval wins over -Fps: it is the more specific request, and
+            # 1/Interval is the same filter expressed the other way round.
+            $fpsExpr = if ($Interval -gt 0) { "1/$Interval" } else { "$Fps" }
+            & ffmpeg -hide_banner -loglevel error -y -i $VideoPath -vf "fps=$fpsExpr" -q:v 2 (Join-Path $FramesDir '%05d.jpg')
+            $ffmpegExit = $LASTEXITCODE
+            $frameCount = @(Get-ChildItem $FramesDir -Filter '*.jpg' -ErrorAction SilentlyContinue).Count
+            if ($ffmpegExit -ne 0) {
+                $frameStatus = "ffmpeg exit $ffmpegExit ($frameCount frame(s) written before it stopped)"
+                Write-Host "Frames: $frameStatus" -ForegroundColor Yellow
+            } elseif ($frameCount -eq 0) {
+                # A ZERO IS NOT A PASS. ffmpeg can exit 0 having written nothing
+                # (an unreadable stream, a filter that matched no frames), and
+                # "done" over an empty directory is the failure that looks like
+                # success.
+                $frameStatus = 'ffmpeg exited 0 but wrote NO frames — check the video stream'
+                Write-Host "Frames: $frameStatus" -ForegroundColor Yellow
+            } else {
+                $frameStatus = "$frameCount frame(s) at fps=$fpsExpr -> $FramesDir"
+                Write-Host "Frames: $frameStatus" -ForegroundColor Green
+            }
+        }
     }
 
     # ── 3. Download subtitles ─────────────────────────────────────────────────
@@ -318,6 +430,8 @@ print('inserted' if changed else 'exists')
 **URL:** https://youtube.com/watch?v=$VideoId
 **Channel:** $ChannelHandle
 **Exported:** $exportDate
+**Video:** $videoStatus
+**Frames:** $frameStatus
 **Archived:** $archiveStatus
 **LiteYT:** $liteytStatus
 **LiteSuite Panel:** $litesuiteStatus

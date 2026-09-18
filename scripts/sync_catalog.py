@@ -114,7 +114,7 @@ PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-tldr", "ls-train", "ls-tts",
     "ls-typescript-react-reviewer", "ls-vault", "ls-video-download",
     "ls-video-lens", "ls-watch", "ls-worker",
-    "ls-youtube-transcript",
+    "ls-youtube",
 })
 
 
