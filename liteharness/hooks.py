@@ -1376,6 +1376,51 @@ def _resume_startup_predecessors(agent_id: str, session_pid: int | None) -> list
     return predecessors
 
 
+def _live_claude_owners_of_pid(session_pid: int | None, exclude_id: str) -> list[str]:
+    """Every live claude-code registration on `session_pid`, newest last.
+
+    🔴 T601. DELIBERATELY WEAKER THAN `_authoritative_owner_of_pid`, and only
+    ever consulted when the environment names an id with NO presence file at
+    all. That function requires `registration_source == "takeover"` because its
+    other caller, `_adopt_pid_owner`, is choosing an IDENTITY: letting an
+    ordinary record capture a later session on the same pid is precisely the
+    T363 defect, and a wrong adoption renames a live seat.
+
+        THE TWO CALLERS ASK DIFFERENT QUESTIONS. Choosing a MAILBOX may follow a
+        weaker signal than choosing a NAME, because the alternative here is an
+        id no presence file describes and no sender can see — there is no
+        competing claim to respect, and arming on it is guaranteed useless.
+
+    A record retired by a later registration on the same pid is not an owner
+    (`_superseded_by_later_registration`, the single implementation of that
+    rule), and neither is one that has exited or belongs to another CLI —
+    Codex Desktop tasks share a backend pid (T441), so "one live record on this
+    pid" must stay Claude-only or a Claude watcher adopts a Codex seat.
+    """
+    from . import cli as _cli  # local import: cli imports hooks (see cli.py:145)
+
+    if not session_pid:
+        return []
+    try:
+        entries = list((config.get_root() / "agents").glob("*.json"))
+    except OSError:
+        return []
+    owners: list[tuple[str, str]] = []
+    for entry in entries:
+        if entry.stem == exclude_id or not _is_authoritative_agent_id(entry.stem):
+            continue
+        data = _read_presence(entry)
+        if not data or data.get("exited_at") or data.get("cli") != "claude-code":
+            continue
+        if _parse_positive_int(data.get("session_pid")) != session_pid:
+            continue
+        if _cli._superseded_by_later_registration(entry.stem, data):
+            continue
+        owners.append((str(data.get("registered_at") or ""), entry.stem))
+    owners.sort()
+    return [ident for _stamp, ident in owners]
+
+
 def _watch_identity_after_supersede(auto_id: str) -> tuple[str | None, str]:
     """Follow a RETIRED id to the registration that replaced it, or refuse.
 
@@ -1435,6 +1480,33 @@ def _watch_identity_after_supersede(auto_id: str) -> tuple[str | None, str]:
                 f"  env said {auto_id} / registry says {owner}. A watcher launched from a "
                 "session-start shell snapshot cannot see a later takeover's environment, and "
                 "arming on the unregistered id leaves this seat deaf while looking healthy."
+            )
+        # 🔴 T601. The 2026-09-13 reboot: the pid's live owner had registered
+        # through a RESUME, so `registration_source` was "resume" and the
+        # takeover-only question above answered None. One claude.exe (32844),
+        # one live seat (1ccbc1d5, source "resume"), and a watcher arming on the
+        # new session uuid 55c2b769 — for which no presence file existed. It
+        # printed the ordinary healthy line, because the guard had nothing to
+        # say, and the seat was deaf until it was noticed by hand.
+        owners = _live_claude_owners_of_pid(session_pid_now, auto_id)
+        if len(owners) == 1:
+            return owners[0], (
+                f"[LITEHARNESS] watch-auto: the environment named {auto_id}, which is not "
+                f"registered. The one live Claude seat on pid {session_pid_now} is "
+                f"{owners[0]} — watching {owners[0]} instead.\n"
+                f"  env said {auto_id} / registry says {owners[0]}. A watcher launched from "
+                "a session-start shell snapshot keeps the id the session had before a "
+                "resume rewrote it; arming on it leaves this seat deaf while looking healthy."
+            )
+        if len(owners) > 1:
+            # Never guess: draining another seat's inbox is the same failure
+            # pointing the other way, and it takes that seat down with it.
+            return None, (
+                f"[LITEHARNESS] watch-auto REFUSED: the environment named {auto_id}, which is "
+                f"not registered, and pid {session_pid_now} carries {len(owners)} live Claude "
+                f"registrations — {owners}. Refusing to guess.\n"
+                "  Start it explicitly instead:\n"
+                "  python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>"
             )
         return auto_id, ""
     if not _cli._superseded_by_later_registration(auto_id, data):
