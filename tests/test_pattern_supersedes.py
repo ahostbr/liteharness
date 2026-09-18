@@ -16,7 +16,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from liteharness import cli
@@ -216,3 +216,94 @@ class BareStringSupersedesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SupersedesIsAReferenceTests(unittest.TestCase):
+    """T878 — the id must name a record, not merely look like one.
+
+    `_coerce_id_list` checks the SHAPE, and its docstring already records what a
+    shape-valid array that names nothing does: 47 one-character ids that
+    "retired NOTHING, while reading back as a perfectly well-formed list". That
+    fix closed the ROUTE it had seen (a string iterated character-wise) and
+    never added the PROPERTY it needed, so the same outcome stayed reachable —
+    on 2026-09-18 a seat that could not find the real id typed a plausible UUID
+    and it was written as a COMPLETED retirement.
+
+        A SHAPE FIX FOR A REFERENCE BUG CLOSES THE ROUTE, NOT THE HOLE.
+        A DEAD POINTER IS NOT A CORRUPT FILE. IT IS A WELL-FORMED LIE.
+
+    ⬜ The paired arms in LiteSuite's `patterns-supersedes.test.ts` spawn THIS
+    CLI, so the rule is covered from both sides; these exist so it survives
+    without that repo present.
+    """
+
+    FABRICATED = "a7ad9c4e-0000-0000-0000-000000000000"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / ".liteharness").mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _rows(self) -> list[dict]:
+        path = self.root / ".liteharness" / "patterns.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_an_id_no_record_carries_is_refused(self) -> None:
+        _record(self.root, "seat", "the record a correction retires")
+        before = len(self._rows())
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, redirect_stderr(err):
+            _record(self.root, "seat", "the correction", supersedes=[self.FABRICATED])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(self.FABRICATED, err.getvalue())
+        # Refused BEFORE the append: a rejected write leaves no row behind.
+        self.assertEqual(len(self._rows()), before)
+
+    def test_a_valid_task_id_is_still_accepted(self) -> None:
+        """🔴 THE ARM THAT MATTERS SECOND. The cheap wrong fix is a check strict
+        enough to refuse everything, and a store that accepts no retirements
+        looks exactly like a store with no retirements to make."""
+        tid = _record(self.root, "seat", "the retired record")
+        _record(self.root, "seat", "the correction", supersedes=[tid])
+        self.assertEqual(self._rows()[-1]["supersedes"], [tid])
+
+    def test_the_other_handle_resolves_too(self) -> None:
+        """Historical arrays name task_ids, new ones name pattern_ids, and
+        `_pattern_fts5_query` tests both. A check that knows one handle would
+        refuse every historical retirement."""
+        _record(self.root, "seat", "the retired record")
+        pid = self._rows()[-1]["pattern_id"]
+        _record(self.root, "seat", "the correction", supersedes=[pid])
+        self.assertEqual(self._rows()[-1]["supersedes"], [pid])
+
+    def test_one_bad_id_among_several_refuses_the_whole_write(self) -> None:
+        tid = _record(self.root, "seat", "the retired record")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            _record(self.root, "seat", "x", supersedes=[tid, self.FABRICATED])
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_a_row_the_validating_reader_would_drop_is_still_a_target(self) -> None:
+        """⚠️ THE CHECK READS RAW LINES ON PURPOSE, and this is not hypothetical:
+        measured 2026-09-18 on the live C:/Projects store, 21 of 502 rows carry
+        PROSE in `outcome` (713-2253 chars) and are rejected by the validating
+        reader. Those rows are real records. A reference check built on a
+        validating view would refuse every retirement naming one of them.
+        """
+        path = self.root / ".liteharness" / "patterns.jsonl"
+        path.write_text(json.dumps({
+            "task_id": "seat-1789700000",
+            "pattern_id": "11111111-2222-3333-4444-555555555555",
+            "session": "seat", "agent_id": "seat",
+            "outcome": "ROOT CAUSE (measured ...): prose where the enum belongs",
+            "complexity": "medium", "description": "a row no schema accepts",
+            "verified": "unverified", "timestamp": "2026-09-18T00:00:00+00:00",
+        }) + "\n", encoding="utf-8")
+        _record(self.root, "seat", "the correction",
+                supersedes=["11111111-2222-3333-4444-555555555555"])
+        self.assertEqual(self._rows()[-1]["supersedes"],
+                         ["11111111-2222-3333-4444-555555555555"])
