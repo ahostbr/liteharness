@@ -38,6 +38,33 @@ param(
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
+# ── 1a. JS runtime for yt-dlp (T894b) ─────────────────────────────────────────
+# YouTube extraction needs a JS runtime. yt-dlp enables only `deno` by default and
+# prints "No supported JavaScript runtime could be found ... has been deprecated,
+# and some formats may be missing" when it is absent — which is a WARNING, so the
+# run continues and silently returns a reduced format list. Observed on this box
+# during the T894 acceptance run: the warning appeared on every call, and the
+# video still downloaded, which is exactly why it is easy to leave in place.
+#
+#     A DEPRECATION WARNING THAT DEGRADES THE RESULT IS NOT COSMETIC. Nothing
+#     downstream can tell "the best format" from "the best format deno could see".
+#
+# Overridable with YT_DLP_JS_RUNTIME (e.g. a project pin). Scoped to THIS skill's
+# yt-dlp calls — it alters no global yt-dlp configuration.
+$JsRuntime = $env:YT_DLP_JS_RUNTIME
+if (-not $JsRuntime) {
+    foreach ($cand in @('deno', 'node', 'bun')) {
+        if (Get-Command $cand -ErrorAction SilentlyContinue) { $JsRuntime = $cand; break }
+    }
+}
+if ($JsRuntime) {
+    $JsRuntimeArgs = @('--js-runtimes', $JsRuntime)
+    Write-Host "yt-dlp JS runtime: $JsRuntime" -ForegroundColor DarkGray
+} else {
+    $JsRuntimeArgs = @()
+    Write-Warning "No JS runtime found (deno/node/bun). YouTube extraction may fail; install one (e.g. node) or set YT_DLP_JS_RUNTIME."
+}
+
 # ── 1. Setup ──────────────────────────────────────────────────────────────────
 
 # Extract video ID from URL
@@ -56,18 +83,48 @@ $TempDir = $env:TEMP
 $SubFileBase = Join-Path $TempDir "yt-transcript-$VideoId"
 $SavePayloadPath = Join-Path $TempDir "yt-save-$VideoId.json"
 
+# ── Helper: bounded diagnostic that PRIORITISES the decisive ERROR (T894b) ────
+# yt-dlp's stderr is mostly progress and warnings, and the one line that says WHY
+# it failed is usually the LAST. Truncating from the front therefore throws away
+# the only useful line and keeps the noise.
+#
+#     UNDER TRUNCATION, ORDER DECIDES WHAT SURVIVES. So the last ERROR leads,
+#     remaining ERRORs follow, and warnings come last — the message degrades to
+#     "the cause, cut short" instead of "progress bars, cut short".
+function Get-DiagText([object[]]$lines, [int]$maxLen = 400) {
+    if ($null -eq $lines) { return '' }
+    $all = @($lines | ForEach-Object { "$_" } | Where-Object { $_ -and $_.Trim() })
+    if (-not $all.Count) { return '' }
+    $errors = @($all | Where-Object { $_ -match 'ERROR' })
+    $rest   = @($all | Where-Object { $_ -notmatch 'ERROR' })
+    $ordered = @()
+    if ($errors.Count -eq 1) { $ordered += $errors[0] }
+    elseif ($errors.Count -gt 1) { $ordered += @($errors[-1]) + @($errors[0..($errors.Count - 2)]) }
+    $ordered += $rest
+    $text = (($ordered -join ' | ') -replace '\s+', ' ').Trim()
+    if ($text.Length -gt $maxLen) { $text = $text.Substring(0, $maxLen) + '...' }
+    return $text
+}
+
 try {
     # ── 2. Fetch metadata ─────────────────────────────────────────────────────
 
-    $metaOutput = & yt-dlp --print title --print channel --print id --print uploader_url --skip-download $Url 2>$null
+    # T894b — stdout and stderr captured SEPARATELY. They used to be merged with
+    # `2>$null`, which threw the diagnosis away: a members-only, private, 429 or
+    # geo-blocked video fails HERE, and the message said only "may be unavailable
+    # or private" while yt-dlp's own line naming the reason had been discarded.
+    # Splitting them also keeps stderr from displacing the positional fields.
+    $metaResult = & yt-dlp @JsRuntimeArgs --print title --print channel --print id --print uploader_url --skip-download $Url 2>&1
+    $metaStdout = @($metaResult | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
+    $metaStderr = @($metaResult | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "yt-dlp failed to fetch metadata (exit code $LASTEXITCODE). Video may be unavailable or private."
+        Write-Error "yt-dlp failed to fetch metadata (exit code $LASTEXITCODE). $(Get-DiagText $metaStderr)"
         exit 1
     }
 
-    $metaLines = $metaOutput -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+    $metaLines = @($metaStdout | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     if ($metaLines.Count -lt 4) {
-        Write-Error "yt-dlp returned incomplete metadata ($($metaLines.Count) lines, expected 4)."
+        Write-Error "yt-dlp returned incomplete metadata ($($metaLines.Count) lines, expected 4). $(Get-DiagText $metaStderr)"
         exit 1
     }
 
@@ -102,7 +159,7 @@ try {
             $videoStatus = "Already downloaded: $VideoPath"
             Write-Host "Video: $videoStatus" -ForegroundColor Green
         } else {
-            & yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" --merge-output-format mp4 -o (Join-Path $MediaDir 'video.%(ext)s') $Url
+            & yt-dlp @JsRuntimeArgs -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b" --merge-output-format mp4 -o (Join-Path $MediaDir 'video.%(ext)s') $Url
             if ($LASTEXITCODE -ne 0 -or -not (Test-Path $VideoPath)) {
                 # NOT fatal. The transcript is the older contract and still the
                 # thing most callers want; a failed video download must not take
@@ -164,13 +221,26 @@ try {
 
     # ── 3. Download subtitles ─────────────────────────────────────────────────
 
-    & yt-dlp --write-auto-sub --write-sub --sub-lang "en,en-US,en-GB" --skip-download --sub-format json3 -o "$SubFileBase" $Url 2>$null
+    $subResult = & yt-dlp @JsRuntimeArgs --write-auto-sub --write-sub --sub-lang "en,en-US,en-GB" --skip-download --sub-format json3 -o "$SubFileBase" $Url 2>&1
+    $subExit = $LASTEXITCODE
+    $subStderr = @($subResult | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })
 
     # Glob for the subtitle file (yt-dlp appends .en.json3, .en-US.json3, etc.)
     $SubFile = Get-ChildItem "$SubFileBase*.json3" -ErrorAction SilentlyContinue | Select-Object -First 1
 
     if (-not $SubFile) {
-        Write-Error "No subtitle file found. This video may not have English subtitles."
+        # 🔴 T894b — A REFUSED FETCH IS NOT "NO SUBTITLES", and this branch used to
+        # call every empty result the second thing. 429, members-only and network
+        # failures are GATED AND RETRYABLE; "this video has no English captions" is
+        # DEFINITIVE. Reporting the first as the second tells the user to stop
+        # trying when they should wait, and the exit code carried the same lie.
+        # yt-dlp's own exit code separates them: nonzero = it failed, 0 with no
+        # file = it succeeded and there was nothing to get.
+        if ($subExit -ne 0) {
+            Write-Error "Subtitle fetch FAILED (yt-dlp exit $subExit) - a fetch failure, NOT no-subs. $(Get-DiagText $subStderr)"
+            exit 3
+        }
+        Write-Error "No subtitle file found (yt-dlp exit 0) - no English subtitles. $(Get-DiagText $subStderr)"
         exit 2
     }
 

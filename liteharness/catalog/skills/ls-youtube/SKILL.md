@@ -62,8 +62,13 @@ Pull a YouTube video down, get its transcript, and cut it into frames — one sc
 
 | Exit Code | Meaning | Action |
 | --------- | ------- | ------ |
-| 1 | yt-dlp failure (video unavailable, private, or metadata error) | Tell the user the video couldn't be accessed |
-| 2 | No English subtitles found | Run `yt-dlp --list-subs --skip-download "VIDEO_URL" 2>/dev/null` and offer available languages |
+| 1 | yt-dlp failure (video unavailable, private, or metadata error) | The message carries yt-dlp's own ERROR line — read it and tell the user what it says |
+| 2 | **No English subtitles** — yt-dlp exited 0 and produced no captions. Definitive | Run `yt-dlp --list-subs --skip-download "VIDEO_URL"` and offer available languages |
+| 3 | **Subtitle fetch FAILED** — yt-dlp exited non-zero (429, members-only, geo-block, network). Gated and retryable | Do NOT report this as "no subtitles". Read the ERROR line; wait and retry, or say what blocked it |
+
+🔴 **2 and 3 are different answers and used to be the same one.** A refused fetch is retryable;
+"this video has no English captions" is final. Reporting the first as the second sends the user
+away from a video they could have had. yt-dlp's exit code is what separates them.
 
 - If `yt-dlp` is not installed, tell the user: `pip install yt-dlp`
 - **A failed video download or a missing ffmpeg does NOT fail the run.** The transcript is the older contract and most callers still want it, so both report their status in the markdown header and the script carries on. Read the header — `Video:` and `Frames:` say what actually happened.
@@ -74,6 +79,14 @@ Pull a YouTube video down, get its transcript, and cut it into frames — one sc
 ## Notes
 
 - **Requires `yt-dlp`**: install with `pip install yt-dlp` or `winget install yt-dlp.yt-dlp`.
+- **A JS runtime is selected automatically** (`deno`, then `node`, then `bun`; override with
+  `YT_DLP_JS_RUNTIME`). yt-dlp enables only `deno` by default and otherwise prints *"No supported
+  JavaScript runtime could be found ... some formats may be missing"* — a WARNING, so the run
+  continues and quietly returns a reduced format list. The script passes `--js-runtimes` on every
+  yt-dlp call instead, and warns only when the box has none of the three. It changes no global
+  yt-dlp configuration.
+- **Failures name their cause.** yt-dlp's stderr is captured separately from its stdout and the
+  decisive `ERROR:` line is put FIRST in the message, so a truncated diagnostic still says why.
 - **Frames require `ffmpeg`**: `winget install Gyan.FFmpeg`. Everything else works without it.
 - Re-running is cheap: an existing `video.mp4` is not re-downloaded, and the DB inserts are idempotent on `video_id`.
 - The video is fetched as `bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b` and merged to mp4 — a bare `b[ext=mp4]` silently hands back a lower resolution, because YouTube serves 1080p and above as video-only streams.
