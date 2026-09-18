@@ -2121,10 +2121,70 @@ def cmd_record_pattern(
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
-    # Map extended outcomes to the schema's allowed values
-    schema_outcome = outcome
-    if outcome in ("stuck", "unknown", "blocked"):
+    # Map extended outcomes to the schema's allowed values.
+    # ⚠️ NORMALISED FIRST (T884): `Success` and ` success ` were written
+    # VERBATIM before, so a capitalisation slip produced the same unreadable row
+    # as prose did — and under the refusal below it would earn the prose
+    # message, which would read as nonsense for a seven-character value. Case
+    # and surrounding space are not a different ANSWER, they are the same answer
+    # typed by a human.
+    schema_outcome = str(outcome).strip().lower()
+    if schema_outcome in ("stuck", "unknown", "blocked"):
         schema_outcome = "failure"
+
+    # 🔴 T884 — THE WRITER ACCEPTED WHAT THE READER REFUSES, AND SAID IT HAD
+    # RECORDED ONE. Measured across three stores on 2026-09-18: 1085 rows, 40 of
+    # them unreadable — every one rejected by `readPatterns()` for the same
+    # reason, `outcome: Invalid option: expected one of "success"|"failure"`.
+    # The field held 713-2,253 characters of the pattern's own analysis.
+    #
+    #     A WRITE PATH THAT ACCEPTS WHAT THE READ PATH REFUSES MAKES A RECORD
+    #     THAT EXISTS AND CANNOT BE RECALLED. IT IS WORSE THAN A FAILED WRITE,
+    #     BECAUSE A FAILED WRITE IS VISIBLE.
+    #
+    # ⚠️ AFTER the mapping above, never before: `stuck`/`unknown`/`blocked` are
+    # existing accepted spellings and a refusal that rejected them would be a
+    # regression wearing a tightening's clothes.
+    if schema_outcome not in ("success", "failure"):
+        # TWO WRONG SHAPES WERE MEASURED AND THEY NEED DIFFERENT SENTENCES. A
+        # single generic message leaves the second caller no wiser, and the
+        # second caller was obeying an instruction when they got it wrong.
+        VERIFICATION_WORDS = {
+            "unverified", "verified", "pending", "judgement", "gauntlet", "human",
+        }
+        if schema_outcome in VERIFICATION_WORDS:
+            # ⭐ A DOCUMENTATION DEFECT, NOT A SLIP. The reminder that fires on
+            # every agent turn says a pattern is born `verified:"unverified"` —
+            # a schema fact, not a modifier you choose. Four rows put that word
+            # in `outcome`, the nearest field that would take it.
+            #     AN INSTRUCTION ABOUT A FIELD YOU MUST NOT SET IS AN
+            #     INSTRUCTION TO FIND A FIELD TO SET.
+            print(
+                f"[record-pattern] REFUSED: --outcome is {outcome!r}, which is a\n"
+                "  VERIFICATION state, not an outcome. You do not set verification at\n"
+                "  all: every record is born verified=\"unverified\" and is promoted\n"
+                "  only by an attestation (`verify-pattern`), which carries its own\n"
+                "  evidence. Leave it alone and pass the result of the work instead:\n"
+                "  --outcome success|failure (also accepted: stuck|unknown|blocked,\n"
+                "  which are recorded as failure).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        preview = " ".join(str(outcome).split())
+        if len(preview) > 60:
+            preview = preview[:57] + "..."
+        print(
+            f"[record-pattern] REFUSED: --outcome must name the RESULT, not describe it.\n"
+            f"  Got {len(str(outcome))} characters starting {preview!r}.\n"
+            "  That text is the pattern's analysis and it belongs in --task (the\n"
+            "  `approach`/`description` field), which has no length limit and is what\n"
+            "  `query-patterns` searches. `outcome` is one of:\n"
+            "      success | failure        (also stuck|unknown|blocked -> failure)\n"
+            "  Written as-is, this row would be ACCEPTED here and REFUSED by every\n"
+            "  reader — recorded, and unrecallable. 40 such rows already exist.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     entry = {
         # task_id is a GROUPING label, not an identity: unknown-<epoch> ids
@@ -2154,7 +2214,19 @@ def cmd_record_pattern(
     with open(patterns_path, "a", encoding="utf-8") as f:
         f.write(line)
 
-    print(f"Recorded pattern: {schema_outcome} for {entry['task_id']}")
+    # 🔴 T884 — THE RECEIPT IS BUILT FROM WHAT WAS WRITTEN, NEVER FROM WHAT WAS
+    # ASKED. This line used to print `outcome`, the caller's own string, so a
+    # prose outcome came back verbatim and read as confirmation.
+    #
+    #     A RECEIPT ASSEMBLED FROM THE REQUEST CONFIRMS THAT YOU WERE HEARD,
+    #     NEVER THAT YOU WERE UNDERSTOOD. An echo cannot disconfirm anything:
+    #     it agrees with whatever was passed, so it reads as validation while
+    #     carrying no information.
+    #
+    # It now reads `entry["outcome"]` — the value on the line that reached the
+    # file — so `stuck` prints as `failure`, which is the normalisation actually
+    # performed, and any future silent mapping shows up here instead of hiding.
+    print(f"Recorded pattern: {entry['outcome']} for {entry['task_id']}")
 
 
 def _scope_note(path: Path, project: str | None) -> str:
