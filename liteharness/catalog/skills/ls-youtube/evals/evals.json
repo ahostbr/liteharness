@@ -53,7 +53,7 @@
   },
   {
     "query": "can you download this youtube video as mp4?",
-    "should_trigger": false
+    "should_trigger": true
   },
   {
     "query": "transcribe this zoom recording for me, here's the file path",
@@ -77,6 +77,30 @@
   },
   {
     "query": "convert this voice memo to text, it's a wav file on my desktop",
+    "should_trigger": false
+  },
+  {
+    "query": "extract the frames with ffmpeg from this video https://youtu.be/1vw39QCcQjg",
+    "should_trigger": true
+  },
+  {
+    "query": "grab this video down the video and transcript and pull the frames out https://youtube.com/watch?v=abc123",
+    "should_trigger": true
+  },
+  {
+    "query": "can you give me a screenshot every 5 seconds of this youtube video?",
+    "should_trigger": true
+  },
+  {
+    "query": "save this youtube video to disk for me https://youtu.be/dl0001",
+    "should_trigger": true
+  },
+  {
+    "query": "extract frames from this mp4 on my desktop with ffmpeg",
+    "should_trigger": false
+  },
+  {
+    "query": "cut my screen recording into stills, it's already downloaded",
     "should_trigger": false
   }
 ]
