@@ -5,6 +5,17 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-09-23
+
+### Added
+- **`ls-local-batch-agent`**: run many isolated, tool-less LiteTUI local-model seats over one
+  manifest for evidence-only batch judgments (branch censuses, dossiers). Evidence is gathered
+  by the host with read-only `git -C` argv; the runner never loads or unloads a model.
+
+### Changed
+- `ls-gauntlet` and `ls-mark` are now explicitly classified public in the catalog gate
+  (they were already shipping); `ls-gauntlet` no longer names the author's machine paths.
+
 ## [0.4.2] — 2026-09-18
 
 ### Added

@@ -115,6 +115,8 @@ PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-typescript-react-reviewer", "ls-vault", "ls-video-download",
     "ls-video-lens", "ls-watch", "ls-worker",
     "ls-youtube",
+    # Ryan, 2026-09-23 (liteask a-1fa60460): "Public, scrub gauntlet's paths".
+    "ls-gauntlet", "ls-mark", "ls-local-batch-agent",
 })
 
 
