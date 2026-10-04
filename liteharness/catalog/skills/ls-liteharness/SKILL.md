@@ -7,9 +7,9 @@ description: LiteHarness agent orchestration — spawn, name, message, and contr
 
 Spawn, name, message, and programmatically control Claude Code CLI sessions. Two control modes: **headless** (ConPTY daemon) and **headed** (UIAutomation on visible terminals). All commands use `python -m liteharness.cli` or the `liteharness` console script.
 
-## the orchestrator Post-Compaction Protocol (MANDATORY)
+## Orchestrator Post-Compaction Protocol (MANDATORY)
 
-When the orchestrator (the primary orchestrator) resumes after a context compaction or session continuation:
+When the designated primary orchestrator resumes after a context compaction or session continuation:
 
 1. **Read the project's canonical task list** (e.g., `TODO.md` in the project root) — contains all engineering work and pending items organized by priority. Without reading this, you are operating blind on what needs to be done.
 2. **Read today's session notes** if your project uses a daily log — contains the session log with everything that happened today.

@@ -212,8 +212,8 @@ results mean no indexed match, not absence of decisions; read the result unknown
 T0262 development/tests use only temporary redirected databases and synthetic
 logs/Git repositories. Do not populate the live DB as part of testing or merging.
 Before a separately approved live writer run, take a **fresh SQLite backup** of
-`~/.liteharness/conversations/convo_index.db` to
-`E:/LiteSuiteBackups/convo-index-T0262/convo_index.pre-T0262.db` (choose a new
-non-overwriting suffix if it exists). Verify space, sizes, `quick_check` and table
-counts; abort on failure and coordinate the writer lock. The old T0261 backup is
-not a substitute. No live write without that backup and explicit approval.
+the configured conversation database (default
+`~/.liteharness/conversations/convo_index.db`) to an operator-selected backup
+destination with a new, non-overwriting filename. Verify space, sizes,
+`quick_check` and table counts; abort on failure and coordinate the writer lock.
+An older backup is not a substitute. No live write without that backup and explicit approval.

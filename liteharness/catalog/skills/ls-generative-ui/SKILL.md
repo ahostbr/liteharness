@@ -1,15 +1,15 @@
 ---
 name: ls-generative-ui
-description: "LiteSuite Generative UI — render interactive widgets inline in Frontier Chat / the orchestrator Chat. CHAT PANES ONLY: a canvas terminal seat is refused and shows UI through Theater instead (the `theater` tool and the `ls-theater` skill). Use prompt_widget when you need the user's input to continue (confirmations, forms, picks). Use render_widget for fire-and-forget displays (charts, stat cards, dashboards). Triggers on 'render widget', 'prompt widget', 'ls-generative-ui', 'show me a chart', 'ask the user', 'confirm before', 'show a form', or whenever a visual or interactive answer is clearer than prose."
+description: "LiteSuite Generative UI — render interactive widgets inline in Frontier Chat / Orchestrator Chat. CHAT PANES ONLY: a canvas terminal seat is refused and shows UI through Theater instead (the `theater` tool and the `ls-theater` skill). Use prompt_widget when you need the user's input to continue (confirmations, forms, picks). Use render_widget for fire-and-forget displays (charts, stat cards, dashboards). Triggers on 'render widget', 'prompt widget', 'ls-generative-ui', 'show me a chart', 'ask the user', 'confirm before', 'show a form', or whenever a visual or interactive answer is clearer than prose."
 ---
 
 # Generative UI
 
-Render interactive widgets directly inside a Frontier Chat or the orchestrator Chat conversation. Two tools, three bands.
+Render interactive widgets directly inside a Frontier Chat or Orchestrator Chat conversation. Two tools, three bands.
 
-## Who can use this: Frontier Chat and the orchestrator Chat only
+## Who can use this: Frontier Chat and Orchestrator Chat only
 
-`render_widget`, `prompt_widget` and `ui_render` work for **Frontier Chat** (every provider) and **the orchestrator Chat**. A **canvas
+`render_widget`, `prompt_widget` and `ui_render` work for **Frontier Chat** (every provider) and **Orchestrator Chat**. A **canvas
 terminal seat** (its tool process has `LITESUITE_LEAF_ID`) is refused with:
 
 > Terminal seats show UI through Theater: theater open ... (see the Theater skill). Quick yes/no: use AskUserQuestion.
@@ -22,7 +22,7 @@ If you are a terminal seat:
 - **A quick yes/no or pick-one** → `AskUserQuestion`.
 - **Show an image, video, audio or file** → `theater` `media`.
 
-Everything below is for Frontier Chat and the orchestrator Chat.
+Everything below is for Frontier Chat and Orchestrator Chat.
 
 ## Choose the right tool
 
@@ -45,7 +45,7 @@ When calling `prompt_widget`, you MUST provide:
 
 - `type` — `"catalog"` | `"html"` | `"specs"`
 - `requestId` — unique identifier per call. Generate `"widget-{8 random hex chars}"` (e.g. `"widget-7f3a9e2c"`). **Must be unique per call.**
-- `agentId` — your registered session UUID; if unknown, resolve it before making an attributed request
+- `agentId` — your registered agent ID for response routing; if unknown, resolve it before making an attributed request. Never invent a default or use a conversation-storage ID
 - `timeout` — optional; auto-expire after N milliseconds. Omit to wait indefinitely.
 
 Plus the band-specific fields below.

@@ -188,7 +188,7 @@ One request per asset, in a loop — the API route has no conversation, so the o
 
 - **Sprite-sheet drift** still happens on icon prompts. Keep the hardened tail: "a SINGLE emblem, ONE icon centered, NOT a sprite sheet, NOT a grid, NOT a set, no second icon."
 - **The image cap is ACCOUNT-WIDE (~50 gens/burst).** Onset is silent — a call returns text instead of an image, or `stream ended without a completed image_generation_call` — then the API refuses outright. Resubmits do not help; only a cooldown clears it (observed 30–120+ min). **During onset gens can come back wrong and look "successful"**, so the worst corruption clusters on whichever batch ran as the cap hit. Probe with one cheap gen every ~10 min to detect the lift.
-- **ALWAYS eyeball a contact sheet after a batch — exit codes lie.** Montage the finals, audit every cell, and regen only the multi-icon / wrong-subject ones. A contact-sheet script to copy: `<checkouts>\private\TypeOrDie\scripts\genui\contact_sheet.py`.
+- **ALWAYS eyeball a contact sheet after a batch — exit codes lie.** Montage the finals, audit every cell, and regen only the multi-icon / wrong-subject ones. Use a contact-sheet utility available in your project; this skill does not bundle one.
 
 #### Troubleshooting
 

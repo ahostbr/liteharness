@@ -38,7 +38,7 @@ import uuid
 
 BASE_URL = "https://chatgpt.com/backend-api/codex"
 REFRESH_URL = "https://auth.openai.com/oauth/token"
-CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # codex_cli_rs client id (matches the user's token)
+CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # codex_cli_rs public client id
 
 DEFAULT_MODELS = {"responses": "gpt-5.5", "images": "gpt-image-2.5-flare"}
 EDIT_MODEL = "gpt-image-2.5-sunburst"  # editing precision; the default for --image on the images backend

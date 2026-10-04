@@ -7,6 +7,7 @@ because the hash read raw working-tree bytes and that checkout held CRLF where g
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,30 @@ sync_catalog = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sync_catalog)
 
 
-def test_provenance_hash_and_count_match_the_catalog():
-    stamp = json.loads((CATALOG / "PROVENANCE.json").read_text(encoding="utf-8"))
-    assert stamp["hash"] == sync_catalog.short_sha(CATALOG), "stale stamp: re-run scripts/sync_catalog.py"
-    assert stamp["file_count"] == len(sync_catalog.hashed_files(CATALOG))
+def _release_catalog(destination):
+    """Checkouts validate tracked payload; extracted distributions validate all files.
+
+    Tool-owned untracked locks are not release inputs. Do not delete them or
+    broadly exclude *.lock: a tracked lock-named resource remains content.
+    """
+    if not (ROOT / '.git').exists():
+        return CATALOG
+    paths = subprocess.check_output(
+        ['git', 'ls-files', '-z', '--', 'liteharness/catalog'], cwd=ROOT,
+    ).decode('utf-8').split('\0')
+    for name in filter(None, paths):
+        relative = Path(name).relative_to('liteharness/catalog')
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / name, target)
+    return destination
+
+
+def test_provenance_hash_and_count_match_the_catalog(tmp_path):
+    catalog = _release_catalog(tmp_path / 'tracked-catalog')
+    stamp = json.loads((catalog / "PROVENANCE.json").read_text(encoding="utf-8"))
+    assert stamp["hash"] == sync_catalog.short_sha(catalog), "stale release stamp"
+    assert stamp["file_count"] == len(sync_catalog.hashed_files(catalog))
     # A partial stamp must name exactly the skills the script holds back from the source.
     assert stamp.get("kept_from_catalog") == sync_catalog.KEEP_FROM_CATALOG
 

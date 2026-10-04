@@ -8,16 +8,16 @@ user_invocable: true
 
 Automates the full rebuild + release pipeline for the Lite AI Suite.
 
-> **Note:** The directory paths below (`<checkouts>\*`) are reference paths for the LiteSuite monorepo layout. Substitute your own project root paths as needed. The GitHub org (`<your-github-org>/`) and manifest path (`litesuite.dev`) should also be updated to match your setup.
+> **Note:** The directory paths below (`<projects-root>/*`) are reference paths for the LiteSuite monorepo layout. Substitute your own project root paths as needed. The GitHub org (`<your-github-org>/`) and manifest path (`litesuite.dev`) should also be updated to match your setup.
 
 ## Apps
 
 | App          | Directory                  | Build Output | Zip Pattern              |
 | ------------ | -------------------------- | ------------ | ------------------------ |
-| LiteEditor   | `<checkouts>\LiteEditor`   | `dist/`      | `LiteEditor-*-win.zip`   |
-| LiteSpeak    | `<checkouts>\LiteSpeak`    | `dist/`      | `LiteSpeak-*-win.zip`    |
-| LiteTerminal | `<checkouts>\LiteTerminal` | `dist/`      | `LiteTerminal-*-win.zip` |
-| LiteImage    | `<checkouts>\LiteImage`    | `release/`   | `LiteImage-*-win.zip`    |
+| LiteEditor   | `<projects-root>/LiteEditor`   | `dist/`      | `LiteEditor-*-win.zip`   |
+| LiteSpeak    | `<projects-root>/LiteSpeak`    | `dist/`      | `LiteSpeak-*-win.zip`    |
+| LiteTerminal | `<projects-root>/LiteTerminal` | `dist/`      | `LiteTerminal-*-win.zip` |
+| LiteImage    | `<projects-root>/LiteImage`    | `release/`   | `LiteImage-*-win.zip`    |
 
 Non-Electron apps (LiteBench, LiteYT) are not built with electron-builder — skip them.
 
@@ -41,10 +41,10 @@ Each produces:
 
 ```bash
 for f in \
-  "<checkouts>/LiteEditor/dist/LiteEditor-"*"-win.zip" \
-  "<checkouts>/LiteSpeak/dist/LiteSpeak-"*"-win.zip" \
-  "<checkouts>/LiteTerminal/dist/LiteTerminal-"*"-win.zip" \
-  "<checkouts>/LiteImage/release/LiteImage-"*"-win.zip"; do
+  "<projects-root>/LiteEditor/dist/LiteEditor-"*"-win.zip" \
+  "<projects-root>/LiteSpeak/dist/LiteSpeak-"*"-win.zip" \
+  "<projects-root>/LiteTerminal/dist/LiteTerminal-"*"-win.zip" \
+  "<projects-root>/LiteImage/release/LiteImage-"*"-win.zip"; do
   if [ -f "$f" ]; then
     size=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null)
     hash=$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)
@@ -55,7 +55,7 @@ done
 
 ### 3. Update manifest.json
 
-Edit `<checkouts>\litesuite.dev\public\manifest.json`:
+Edit `<projects-root>/litesuite.dev/public/manifest.json`:
 
 - Update `updatedAt` to today's date
 - For each app with a new zip:
@@ -89,7 +89,7 @@ The download endpoint at `litesuite.dev/api/download/app/route.ts` takes `releas
 litesuite.dev deploys via git push (CI/CD):
 
 ```bash
-cd <checkouts>/litesuite.dev
+cd <projects-root>/litesuite.dev
 git add public/manifest.json
 git commit -m "Update manifest: new release hashes"
 git push

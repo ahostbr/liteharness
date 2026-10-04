@@ -42,16 +42,34 @@ let pasteDismissed = false
 let pastePage = 0
 let pasteQueue = Promise.resolve()
 
+// Same root the writer uses (liteharness paste_history._project_root):
+// CLAUDE_PROJECT_DIR, else git toplevel of cwd, else cwd. Not the live cwd.
+let rootMemo = null
+async function pasteProjectRoot($) {
+  const cwd = absolutePath(await $.session.cwd())
+  if (!cwd) return null
+  const env = absolutePath(await $.env.get('CLAUDE_PROJECT_DIR'))
+  try { if (env && (await $.fs.stat(env)).kind === 'dir') return env } catch {}
+  if (rootMemo?.cwd === cwd) return rootMemo.root
+  let root = cwd
+  try {
+    const r = await $.process.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'], { timeoutMs: 3000 })
+    if (r.exitCode === 0) root = absolutePath(String(r.stdout).trim()) || cwd
+  } catch {}
+  rootMemo = { cwd, root }
+  return root
+}
+
 async function refreshPastes($, epoch = generation, autoOpen = true) {
   if (!pasteEnabled) return
   const work = pasteQueue.then(async () => {
     if (epoch !== generation || stopped) return
     const sessionId = await $.session.id()
-    const cwd = absolutePath(await $.session.cwd())
+    const cwd = await pasteProjectRoot($)
     if (epoch !== generation || stopped || sessionId === endedSessionId) return
     if (!validSessionId(sessionId) || !cwd) throw new Error('Paste identity unavailable')
     if (pasteRecord?.sessionId !== sessionId || pasteRecord?.cwd !== cwd) {
-      // Clear old images before awaiting disk. History belongs to cwd, dismissal
+      // Clear old images before awaiting disk. History belongs to the project root, dismissal
       // to the current session. Never use an ended session's result after resume.
       pasteRecord = { sessionId, cwd, entries: [] }
       pastePage = 0
@@ -90,7 +108,7 @@ async function refreshPastes($, epoch = generation, autoOpen = true) {
     }
     // Check identity after all IO, not merely before it.
     if (epoch !== generation || stopped || await $.session.id() !== sessionId ||
-        absolutePath(await $.session.cwd()) !== cwd || epoch !== generation || stopped) return
+        await pasteProjectRoot($) !== cwd || epoch !== generation || stopped) return
     pasteError = false
     pasteRecord = { sessionId, cwd, entries }
     if (autoOpen && entries.length && !pasteDismissed && (await $.session.surfaces()).includes('terminal')) {
@@ -780,7 +798,7 @@ export function register(on, options) {
     const drawn = pasteRecord
     const epoch = generation
     if (!drawn || await $.session.id() !== drawn.sessionId ||
-        absolutePath(await $.session.cwd()) !== drawn.cwd || stopped || epoch !== generation || drawn !== pasteRecord) {
+        await pasteProjectRoot($) !== drawn.cwd || stopped || epoch !== generation || drawn !== pasteRecord) {
       return Text({ children: ['Paste history awaits this session.'] })
     }
     const entries = drawn.entries

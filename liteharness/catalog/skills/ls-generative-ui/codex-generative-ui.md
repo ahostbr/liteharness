@@ -1,6 +1,6 @@
 # Generative UI — render_widget (Codex companion)
 
-> **Frontier Chat / the orchestrator Chat only.** In a canvas terminal seat (`LITESUITE_LEAF_ID` set) these tools refuse with:
+> **Frontier Chat / Orchestrator Chat only.** In a canvas terminal seat (`LITESUITE_LEAF_ID` set) these tools refuse with:
 > "Terminal seats show UI through Theater: theater open ... (see the Theater skill). Quick yes/no: use
 > AskUserQuestion." There, use the `theater` tool (actions `open`, `question` with `wait`, `media`,
 > `status`, `help`; call `help` for its current arguments) and the Theater skill (`ls-theater`), or `AskUserQuestion`

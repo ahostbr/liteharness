@@ -76,7 +76,7 @@ $f.KeyPreview = $true
 $f.Size = New-Object System.Drawing.Size($size, ($size + $labelH + $btnH))
 $f.Location = New-Object System.Drawing.Point(([int]($gx - $size / 2)), ([int]($gy - $size / 2)))
 
-# User request 2026-09-08: "update /ls-mark with taht golden bullseye icon thats sick".
+# Optional golden bullseye artwork is bundled beside this script as ring.png.
 # ring.png ships INSIDE this skill dir, never borrowed from another skill — ls-mark is the
 # model for a self-contained catalog skill and a cross-skill path would be a dead pointer on
 # any box but this one. Absent art falls back to the drawn ring, so the skill still works.

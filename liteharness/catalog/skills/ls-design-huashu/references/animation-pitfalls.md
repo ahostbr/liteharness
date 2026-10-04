@@ -247,7 +247,7 @@ Playwright `recordVideo` 从 `newContext()` 那一刻就开始写 WebM，此时 
 // ━━━━━━ state ━━━━━━
 let time = 0;
 let playing = false; // ❗ 默认不播，等字体 ready 再启动
-let lastTick = null; // ❗ the orchestrator——tick 首帧时 dt 强制为 0（别用 performance.now()）
+let lastTick = null; // ❗ initial value——tick 首帧时 dt 强制为 0（别用 performance.now()）
 const fired = new Set();
 
 // ━━━━━━ tick ━━━━━━

@@ -1,6 +1,6 @@
 ---
 name: ls-mark
-description: Ask the human to mark a spot on their screen and optionally explain it in a text note. Returns coordinates, their note, and a screenshot with the draggable ring visible. Use for screen pointing, ambiguous UI references, and visual bug reports.
+description: Ask the human to mark a spot on their screen and optionally explain it in a text note. Returns coordinates, their note, and a screenshot with the draggable ring visible. Use for screen pointing, ambiguous UI references, and visual bug reports. Triggers on 'mark the screen', 'mark it', 'show me where', 'point at it', 'which one do you mean', 'let me mark', 'screen marker'.
 ---
 
 # /ls-mark — the human screen-marker channel
