@@ -40,44 +40,254 @@ def _get_agent_spawn_mode(agent_id: str) -> str | None:
 
 
 
-def _bridge_request(method: str, path: str, body: dict | None = None) -> dict:
+# T919 (the user 2026-09-25): the words every agent reads when its pane is full.
+# ONE constant, so the test asserts exactly what is printed.
+GRID_FULL_MESSAGE = (
+    "SPAWN REFUSED: grid_full — pane {paneId} already shows {count}/{max} terminals, "
+    "the most a human can watch. Do not retry. Ask your leader for a leaf to be freed "
+    "in this pane or for a new panel, then spawn into it. Report this spawn "
+    "error up the chain now: to your leader by inbox, and your leader reports it to the orchestrator."
+)
+
+
+def _split_refusal(split_res: dict, pane: str | None) -> str:
+    """Final placement failure; never suggest retrying uncertain creation."""
+    if split_res.get("error") == "grid_full":
+        return GRID_FULL_MESSAGE.format(
+            paneId=split_res.get("paneId") or pane or "self",
+            count=split_res.get("count", "?"),
+            max=split_res.get("max", "?"),
+        )
+    return (
+        f"Error: split spawn failed — {split_res.get('error', 'no result')}. "
+        "Creation was not retried after this failure; check GET /pty/orphans before retrying."
+    )
+
+
+def _split_request_body(pane: str | None, agent_id: str, direction: str | None) -> dict:
+    """The /canvas/split body for `spawn --split`.
+
+    With no --direction, "direction" is left OUT, not sent as a default: LiteSuite
+    reads a split that names no placement as a new terminal and puts it in the
+    pane's next standard-grid slot (T906). Sending "vertical" here is what made
+    every spawned agent a new column, forever.
+    """
+    body = {"paneId": pane or "self", "agentId": agent_id}
+    if direction:
+        body["direction"] = direction
+    return body
+
+
+def _place_split(pane: str | None, agent_id: str, direction: str | None,
+                 *, cwd: str, launch: dict | None = None) -> dict:
+    """Place one --split launch, not one per backend.
+
+    Context is a snapshot, so only the bridge's pre-creation refusals permit
+    another attempt. An unknown/malformed creation result must never duplicate
+    a seat. Hidden panes are deliberately excluded from this hierarchy.
+    """
+    from urllib.parse import urlencode
+
+    context_path = "/context?" + urlencode({"agentId": agent_id})
+    agents = {}
+    for path in sorted((config.get_root() / "agents").glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(record, dict):
+                agents[path.stem] = record
+        except (OSError, ValueError):
+            continue  # Presence is a preference, never proof of a live pane.
+
+    def context_panes():
+        try:
+            context = _bridge_request("GET", context_path)
+        except Exception:
+            return None
+        if (not isinstance(context, dict) or context.get("error") or context.get("ok") is False or
+                not isinstance(context.get("activePanes"), list)):
+            return None
+        for p in context["activePanes"]:
+            if not isinstance(p, dict) or not isinstance(p.get("id"), str) or not p["id"]:
+                return None
+            leaves = p.get("leaves", [])
+            if not isinstance(leaves, list) or any(
+                    not isinstance(leaf, dict) or not isinstance(leaf.get("sessionIds", []), list)
+                    for leaf in leaves):
+                return None
+        return context["activePanes"]
+
+    def session_pane(panes, session):
+        if session:
+            for p in panes:
+                if any(session in leaf.get("sessionIds", []) for leaf in p.get("leaves", [])):
+                    return p["id"]
+        return None
+
+    def agent_pane(panes, ident):
+        record = agents.get(ident, {})
+        spatial = record.get("spatial")
+        if not isinstance(spatial, dict):
+            spatial = {}
+        # A drag/merge leaves presence and inherited env stale. The current
+        # terminal view is stronger evidence than either cached pane id.
+        live = session_pane(panes, record.get("canvas_session_id"))
+        if not live and ident == agent_id:
+            live = session_pane(panes, os.environ.get("LITESUITE_CANVAS_SESSION"))
+        return (live or spatial.get("pane_id") or record.get("pane_id") or
+                (os.environ.get("LITESUITE_PANE_ID") if ident == agent_id else None))
+
+    def candidates(panes):
+        own = agent_pane(panes, agent_id)
+        explicit = pane
+        if pane == "self":
+            explicit = own
+        elif pane and pane.startswith("self:"):
+            explicit = agent_pane(panes, pane[5:])
+        parent = agents.get(agent_id, {}).get("spawned_by") or os.environ.get("LITEHARNESS_SPAWNED_BY")
+        fleet = [agent_pane(panes, parent)] if parent else []
+        if parent:
+            fleet.extend(agent_pane(panes, ident) for ident, record in agents.items()
+                         if ident != agent_id and record.get("spawned_by") == parent)
+        by_id = {p["id"]: p for p in panes}
+        ordered = []
+        for ident in [explicit, own, *fleet, *by_id]:
+            p = by_id.get(ident) if isinstance(ident, str) else None
+            if not p or ident in ordered:
+                continue
+            count = p.get("leafCount", 0)
+            if isinstance(count, int) and 0 < count < 8:
+                ordered.append(ident)
+        if pane and explicit not in ordered:
+            print(f"Split placement: requested pane {pane} is full, missing or has no terminals; "
+                  "falling back to the placement hierarchy.")
+        return ordered
+
+    tried = set()
+    # Refresh once before opening a new panel: a merge may have changed the
+    # destination after discovery. Never attempt the same refused pane twice.
+    for _ in range(2):
+        panes = context_panes()
+        if panes is None:
+            return {"ok": False, "error": "cannot read active panes; nothing was created"}
+        for target in candidates(panes):
+            if target in tried:
+                continue
+            tried.add(target)
+            body = {**_split_request_body(target, agent_id, direction), "cwd": cwd}
+            if launch is not None:
+                body["launch"] = launch
+            result = _bridge_request("POST", "/canvas/split", body)
+            if not isinstance(result, dict):
+                return {"ok": False, "error": "malformed creation response; check GET /pty/orphans"}
+            if (result.get("error") in ("grid_full", "no_terminals") and result.get("ok") is not True
+                    and not any(result.get(key) for key in ("newSessionId", "newLeafId", "session_id"))):
+                print(f"Split placement: pane {target} refused {result['error']}; "
+                      "falling back to the placement hierarchy.")
+                continue
+            if not result.get("error") and result.get("ok") is not False:
+                session = result.get("newSessionId")
+                if not isinstance(session, str) or not session:
+                    return {"ok": False, "error": "split returned no session id; check GET /pty/orphans"}
+            return {**result, "paneId": target}
+
+    # /pty/create already owns the new-terminal route and takes the same native
+    # launch fields. Claude/Codex start a plain shell, then type only into its
+    # returned session; LiteTUI boots the resolved executable directly.
+    body = {"cwd": cwd, "focus": False}
+    if launch is not None:
+        body.update({k: launch[k] for k in ("shell", "args", "env", "harnessAgentId") if k in launch})
+    print("Split placement: no existing terminal pane has room; opening a new terminal pane.")
+    result = _bridge_request("POST", "/pty/create", body)
+    if not isinstance(result, dict):
+        return {"ok": False, "error": "malformed creation response; check GET /pty/orphans"}
+    session = result.get("session_id")
+    if result.get("error") or result.get("ok") is False:
+        return result
+    if not isinstance(session, str) or not session:
+        return {"ok": False, "error": "new terminal returned no session id; check GET /pty/orphans"}
+    # Creation returns before the renderer mounts its pane. Allow ten seconds
+    # for mounting; discover this exact session before typing into its shell.
+    for _ in range(100):
+        panes = context_panes()
+        if panes is None:
+            break
+        target = session_pane(panes, session)
+        if target:
+            return {**result, "newSessionId": session, "paneId": target, "newPane": True}
+        time.sleep(0.1)
+    running = "the seat may be running; " if launch is not None else ""
+    return {"ok": False, "error": f"pane for created session {session} is not visible; "
+            f"{running}check GET /pty/orphans. Creation was not retried", "session_id": session}
+
+
+def _bridge_token_file() -> str:
+    try:
+        return (Path.home() / ".litesuite" / "bridge-token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _bridge_request(method: str, path: str, body: dict | None = None,
+                    *, lifecycle_origin: str | None = None) -> dict:
     """Send an authenticated request to the LiteSuite Agent Bridge HTTP server."""
     import urllib.request
     import urllib.error
 
-    token = os.environ.get("LITESUITE_BRIDGE_TOKEN", "")
-    if not token:
-        # Hand-opened sessions have no bridge env — same disk fallback the
-        # hook bridge uses, so canvas ops work from any terminal.
-        try:
-            from pathlib import Path as _Path
-            token = (_Path.home() / ".litesuite" / "bridge-token").read_text(
-                encoding="utf-8"
-            ).strip()
-        except OSError:
-            token = ""
     url = os.environ.get("LITESUITE_BRIDGE_URL", "http://127.0.0.1:7423")
 
-    req = urllib.request.Request(
-        f"{url}{path}",
-        data=json.dumps(body).encode("utf-8") if body else None,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        method=method,
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
+    def send(token: str) -> tuple[int | None, dict]:
+        req = urllib.request.Request(
+            f"{url}{path}",
+            data=json.dumps(body).encode("utf-8") if body else None,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                **({"X-Seat-Kill-Source": lifecycle_origin,
+                    "X-Seat-Actor-Id": config.get_agent_id()}
+                   if lifecycle_origin else {}),
+            },
+            method=method,
+        )
         try:
-            err_body = json.loads(e.read().decode("utf-8"))
-            return {"ok": False, "error": err_body.get("error", str(e))}
-        except Exception:
-            return {"ok": False, "error": str(e)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return None, json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = json.loads(e.read().decode("utf-8"))
+                # Keep the whole body: a refusal carries its reason in fields
+                # (T919 grid_full: max, count, paneId), not only in "error".
+                return e.code, {**err_body, "ok": False, "error": err_body.get("error", str(e))}
+            except Exception:
+                return e.code, {"ok": False, "error": str(e)}
+        except Exception as e:
+            return None, {"ok": False, "error": str(e)}
+
+    # Hand-opened sessions have no bridge env — same disk fallback the hook
+    # bridge uses, so canvas ops work from any terminal.
+    env_token = os.environ.get("LITESUITE_BRIDGE_TOKEN", "")
+    status, result = send(env_token or _bridge_token_file())
+    if status == 401 and env_token:
+        # T916-D: a relaunched LiteSuite mints a new token and writes it to
+        # disk, but a seat's env still holds the old one. A 401 did nothing
+        # on the bridge, so retrying ONCE with the file's token is safe.
+        file_token = _bridge_token_file()
+        if file_token and file_token != env_token:
+            status, result = send(file_token)
+    return result
+
+
+def _rename_canvas_seat(session_id: str, name: str) -> str | None:
+    """Reassert the accepted seat name on its actual canvas session.
+
+    A rename failure is cosmetic, but returning its reason lets a subsequent
+    registration/heartbeat retry without launching another terminal.
+    """
+    result = _bridge_request("POST", "/canvas/rename-terminal", {
+        "sessionId": session_id, "title": name,
+    })
+    if result.get("ok"):
+        return None
+    return str(result.get("error") or "canvas rename failed")
 
 
 # Hook config filenames bundled in liteharness/hooks_configs/
@@ -776,7 +986,7 @@ def _verify_recipient(
     The registry is a directory of one JSON file per agent, and a watcher
     heartbeat rewrites a record with tmp-write + `os.replace` (hooks.py:270-286).
     A `glob("*.json")` that runs inside that window can come back missing exactly
-    the record being rewritten. REPRODUCED 2026-09-03 (Sentinel, mechanism by
+    the record being rewritten. REPRODUCED 2026-09-03 (the orchestrator, mechanism by
     OpenBolt 6feaf389): 45,103 rewrites against 375,989 reads produced one
     listing short of the rewritten record — and that one listing is enough to
     refuse a send to a LIVE agent with "not registered ... Pass --force", which
@@ -807,6 +1017,18 @@ SENDER_NEAR_MISS_MAX_DIFF = 12
 _UUID_LEN = 36
 
 
+def _require_identity_value(value: str | None, label: str) -> str:
+    """Reject an absent identity or one that is actually the next CLI flag."""
+    if not value or value.startswith("-"):
+        shown = "missing" if not value else repr(value)
+        print(
+            f"Error: {label} must be a non-empty identity, not {shown}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return value
+
+
 def _verify_sender(agent_id: str, force: bool = False) -> None:
     """Say something when `--from` names an id the registry does not know (T841).
 
@@ -816,7 +1038,7 @@ def _verify_sender(agent_id: str, force: bool = False) -> None:
     was passed straight through to `inbox.send`, so a typo produced a normal
     "Sent message <id>" from an id that has never existed.
 
-    MEASURED 2026-09-17: message `874dd34b` reached Sentinel `--from
+    MEASURED 2026-09-17: message `874dd34b` reached the orchestrator `--from
     c8f7ae56-4748-41e4-abba-d977ea56e7ec` — the sender's own id with the last
     twelve characters wrong. Nothing printed. He asked whether an unknown agent
     was impersonating a live seat, which is the right question and one the
@@ -830,7 +1052,7 @@ def _verify_sender(agent_id: str, force: bool = False) -> None:
     has a legitimate unknown case that `--to` does not. A seat that has not
     registered yet — or whose record the hook sweep removed — really does send
     under an id the registry cannot confirm, and refusing there would break a
-    live path to close a typo hole. So (Sentinel's ruling, 716463bb):
+    live path to close a typo hole. So (the orchestrator's ruling, 716463bb):
 
       unknown, NO near match  -> SEND, with a loud warning. The new seat works.
       unknown, NEAR MISS      -> REFUSE and name the neighbour. Nobody's first
@@ -891,6 +1113,31 @@ def _verify_sender(agent_id: str, force: bool = False) -> None:
         f"(a seat may send before it registers), but nothing can reply to it.",
         file=sys.stderr,
     )
+
+
+def _not_a_leader_warning(sender_id: str, recipient_id: str) -> str | None:
+    """T918 guard (c), warn only. The orchestrator talks to leaders only (THE LOOP 5),
+    and every seat it starts or restarts is a leader (THE LOOP 2), so an orchestrator
+    addressing a seat whose presence tier is not `leader` is the moment a restart that
+    came back at the wrong tier becomes visible. That is fleet state, not a tool call,
+    which is why it lives here and in `discover`, not in a PreToolUse hook."""
+    agents_dir = config.get_root() / "agents"
+
+    def row(agent_id: str) -> dict:
+        try:
+            return json.loads((agents_dir / f"{agent_id}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    if row(sender_id).get("tier") != "orchestrator":
+        return None
+    target = row(recipient_id)
+    if not target or target.get("tier") == "leader":
+        return None
+    return (f"T918 guard (warn only): {target.get('name') or recipient_id} ({recipient_id}) "
+            f"is tier {target.get('tier') or 'unknown'!r}, not leader. THE LOOP 2/5: the "
+            "orchestrator talks to leaders only; re-spawn a restarted seat with "
+            "`liteharness spawn --split --pane <fleet> --tier leader`.")
 
 
 def cmd_send(
@@ -978,6 +1225,9 @@ def cmd_send(
         msg_type=msg_type or inbox.DEFAULT_MSG_TYPE,
     )
     print(f"Sent message {msg_id[:8]} to {to}")
+    warning = _not_a_leader_warning(agent_id, to)
+    if warning:
+        print(warning)
 
 
 def cmd_list() -> None:
@@ -1049,10 +1299,14 @@ def cmd_inbox(count: int = 10, agent: str | None = None, all_agents: bool = Fals
 
 
 VALID_TIERS = ("orchestrator", "leader", "worker", "thinker", "reviewer")
+#: T0236-T4: tiers that must be given an explicit --cwd on a fresh spawn.
+CWD_REQUIRED_TIERS = ("worker", "leader")
 
-# Mirror cmd_discover's DISCOVER_STALE_SECONDS so name-takeover liveness uses the
-# same bar as the live-agent roll call (a holder past this with a dead pid is a ghost).
-_NAME_LIVE_STALE_SECONDS = 600
+# T1027: takeover liveness uses the SAME bar as is_name_taken. It mirrored
+# discover's 600 s roll-call freshness, and so evicted a holder whose pid was
+# ALIVE but quiet for 700 s as a "dead ghost" (measured against a throwaway
+# registry, 2026-09-26). Quiet is not dead; a dead pid is.
+from .naming import NAME_HELD_SECONDS as _NAME_LIVE_STALE_SECONDS  # noqa: E402
 
 
 def _superseded_by_later_registration(agent_id: str, data: dict) -> bool:
@@ -1101,11 +1355,12 @@ def _superseded_by_later_registration(agent_id: str, data: dict) -> bool:
 
 
 def _agent_record_live(agent_id: str) -> bool:
-    """True if the agent's presence shows a fresh heartbeat AND an alive owning
-    session_pid AND has not been superseded on that pid. Mirrors cmd_discover so
-    name-takeover never steals a name from a genuinely live agent — only from a
-    dead ghost squatting the registry."""
-    from .hooks import _pid_alive
+    """True if the agent's presence has an ALIVE owning session_pid, has not been
+    superseded on that pid, and was seen within the name-holding bar
+    (naming.NAME_HELD_SECONDS, the one is_name_taken uses). So name-takeover never
+    steals a name from a live agent, however quiet — only from a dead ghost
+    squatting the registry (dead pid, or no pid at all)."""
+    from .hooks import _pid_alive, _record_belongs_to_process
 
     path = config.get_root() / "agents" / f"{agent_id}.json"
     try:
@@ -1124,6 +1379,11 @@ def _agent_record_live(agent_id: str) -> bool:
     if not session_pid:  # orphaned watcher: no immutable owning session = not live
         return False
     if not _pid_alive(session_pid):
+        return False
+    # T1027 (Dijkstra L1): an alive pid proves nothing if Windows REUSED it after
+    # the holder died — the record must have been written while THIS process ran.
+    # Without it the 12 h bar would let a reused pid squat a dead seat's name.
+    if not _record_belongs_to_process(agent_id, session_pid):
         return False
     # A pid can outlive the agent that registered under it: `/clear` and `/resume`
     # both reuse the terminal's process. Freshness cannot separate them either —
@@ -1165,10 +1425,19 @@ def cmd_register(
     canvas_session: str | None = None,
     takeover: bool = False,
     session_pid: int | None = None,
+    thinking_level: str | None = None,
+    backend: str | None = None,
+    spawned_by: str | None = None,
+    strict_identity: bool = False,
 ) -> None:
-    """Update an agent's presence file with correct CLI/model/name/tier/team and spatial info."""
+    """Update presence; strict folder callers refuse rebinding before writes."""
     from . import naming
 
+    agent_id = _require_identity_value(agent_id, "--agent-id")
+    if strict_identity:
+        from .strict_registration import validate
+        validate(config.get_root(), agent_id=agent_id, name=name, session_pid=session_pid,
+                 backend=backend, model=model, thinking_level=thinking_level, takeover=takeover)
     agents_dir = config.get_root() / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     path = agents_dir / f"{agent_id}.json"
@@ -1177,7 +1446,7 @@ def cmd_register(
     # falls through to `presence = {}` and every field below is then written from
     # the arguments alone — so a torn read silently DROPS tier, model, name,
     # started_at and the spatial block, which is the same demotion the hook path
-    # produced on Sentinel's row (2026-09-02, 14:05Z -> 14:06Z).
+    # produced on the orchestrator's row (2026-09-02, 14:05Z -> 14:06Z).
     from .hooks import _read_presence, _write_json_atomic
 
     presence = _read_presence(path)
@@ -1220,6 +1489,18 @@ def cmd_register(
         presence["cli"] = cli
     if model:
         presence["model"] = model
+    # T1025: the level the seat RESOLVED, beside the model it resolved, so the
+    # fleet floor (fleet_policy.verify_seat) and `discover` read the effective value.
+    if thinking_level:
+        presence["thinking_level"] = thinking_level
+    # T1027: the ENGINE the seat resolved (a LiteTUI seat asked for local can be
+    # pinned onto codex), so the floor judges what runs, not what was asked.
+    if backend:
+        presence["backend"] = backend
+    # Only an explicit register flag supplies this edge. Never infer it from a
+    # caller's ambient env; a LiteTUI seat has already consumed its marker.
+    if spawned_by:
+        presence["spawned_by"] = spawned_by
 
     if tier and tier in VALID_TIERS:
         presence["tier"] = tier
@@ -1258,7 +1539,7 @@ def cmd_register(
         presence.setdefault("spawn_mode", "canvas")
 
     # Name handling: override > existing override > generated
-    if name:
+    if name and not strict_identity:
         taken_by = naming.is_name_taken(name, exclude_id=agent_id)
         if taken_by and takeover and not _agent_record_live(taken_by):
             backup = _evict_agent_records(taken_by)
@@ -1273,12 +1554,17 @@ def cmd_register(
         else:
             naming.set_override(agent_id, name)
 
-    resolved_name = naming.get_name(agent_id)
+    # Strict folder-owned registration reports folder truth directly; legacy
+    # naming overrides are neither another authority nor rewritten by heartbeat.
+    resolved_name = name if strict_identity else naming.get_name(agent_id)
     presence["name"] = resolved_name
     # An explicit CLI registration is an identity choice, unlike an automatic
     # SessionStart registration. Resume may replace only the latter (T363).
     presence["registration_source"] = "takeover"
     presence.pop("exited_at", None)
+    if presence.get("status") == "offline":  # T0236: a swept-offline named agent is live again
+        for stale in ("status", "retired_at", "retirement_reason"):
+            presence.pop(stale, None)
     presence.pop("superseded_by", None)
     now_iso = datetime.now(timezone.utc).isoformat()
     config.stamp_activity(presence, now_iso)
@@ -1296,8 +1582,16 @@ def cmd_register(
     # having no row at all. hooks.py has written atomically since that was found;
     # `liteharness register` never did, and it is invoked by the SessionStart and
     # PostCompact hooks on every seat.
+    from .seat_lifecycle import capture_registration_identity, registration
+    capture_registration_identity(presence)
+    presence.pop("lifecycle_registry_record_id", None)
     _write_json_atomic(path, presence)
-    # Push the arrival to every live orchestrator (Ryan 2026-09-12): discover
+    registration(presence, "liteharness-cli-register")
+    if presence.get("canvas_session_id"):
+        rename_error = _rename_canvas_seat(str(presence["canvas_session_id"]), resolved_name)
+        if rename_error:
+            print(f"Warning: canvas title for {agent_id} not updated: {rename_error}; retry with register", file=sys.stderr)
+    # Push the arrival to every live orchestrator (the user 2026-09-12): discover
     # only answers when asked, and a seat that nobody asked about worked for an
     # hour unseen. Same message shape as any other inbox traffic.
     from .announce import announce_registration
@@ -1308,6 +1602,9 @@ def cmd_register(
     team_str = f", team={presence['team']}" if presence.get("team") else ""
     spatial_str = f", pane={pane_id}" if pane_id else ""
     print(f"Registered agent {agent_id}: cli={presence.get('cli', '?')}, model={presence.get('model', '?')}, tier={presence.get('tier', 'worker')}, name={resolved_name}{team_str}{spatial_str}")
+    if strict_identity:
+        print("Folder-owned identity: " + json.dumps({key: presence.get(key) for key in
+              ("agent_id", "name", "backend", "model", "thinking_level", "session_pid")}))
 
 
 # Bump when the `patterns` FTS5 column set changes. The table is a pure cache
@@ -2256,7 +2553,7 @@ def cmd_verify_pattern(
 
     One event per state change, append-only, in a SEPARATE file so
     patterns.jsonl stays pattern-only forever. Each level REQUIRES its
-    evidence: human -> evidence_ref (where Ryan/the human approved),
+    evidence: human -> evidence_ref (where the user/the human approved),
     judgement -> delegation_ref (where judgement was delegated),
     gauntlet -> run_id. Resolution targets pattern_id ONLY and FAILS CLOSED
     on zero matches — never a task_id fallback that would knowingly promote
@@ -2609,18 +2906,21 @@ def cmd_bootstrap(project_path: str, *, no_git_hooks: bool = False) -> None:
 MODEL_ALIASES = {
     # "opus" tracks the CURRENT Opus generation, so spawning with --model opus
     # follows the frontier instead of pinning a superseded release.
-    "opus": "claude-opus-5[1m]",
-    "opus-1m": "claude-opus-5[1m]",
-    "opus-200k": "claude-opus-5",
+    "opus": "claude-opus-5-5[1m]",
+    "opus-1m": "claude-opus-5-5[1m]",
+    "opus-200k": "claude-opus-5-5",
+    "opus-5.5": "claude-opus-5-5[1m]",
     "opus-5": "claude-opus-5[1m]",
     "opus-4.8": "claude-opus-4-8[1m]",
     "opus-4.8-200k": "claude-opus-4-8",
     "opus-4.6": "claude-opus-4-6[1m]",
     "opus-4.6-1m": "claude-opus-4-6[1m]",
     "opus-4.6-200k": "claude-opus-4-6",
-    "fable": "claude-fable-5",
+    "fable": "claude-fable-5-1",
+    "fable-5": "claude-fable-5",
     "fable-5.1": "claude-fable-5-1",
-    "sonnet": "claude-sonnet-5",
+    "sonnet": "claude-sonnet-5-5",
+    "sonnet-5.5": "claude-sonnet-5-5",
     "sonnet-5": "claude-sonnet-5",
     "sonnet-4.6": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5-20251001",
@@ -2754,7 +3054,7 @@ def _generate_bootstrap(
     # Cognitive architecture — carried IN THE BRIEF for the same reason as tier:
     # the canvas fallback path does not forward context_env, so the hook-side
     # injection (LITEHARNESS_COGNITIVE_FILE) never fires there. A polymath that
-    # boots without its architecture is just an Opus with a name (RULING, Ryan
+    # boots without its architecture is just an Opus with a name (RULING, the user
     # 2026-08-07: polymaths spawned MUST read their respective prompts).
     cog_file = context_env.get("LITEHARNESS_COGNITIVE_FILE", "").strip()
     if cog_file:
@@ -2863,6 +3163,96 @@ _SPAWN_NUDGE = (
 )
 
 
+def _claude_json_path() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home()) / ".claude.json"
+
+
+def _git_root(path: str) -> str | None:
+    p = Path(path)
+    for d in (p, *p.parents):
+        if (d / ".git").exists():  # a dir in a clone, a file in a worktree
+            return str(d)
+    return None
+
+
+def _ensure_folder_trusted(target_dir: str, check_only: bool = False) -> str | None:
+    """Make sure a claude launched in target_dir will not stop on the folder
+    trust menu, which it never leaves and so never registers (T916 item 5).
+
+    Claude Code 2.1.282 (function Sb in the binary) walks up from the cwd for
+    projects[<path>].hasTrustDialogAccepted but STOPS at the folder's git root,
+    so every worktree and nested repo prompts even with a workspace root trusted.
+    Keys use forward slashes (lF).
+
+    Returns None when the launch is safe, else the refusal to print. Trust is
+    only EXTENDED from a folder the human already trusted (an ancestor); a
+    folder with no trusted ancestor is refused, never trusted on their behalf.
+    The write takes Claude's own lock (proper-lockfile: mkdir <file>.lock) and
+    re-reads under it, so a live seat's save either lands before ours (and we
+    keep it) or re-reads ours after (its saver re-reads under the same lock).
+
+    check_only: return the refusal, if any, and write nothing. Used before a
+    --worktree exists, with the path it will have (fix cycle 1, F-2).
+    """
+    def key(p: str) -> str:
+        return p.replace("\\", "/")
+
+    cfg = _claude_json_path()
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"SPAWN REFUSED: cannot read {cfg} to check folder trust ({exc}). Nothing was spawned."
+    trusted = {key(k) for k, v in (data.get("projects") or {}).items()
+               if isinstance(v, dict) and v.get("hasTrustDialogAccepted")}
+    target = Path(target_dir)
+    root = _git_root(target_dir)
+    for d in (target, *target.parents):  # Claude's own walk, bounded by the git root
+        if key(str(d)) in trusted:
+            return None
+        if root is not None and str(d) == root:
+            break
+    # F-1 ruling (the orchestrator 4d80ce96): a drive root (C:/) and the home dir are
+    # NOT trust sources. Trusting C:/ once would otherwise extend to every
+    # folder on the drive. Only a trusted PROJECT-level ancestor counts.
+    not_sources = {key(target.anchor), key(str(Path.home()))}
+    if not any(key(str(d)) in trusted and key(str(d)) not in not_sources for d in target.parents):
+        return (f"SPAWN REFUSED: {target_dir} is not a trusted folder and no project folder "
+                "above it is either (a drive root or your home folder does not count). "
+                "The seat would sit on Claude's trust menu and never register. Open claude "
+                "there once and accept the trust prompt yourself, or spawn under a project "
+                "folder you already trust. Nothing was spawned.")
+    if check_only:
+        return None
+    new_key = key(root or target_dir)
+    lock = cfg.with_name(cfg.name + ".lock")
+    tmp = cfg.with_name(f"{cfg.name}.liteharness-{os.getpid()}.tmp")
+    for _ in range(50):  # ~10s, Claude's own retry budget is similar
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            time.sleep(0.2)
+    else:
+        return (f"SPAWN REFUSED: {lock} stayed held for 10s, so {new_key} could not be "
+                "trusted safely. Nothing was spawned; try again.")
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))  # re-read under the lock
+        entry = data.setdefault("projects", {}).setdefault(new_key, {"allowedTools": []})
+        entry["hasTrustDialogAccepted"] = True
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, cfg)
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"SPAWN REFUSED: could not trust {new_key} in {cfg} ({exc}). Nothing was spawned."
+    finally:
+        tmp.unlink(missing_ok=True)
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+    print(f"  Trusted {new_key} for Claude (a folder above it was already trusted).")
+    return None
+
+
 def _write_spawn_brief(bootstrap: str):
     """Persist the bootstrap as a one-shot brief file for SessionStart injection.
 
@@ -2897,7 +3287,56 @@ def _wait_brief_consumed(brief_path, timeout: float) -> bool:
     return not brief_path.exists()
 
 
-def _deliver_prompt(write_fn, read_fn, brief_path, nudge: str, fallback: str, boot_timeout: float) -> str:
+def _find_spawned_presence(key: str, value: str) -> str | None:
+    """The agent id whose presence carries `key == value` — a token only THIS
+    spawn minted (canvas_session_id for a split, provisional_id for pty).
+    Never time or name: those match whoever else registered in the window."""
+    if not value:
+        return None
+    for p in (config.get_root() / "agents").glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and str(data.get(key) or "") == value:
+            return p.stem
+    return None
+
+
+def _turn_seen_since(key: str, value: str, t0: float) -> bool:
+    """True once the seat whose presence carries `key == value` stamped
+    turn_seen_at (its UserPromptSubmit/PostToolUse hook) at or after t0."""
+    for p in (config.get_root() / "agents").glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if str(data.get(key) or "") != value or not data.get("turn_seen_at"):
+                continue
+            if datetime.fromisoformat(data["turn_seen_at"]).timestamp() >= t0:
+                return True
+        except (json.JSONDecodeError, OSError, ValueError, TypeError, AttributeError):
+            continue
+    return False
+
+
+def _resumed_id(additional_args: str | None) -> str | None:
+    """The session id a `--resume <id>` in the extra claude args names, if any.
+    A bare --resume (the picker) and --continue name none."""
+    m = re.search(r"--resume(?:=|\s+)([0-9A-Za-z][0-9A-Za-z-]{7,})", additional_args or "")
+    return m.group(1) if m else None
+
+
+def _registered_since(agent_id: str, since: datetime) -> bool:
+    """True once agents/<id>.json carries a registered_at at or after `since`.
+    register_presence rebuilds registered_at on EVERY registration (startup,
+    resume, compact), so the pre-restart row never counts."""
+    try:
+        data = json.loads((config.get_root() / "agents" / f"{agent_id}.json").read_text(encoding="utf-8"))
+        return datetime.fromisoformat(str(data.get("registered_at"))) >= since
+    except (json.JSONDecodeError, OSError, ValueError, TypeError):
+        return False
+
+
+def _deliver_prompt(write_fn, turn_seen, brief_path, nudge: str, fallback: str, boot_timeout: float) -> str:
     """Wake a freshly spawned session and confirm its first turn actually started.
 
     The old design typed the full multi-line bootstrap into the TUI blind after
@@ -2906,9 +3345,11 @@ def _deliver_prompt(write_fn, read_fn, brief_path, nudge: str, fallback: str, bo
     Now:
       1. Wait for the SessionStart hook to consume the brief file — guaranteed
          context injection; ANY subsequent wake-up carries the brief with it.
-      2. Type a one-line nudge (retry-safe, unlike an 8KB multi-line brief).
-      3. Confirm a turn started ("esc to interrupt" in the terminal tail);
-         retype up to 3 times.
+      2. Type a one-line nudge ONCE.
+      3. Confirm the turn by the seat's own hook stamp (`turn_seen()`, the
+         presence turn_seen_at). Retries press Enter only, never the text:
+         T916 item 3, the tail-read check never saw a running turn, so the
+         nudge was retyped 3x into a turn that was already working.
       4. Brief never consumed (env not forwarded / stale hooks) → fall back to
          typing the full bootstrap, same verify loop.
 
@@ -2918,36 +3359,794 @@ def _deliver_prompt(write_fn, read_fn, brief_path, nudge: str, fallback: str, bo
         payload, label = nudge, "nudge (brief injected via SessionStart)"
     else:
         payload, label = fallback, "full bootstrap typed (brief NOT consumed — bridge env not forwarded?)"
-    import re as _re
-
-    def _turn_active(tail: str) -> bool:
-        # The TUI's busy render varies by version/state: some builds show
-        # "esc to interrupt", current ones show a spinner line like
-        # "✻ Elucidating… (27s · ↓ 1.8k tokens)" (verb is randomized — match
-        # the stable timer/token grammar, not the word).
-        low = tail.lower()
-        if "esc to interrupt" in low or "· ↓ " in tail:
-            return True
-        return bool(_re.search(r"\(\d+s ·", tail))
 
     for attempt in range(1, 4):
         try:
-            write_fn(payload)
+            write_fn(payload if attempt == 1 else "")  # a retry is Enter only
         except Exception as exc:
             return f"FAILED to write {label}: {exc}"
         deadline = time.time() + 8
         while time.time() < deadline:
-            try:
-                tail = read_fn()
-            except Exception:
-                tail = ""
-            if _turn_active(tail):
-                return f"{label}; turn confirmed on attempt {attempt}"
+            if turn_seen():
+                return f"{label}; turn confirmed on attempt {attempt} (hook stamp)"
             time.sleep(1.0)
     return (
-        f"UNVERIFIED — {label} typed 3x, no turn observed. "
-        f'Wake it manually: liteharness send-input <agent-id> "go"'
+        f"UNVERIFIED — {label} typed once, Enter pressed twice more, and the seat's "
+        f"hooks never stamped a turn. Wake it manually: liteharness send-input <agent-id> \"go\""
     )
+
+
+# (flag, cmd_spawn kwarg, takes a value, help). The parser AND `spawn --help`
+# read this one table, so the usage cannot drift from what is accepted.
+SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
+    ("--split", "split_mode", False, "fill your own, fleet, then other active terminal panes (max 8); new pane only when none fits"),
+    ("--cli", "spawn_cli", True, "claude | litetui | codex (default claude; codex needs --split, --model, --thinking-level)"),
+    ("--pane", "split_pane", True, "preferred pane; full, missing or nonterminal panes fall through the hierarchy"),
+    ("--direction", "split_direction", True, "vertical | horizontal (default: next grid slot)"),
+    ("--pty", "pty_mode", False, "spawn headless via the ConPTY daemon"),
+    ("--exec", "exec_cmd", True, "with --pty: run this command instead of claude"),
+    ("--model", "model", True, "model id"),
+    ("--cwd", "cwd", True, "working directory (default: yours)"),
+    ("--worktree", "worktree", False, "create a git worktree for the seat"),
+    ("--permission-mode", "permission_mode", True, "claude --permission-mode"),
+    ("--prompt", "prompt", True, "the brief"),
+    ("--name", "name", True, "the seat's name"),
+    ("--tier", "tier", True, "worker | leader | thinker | reviewer | orchestrator"),
+    ("--cognitive", "cognitive", True, "cognitive architecture (default: tried from --name)"),
+    ("--team", "team", True, "team"),
+    ("--thread-id", "thread_id", True, "thread id"),
+    ("--workspace-id", "workspace_id", True, "workspace id"),
+    ("--project-id", "project_id", True, "project id"),
+    ("--resume", "resume_agent_id", True, "resume a named Claude Code or LiteTUI seat (or LiteTUI agent id) with --split; a live seat is messaged, never closed"),
+    ("--convo", "resume_convo_id", True, "conversation id; overrides LiteTUI lookup, must match a named Claude seat"),
+    ("--kill-old", "kill_old", False, "close the old seat before resuming (requires --resume)"),
+    ("--backend", "backend", True, "LiteTUI backend override when resuming"),
+    ("--thinking-level", "thinking_level", True, "LiteTUI thinking level override when resuming"),
+    ("--takeover", "takeover", False, "fresh LiteTUI spawn only: take a name already in names.json (default: refused; resume it instead)"),
+    ("--spawned-by", "spawned_by", True, "explicit requesting agent id (fresh or resumed spawn)"),
+    ("--args", "additional_args", True, "extra arguments appended to the claude command"),
+    ("--new-window", "new_window", False, "accepted for old callers; has no effect"),
+)
+
+
+def _spawn_usage() -> str:
+    lines = ["Usage: liteharness spawn [options]", ""]
+    for flag, _kw, takes, text in SPAWN_FLAGS:
+        lines.append(f"  {flag + (' VALUE' if takes else ''):<24} {text}")
+    lines.append(f"  {'-h, --help':<24} print this and exit (spawns nothing)")
+    return "\n".join(lines)
+
+
+def _parse_spawn_args(argv: list[str]) -> dict:
+    """argv after `spawn` -> cmd_spawn kwargs. Refuses anything it does not
+    understand: the old loop ended in `else: i += 1`, so `spawn --help`
+    skipped the flag and spawned a real seat (T916 item 1)."""
+    table = {flag: (kw, takes) for flag, kw, takes, _ in SPAWN_FLAGS}
+    if "-h" in argv or "--help" in argv:
+        # Checked before parsing so a --help anywhere wins over a bad flag,
+        # but only where it is a flag, not a value (--prompt "--help").
+        i = 0
+        while i < len(argv):
+            if argv[i] in ("-h", "--help"):
+                print(_spawn_usage())
+                sys.exit(0)
+            i += 2 if table.get(argv[i], (None, False))[1] else 1
+    kwargs: dict = {}
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg not in table:
+            print(f"Error: spawn does not know {arg!r}. Nothing was spawned.\n"
+                  f"Run `liteharness spawn --help` for the flags it accepts.")
+            sys.exit(2)
+        kw, takes = table[arg]
+        if not takes:
+            kwargs[kw] = True
+            i += 1
+            continue
+        if i + 1 >= len(argv) or argv[i + 1] in table:
+            print(f"Error: {arg} needs a value. Nothing was spawned.")
+            sys.exit(2)
+        kwargs[kw] = argv[i + 1]
+        i += 2
+    return kwargs
+
+
+_UNGOVERNED_CODEX_CLI = (
+    "SPAWN REFUSED: FLEET FLOOR: codex floor: not verified (T0088-A). The codex CLI can carry a model "
+    "and -c model_reasoning_effort, but nothing yet proves which rollout is this seat's, so the level "
+    "it ran cannot be verified. Launch codex through LiteTUI (litetui --backend codex --model M "
+    "--thinking-level T, at or above the floor). Nothing was spawned."
+)
+
+_CODEX_NOT_MARKABLE = (
+    "SPAWN REFUSED: FLEET FLOOR: this codex command cannot be given a spawn marker unambiguously "
+    "(it needs codex itself, known options only, no shell metacharacter, and no prompt or subcommand "
+    "already present), so which rollout is this seat's could not be proven; see T0088-A. Nothing was spawned."
+)
+#: How long a codex seat gets to write the marker message and start its first turn.
+CODEX_VERIFY_WAIT = 120
+
+_EFFORT_FLAGS = ("--thinking-level", "--effort", "--reasoning-effort", "--thinking")
+_PI_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh")
+
+
+def _exec_request(model: str | None, exec_cmd: str) -> tuple[str | None, str | None, str | None, str | None]:
+    """(program, backend, model, thinking) an --exec command line asks for, where
+    program is litetui, codex or None. DORMANT (T0088): no spawn path calls this yet;
+    T0088-A wires it, with fleet_policy.verify_codex_rollout, once a codex seat can be
+    tied to its own rollout. Each CLI carries its own level: litetui --thinking-level,
+    copilot --effort/--reasoning-effort, pi --thinking or a `provider/id:level` model,
+    codex `-c model_reasoning_effort=<level>` (last wins; read off the raw line because
+    the quotes around the value split its tokens)."""
+    tokens = [t for t in re.split(r"[\s\"']+", exec_cmd) if t]
+    stems = [re.split(r"[\\/]", t)[-1].split(".")[0].lower() for t in tokens]
+    at = next((i for i, stem in enumerate(stems) if stem in ("litetui", "codex")), None)
+    program = stems[at] if at is not None else None
+    backend = thinking = None
+    args = tokens[at + 1:] if at is not None else tokens
+    for flag, value in zip(args, args[1:]):
+        if flag == "--backend":
+            backend = value
+        elif flag in ("--model", "-m"):
+            model = value
+        elif flag in _EFFORT_FLAGS:
+            thinking = value
+    efforts = re.findall(r"model_reasoning_effort\s*=\s*[\"']?([\w-]+)", exec_cmd)
+    if efforts:
+        thinking = efforts[-1]
+    if model and program != "litetui":
+        model = model.rsplit("/", 1)[-1]  # pi and copilot take provider/id
+        head, _, tail = model.rpartition(":")
+        if head and tail in _PI_LEVELS:  # pi's id:level shorthand
+            model, thinking = head, thinking or tail
+    return program, backend, model, thinking
+
+
+def _spawn_floor_refusal(model: str | None, exec_cmd: str | None) -> str | None:
+    """T1025 pre-launch floor. Claude seats pass through (no floor names them).
+    An --exec seat is judged by the PROGRAM it runs, found in any token, so a
+    wrapper (`cmd /c litetui`, `python -m litetui`, `pwsh -c codex`) is no way
+    round it. A litetui seat is judged by its own --backend/--model/--thinking-level,
+    and one naming neither backend nor model is codex (its saved settings, the
+    T1004 pin, would decide). The codex CLI, or any other non-LiteTUI program on
+    a governed model, is refused outright: see T0088-A.
+
+    Pre-launch only. The post-launch check of what the seat resolved is not run
+    on this path: a pty seat registers under its own id, and nothing yet joins
+    it to the pty-* id minted here (T1025-A)."""
+    from . import fleet_policy
+    if not exec_cmd:
+        return fleet_policy.gate(None, model, None)
+    tokens = [t for t in re.split(r"[\s\"']+", exec_cmd) if t]
+    stems = [re.split(r"[\\/]", t)[-1].split(".")[0].lower() for t in tokens]
+    at = next((i for i, stem in enumerate(stems) if stem in ("litetui", "codex")), None)
+    backend = thinking = None
+    args = tokens[at + 1:] if at is not None else tokens
+    for flag, value in zip(args, args[1:]):
+        if flag == "--backend":
+            backend = value
+        elif flag in ("--model", "-m"):
+            model = value
+        elif flag == "--thinking-level":
+            thinking = value
+    if at is not None and stems[at] == "litetui":
+        return fleet_policy.gate(backend or ("codex" if not model else None), model, thinking)
+    try:
+        policy = fleet_policy.load()[0]
+    except fleet_policy.PolicyError as exc:
+        return f"SPAWN REFUSED: {exc}"
+    if at is not None or fleet_policy.floor_for(policy, backend, model):
+        return _UNGOVERNED_CODEX_CLI
+    return None
+
+
+#: What `spawn --split --cli codex --args` may carry: safety flags only. Anything that can change the
+#: model, the level, the provider or the directory (-c, -m, -p, -C, --oss, --local-provider, --remote,
+#: the dangerous bypass) would make the command differ from what the floor judged, so it is refused.
+_CODEX_ARG_VALUE_FLAGS = frozenset({"-s", "--sandbox", "-a", "--ask-for-approval"})
+_CODEX_ARG_BOOL_FLAGS = frozenset({"--search", "--no-alt-screen"})
+
+
+def _codex_args_allowed(extra: str | None) -> bool:
+    if not extra:
+        return True
+    parts = extra.split()
+    i = 0
+    while i < len(parts):
+        if parts[i] in _CODEX_ARG_BOOL_FLAGS:
+            i += 1
+        elif parts[i] in _CODEX_ARG_VALUE_FLAGS and i + 1 < len(parts) and not parts[i + 1].startswith("-"):
+            i += 2
+        else:
+            return False
+    return True
+
+
+def _codex_cwd_refusal(cwd: Path) -> str | None:
+    """the user's cwd boundary: system trees and bare C root only, never all of the C drive."""
+    import ntpath
+
+    def canonical(path: str) -> str:
+        path = path.replace("/", "\\")
+        if path.startswith("\\\\?\\"):
+            path = path[4:]
+        return ntpath.normcase(ntpath.normpath(path)).rstrip("\\")
+
+    target = canonical(str(cwd.resolve()))
+    roots = [r"C:\Windows", r"C:\Program Files", r"C:\Program Files (x86)", r"C:\ProgramData"]
+    roots.extend(os.environ[key] for key in ("SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)",
+                                             "ProgramW6432", "ProgramData") if os.environ.get(key))
+    banned = next((root for root in roots if target == canonical(root)
+                   or target.startswith(canonical(root) + "\\")), None)
+    if target == "c:" or banned:
+        return (f"SPAWN REFUSED: codex cwd {cwd} is bare C root or inside a banned system directory "
+                f"({banned or 'C root'}). Choose a non-system folder. Nothing was spawned.")
+    return None
+
+
+def _codex_session_buffer(session: str) -> tuple[str | None, str | None]:
+    """Read ONLY this session within a 2-second caller budget; no auth retry or write authority."""
+    import queue
+    import threading
+    import unicodedata
+    import urllib.request
+
+    replies = queue.Queue(maxsize=1)
+
+    def capture():
+        try:
+            url = os.environ.get("LITESUITE_BRIDGE_URL", "http://127.0.0.1:7423")
+            token = os.environ.get("LITESUITE_BRIDGE_TOKEN") or _bridge_token_file()
+            request = urllib.request.Request(
+                f"{url}/pty/read", data=json.dumps({"session_id": session}).encode("utf-8"),
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(request, timeout=2) as response:
+                # Bound allocation as well as caller wait; an oversized response is unavailable.
+                raw = response.read(65537)
+            if len(raw) > 65536:
+                raise ValueError("oversized response")
+            result = json.loads(raw.decode("utf-8"))
+            if not isinstance(result, dict) or not isinstance(result.get("output"), str) or result.get("error"):
+                raise ValueError("no terminal output")
+            replies.put((result["output"], None))
+        except Exception as exc:  # noqa: BLE001 -- diagnostic failures never suppress cleanup
+            replies.put((None, type(exc).__name__))
+
+    deadline = time.monotonic() + 2
+    threading.Thread(target=capture, daemon=True).start()
+    try:
+        text, error = replies.get(timeout=max(0, deadline - time.monotonic()))
+    except queue.Empty:
+        return None, "2s deadline"
+    if error:
+        return None, error
+    # Keep line boundaries for screen recognition, but strip terminal escapes and other controls.
+    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]", "", text)
+    text = "".join(char for char in text if char in "\r\n" or not unicodedata.category(char).startswith("C"))
+    return text[-32768:], None
+
+
+def _codex_failure_buffer(session: str) -> str:
+    """Bounded sanitized failure receipt; terminal text is not blanket secret-redacted."""
+    import unicodedata
+    text, error = _codex_session_buffer(session)
+    if error or text is None:
+        return f"own-session buffer unavailable ({error or 'no output'})"
+    text = "".join(char for char in text if not unicodedata.category(char).startswith("C"))[:4096]
+    return f"own-session buffer (sanitized, max 4096 chars): {json.dumps(text, ensure_ascii=True)}"
+
+
+def _codex_folder_trust_screen(text: str) -> bool:
+    """Actual 0.159 probe3 two-option screen, not a garbled display-path identity claim.
+
+    Called ONLY for the fresh owned PTY after typing the exact requested cwd; fresh shell
+    provenance is checked before Enter, and session_meta.cwd must match exactly afterward.
+    """
+    compact = re.sub(r"\s+", "", text)
+    # Never let a historical trust screen authorize a later unrelated approval.
+    unrelated = re.search(r"approve(?:a|this|the)?command|permissionrequested|allow(?:once|always)|"
+                          r"wouldyouliketo(?:run|allow)|requiresyourapproval", compact, re.IGNORECASE)
+    return (not unrelated and "Folderaccess" in compact and "Trustthisfolder?" in compact
+            and "Codexcanread,edit,andrunfileshere,subjecttoyourpermissionsettings." in compact
+            and "Yourtrustdecisionwillbesaved." in compact
+            and "1.Trustandcontinue" in compact and "2.Quit" in compact
+            and "entercontinue" in compact and "escquit" in compact)
+
+
+def _codex_session_process(session: str):
+    """Bind an exact NEW bridge session to its live shell's psutil identity, never a title/id guess."""
+    import psutil
+
+    response = _bridge_request("GET", "/pty/list")
+    rows = response.get("sessions") if isinstance(response, dict) else None
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("malformed PTY session list")
+    matches = [row for row in rows if row.get("id") == session]
+    if len(matches) != 1:
+        raise ValueError(f"session {session} has no unique shell PID")
+    pid = matches[0].get("pid")
+    if type(pid) is not int or pid <= 0:
+        raise ValueError(f"session {session} has an invalid shell PID")
+    caller = psutil.Process(os.getpid())
+    if pid in {caller.pid, *(parent.pid for parent in caller.parents())}:
+        raise ValueError("new session names the caller or its ancestor, not an owned shell")
+    if sum(row.get("pid") == pid for row in rows) != 1:
+        raise ValueError("shell PID is shared by multiple bridge sessions")
+    shell = psutil.Process(pid)
+    shell.create_time()  # retain PID + birth time, not a PID to resolve again after DELETE
+    if not shell.is_running():
+        raise ValueError("new session shell is no longer running")
+    return shell
+
+
+def _codex_marker_descendants(session: str, shell, marker: str) -> list:
+    """Snapshot proven exact-marker descendants BEFORE DELETE; no global process scan."""
+    current = _codex_session_process(session)  # fresh bridge list, same retained process identity
+    if current != shell or not shell.is_running():
+        raise ValueError("session shell identity changed; descendants are unverified")
+    return [proc for proc in shell.children(recursive=True)
+            if proc.is_running() and marker in proc.cmdline()]
+
+
+def _reap_marker_processes(marker: str, targets: list, grace: float = 5.0) -> tuple[list[int], list[int]]:
+    """Reap ONLY retained, proven descendants. Exact argv token + process identity, never substring."""
+    import psutil
+
+    victims, unchecked = [], []
+    for proc in targets:
+        try:
+            if not proc.is_running():
+                continue
+            if marker not in proc.cmdline():
+                unchecked.append(proc.pid)
+                continue
+            victims.append(proc)
+            proc.terminate()  # psutil checks PID reuse against the retained identity
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error:
+            unchecked.append(proc.pid)
+    _gone, alive = psutil.wait_procs(victims, timeout=grace)
+    return [p.pid for p in victims], sorted(set(unchecked + [p.pid for p in alive]))
+
+
+def _spawn_codex_split(
+    *, model: str | None, thinking_level: str | None, additional_args: str | None,
+    cwd: str | None, name: str | None, pane: str | None, direction: str | None,
+    spawned_by: str | None,
+) -> None:
+    """T0088-C: `spawn --split --cli codex`, the ONE owner of a governed codex CLI launch.
+
+    The codex CLI is named at or above the fleet floor (model AND level are required and gated),
+    launched into an EXPLICITLY NAMED canvas pane with a fresh random marker as its whole prompt,
+    and then proven from its own rollout (fleet_policy.verify_codex_rollout: the exact marker
+    message, the SAME turn's model and effort). Every way out but a verified seat kills TARGET-ONLY
+    (named bridge DELETE plus exact-marker descendants proven before DELETE against the new
+    session's retained shell identity). Cleanup failures and unverifiable residue are reported,
+    including a cancel (Ctrl-C) or a crash while verifying, and never retried. A codex
+    CLI seat runs no liteharness hook here, so no presence row is invented for it."""
+    from . import fleet_policy
+
+    if not model or not thinking_level:
+        print("SPAWN REFUSED: --cli codex needs --model and --thinking-level (the codex floor judges both). "
+              "Nothing was spawned.")
+        sys.exit(2)
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", model) or not re.fullmatch(r"[a-z]+", thinking_level):
+        print("SPAWN REFUSED: --model and --thinking-level must be plain names. Nothing was spawned.")
+        sys.exit(2)
+    if not _codex_args_allowed(additional_args):
+        print("SPAWN REFUSED: --args for a codex seat may only carry -s/--sandbox, -a/--ask-for-approval, "
+              "--search or --no-alt-screen; anything that could change the model, level, provider or "
+              "directory is refused. Nothing was spawned.")
+        sys.exit(2)
+    caller = (spawned_by or os.environ.get("LITEHARNESS_AGENT_ID") or "").strip()
+    if not caller:
+        print("SPAWN REFUSED: --cli codex needs --spawned-by or LITEHARNESS_AGENT_ID. Nothing was spawned.")
+        sys.exit(2)
+    target_dir = Path(cwd or os.getcwd()).expanduser()
+    if not target_dir.is_absolute() or not target_dir.is_dir():
+        print("SPAWN REFUSED: cwd must be an absolute existing directory. Nothing was spawned.")
+        sys.exit(2)
+    target_dir = target_dir.resolve()
+    refusal = _codex_cwd_refusal(target_dir) or fleet_policy.gate("codex", model, thinking_level)
+    if refusal:
+        print(refusal)
+        sys.exit(2)
+    base = f"codex -m {model} -c model_reasoning_effort={thinking_level}" + (f" {additional_args}" if additional_args else "")
+    marker = fleet_policy.new_spawn_marker()
+    typed = None if re.search(r"[;&|`$<>\r\n]", base) else fleet_policy.with_spawn_marker(base, marker)
+    if typed is None:  # a shell metacharacter, or a command with no unambiguous place for the marker
+        print(_CODEX_NOT_MARKABLE)
+        sys.exit(2)
+
+    t0 = time.time()
+    split_res = _place_split(pane, caller, direction, cwd=str(target_dir))
+    session = split_res.get("newSessionId")
+    if not session or split_res.get("error") or split_res.get("ok") is False:
+        print(_split_refusal(split_res, pane))
+        sys.exit(2 if split_res.get("error") == "grid_full" else 1)
+    # Placement resolves an exact id, including when no --pane was supplied.
+    # Keep the launcher guard: an alias must never reach the typed command.
+    pane = split_res.get("paneId")
+    if not pane or str(pane).startswith("self"):
+        print("SPAWN REFUSED: --cli codex needs --pane with an exact pane id (from GET /context), never the "
+              "caller's own. Nothing was spawned.")
+        sys.exit(2)
+
+    shell = None
+
+    def take_down(reason: str) -> str:
+        """Snapshot owned targets first; independently attempt named DELETE and proven reap."""
+        details, targets = [], []
+        try:
+            details.append(_codex_failure_buffer(session))
+        except Exception as exc:  # noqa: BLE001 -- cleanup must run even if diagnostic formatting fails
+            details.append(f"own-session buffer unavailable ({type(exc).__name__})")
+        try:
+            if shell is None:
+                raise ValueError("no proven new-session shell identity")
+            targets = _codex_marker_descendants(session, shell, marker)
+        except Exception as exc:  # noqa: BLE001
+            details.append(f"process provenance unavailable: {exc}; residual processes UNVERIFIED; no guessed kill")
+        try:
+            cleanup = _bridge_request("DELETE", f"/pty/{session}")
+            if (not isinstance(cleanup, dict) or cleanup.get("success") is not True
+                    or cleanup.get("ok") is False or cleanup.get("error")):
+                details.append(f"FATAL CLEANUP FAILED for session {session}: {json.dumps(cleanup)}")
+            else:
+                details.append(f"pane DELETE acknowledged (session {session})")
+        except Exception as exc:  # noqa: BLE001
+            details.append(f"FATAL CLEANUP FAILED for session {session}: {exc}")
+        try:
+            found, alive = _reap_marker_processes(marker, targets)
+            details.append(f"{len(found)} proven process(es) targeted")
+            if alive:
+                details.append(f"process(es) {alive} survived or could not be checked; residual processes UNVERIFIED")
+        except Exception as exc:  # noqa: BLE001
+            details.append(f"proven process cleanup failed: {exc}; residual processes UNVERIFIED")
+        return f"{reason}; {'; '.join(details)}. It is NOT relaunched."
+
+    reason: str | None = None
+    interrupted: BaseException | None = None
+    outcome: dict = {}
+    print(f"Loaded: {os.path.abspath(__file__)}")
+    try:
+        shell = _codex_session_process(session)  # refuse missing provenance BEFORE typing codex
+        safe_dir = str(target_dir).replace("'", "''")
+        line = (f"Set-Location -LiteralPath '{safe_dir}'; $env:NO_COLOR=$null; "
+                f"$env:COLORTERM='truecolor'; {typed}")
+        time.sleep(1.5)  # let the fresh shell print its prompt first, or the typed line is lost
+        written = _bridge_request("POST", "/pty/write", {"session_id": session, "data": line + "\r"})
+        if not written.get("ok"):
+            reason = f"could not type the codex launch into the pane: {written.get('error', 'write failed')}"
+        else:
+            print("Launched codex in a split pane; verifying it from its own rollout:")
+            print(f"  Canvas session: {session}")
+            print(f"  Directory: {target_dir}")
+            entered = False
+            deadline = time.monotonic() + CODEX_VERIFY_WAIT
+
+            def watch_folder_trust(delay: float) -> None:
+                nonlocal entered
+                started = time.monotonic()
+                if not entered and started < deadline:
+                    text, _error = _codex_session_buffer(session)
+                    if time.monotonic() < deadline and text and _codex_folder_trust_screen(text):
+                        # the user authorized DEFAULT Enter ONLY for this exact folder-trust screen.
+                        entered = True  # even a failed write is never retried
+                        _codex_marker_descendants(session, shell, marker)  # fresh SAME shell provenance
+                        if time.monotonic() >= deadline:
+                            return  # provenance lookup consumed the budget: never send late Enter
+                        answer = _bridge_request("POST", "/pty/write", {"session_id": session, "data": "\r"})
+                        if not answer.get("ok"):
+                            raise RuntimeError("could not answer the owned Codex folder-trust prompt")
+                        print(f"Answered Codex folder-trust prompt once (session {session}, cwd {target_dir})")
+                remaining = min(delay - (time.monotonic() - started), deadline - time.monotonic())
+                if remaining > 0:
+                    time.sleep(remaining)
+
+            reason = fleet_policy.verify_codex_rollout(marker, model, thinking_level, since=t0,
+                                                       wait=CODEX_VERIFY_WAIT, result=outcome,
+                                                       sleep=watch_folder_trust, expect_cwd=str(target_dir))
+            if reason:
+                reason += " Attribution is NOT verified"
+    except BaseException as exc:  # noqa: BLE001 -- a cancel or a crash must not leave an unverified seat
+        if not isinstance(exc, Exception):  # Ctrl-C and the like: clean up, then let the cancel through
+            interrupted = exc
+        reason = f"{type(exc).__name__} before the seat was verified ({exc})" if str(exc) else \
+            f"{type(exc).__name__} before the seat was verified"
+    if reason:
+        print(f"SPAWN REFUSED: {take_down(reason)}")
+        if interrupted is not None:
+            raise interrupted
+        sys.exit(2)
+    if name:
+        rename_error = _rename_canvas_seat(str(session), name)
+        if rename_error:
+            print(f"Warning: canvas title not updated: {rename_error}", file=sys.stderr)
+    print(f"  Verified: codex session {outcome['sid']} ran model={outcome['model']} effort={outcome['effort']} "
+          f"(the marker was its whole first message, same turn {outcome['turn_id']})")
+    print(json.dumps({"canvas_session": session, "codex_session": outcome["sid"], "model": outcome["model"],
+                      "effort": outcome["effort"], "turn_id": outcome["turn_id"], "marker": marker}))
+
+
+def cmd_fleet_check(argv: list[str]) -> None:
+    """liteharness fleet-check --backend B --model M --thinking-level T
+    liteharness fleet-check --agent-id ID [--backend B] [--wait SECONDS] [--allow-silent]
+                            [--expect-model M] [--expect-thinking T]
+    Exit 0 = allowed; exit 2 = refused (the reason is printed). A pre-launch OK
+    says whether a floor governs the launch ("OK: governed ..." / "OK: ungoverned ..."),
+    so a spawner verifies the seat after launch only when there is a floor to hold."""
+    from . import fleet_policy
+    allow_silent = "--allow-silent" in argv
+    argv = [a for a in argv if a != "--allow-silent"]
+    opts = dict(zip(argv[::2], argv[1::2]))
+    if "--agent-id" in opts:
+        why = fleet_policy.verify_seat(opts["--agent-id"], config.get_root(),
+                                       wait=float(opts.get("--wait", 90)),
+                                       backend=opts.get("--backend"), allow_silent=allow_silent,
+                                       expect_model=opts.get("--expect-model"),
+                                       expect_thinking=opts.get("--expect-thinking"))
+        ok = "OK: the seat reported a model and level at or above the fleet floor"
+    else:
+        backend, model = opts.get("--backend"), opts.get("--model")
+        why = fleet_policy.gate(backend, model, opts.get("--thinking-level"))
+        ok = ("OK: governed, at or above the fleet floor"
+              if not why and fleet_policy.floor_for(fleet_policy.load()[0], backend, model)
+              else "OK: ungoverned, no fleet floor applies")
+    if why:
+        print(why)
+        sys.exit(2)
+    print(ok)
+
+
+def _spawn_litetui_agent(
+    *, model: str | None, cwd: str | None, prompt: str | None,
+    name: str | None, tier: str | None, pty_mode: bool, split_mode: bool,
+    pane: str | None, direction: str | None, cognitive: str | None,
+    backend: str | None, thinking_level: str | None, spawned_by: str | None,
+    takeover: bool = False,
+) -> None:
+    """One LiteTUI launch owner; the bridge resolves/places but never governs."""
+    from . import agent_names, fleet_policy
+
+    if not (pty_mode or split_mode) or (pty_mode and split_mode):
+        print("SPAWN REFUSED: LiteTUI requires exactly one of --pty or --split.")
+        sys.exit(2)
+    if not name or not tier or tier not in VALID_TIERS:
+        print("SPAWN REFUSED: LiteTUI requires --name and a valid --tier.")
+        sys.exit(2)
+    caller = (spawned_by or os.environ.get("LITEHARNESS_AGENT_ID") or "").strip()
+    if not caller:
+        print("SPAWN REFUSED: LiteTUI needs --spawned-by or LITEHARNESS_AGENT_ID.")
+        sys.exit(2)
+    # T0236-T1: a name is one agent, one conversation, for good. A fresh spawn never
+    # mints a second agent under a name the index already holds (new contacts, new
+    # instincts); the holder is resumed. --takeover is the explicit, audited exception.
+    try:
+        held = agent_names.resolve_name(name)
+    except agent_names.IndexCorrupt as exc:
+        print(f"SPAWN REFUSED: {exc}")
+        sys.exit(2)
+    if held and not takeover:
+        print(f"SPAWN REFUSED: the name {name!r} already belongs to agent {held['agent_id']} "
+              f"(conversation {held['convo_id']}, cwd {held['cwd']}). Resume it: "
+              f"liteharness spawn --split --resume {held['name']} --tier {tier}; "
+              "a live seat is messaged by inbox instead. Nothing was spawned.")
+        sys.exit(2)
+    target_dir = Path(cwd or os.getcwd()).expanduser()
+    if not target_dir.is_absolute() or not target_dir.is_dir():
+        print("SPAWN REFUSED: cwd must be an absolute existing directory. Nothing was spawned.")
+        sys.exit(2)
+    target_dir = target_dir.resolve()
+    floor_model = None if model == "local-auto" else model
+    try:
+        pre = fleet_policy.gate(backend or ("codex" if not floor_model else None),
+                                floor_model, thinking_level)
+        governed = bool(fleet_policy.floor_for(fleet_policy.load()[0],
+                        backend or ("codex" if not floor_model else None), floor_model))
+    except fleet_policy.PolicyError as exc:
+        print(f"SPAWN REFUSED: {exc}")
+        sys.exit(2)
+    if pre:
+        print(pre)
+        sys.exit(2)
+    resolved = _bridge_request("POST", "/harness/spawn/resolve", {
+        "cli": "litetui", "name": name, "tier": tier,
+        **({"model": model} if model else {}),
+        **({"backend": backend} if backend else {}),
+        **({"thinkingLevel": thinking_level} if thinking_level else {}),
+        **({"prompt": prompt} if prompt is not None else {}),
+        "cwd": str(target_dir),
+        **({"cognitive": cognitive} if cognitive else {}),
+        "spawnedBy": caller,
+    })
+    if not resolved.get("ok"):
+        print(f"SPAWN REFUSED: {resolved.get('message') or resolved.get('error', 'spawn resolution failed')}")
+        sys.exit(2)
+    launch = resolved["request"]
+    try:
+        if pty_mode:
+            created = _bridge_request("POST", "/pty/create", {
+                "shell": launch["shell"], "args": launch.get("args", []),
+                "env": launch.get("env", {}), "cwd": launch.get("cwd") or str(target_dir),
+                "harnessAgentId": launch["harnessAgentId"], "focus": False,
+            })
+        else:
+            created = _place_split(pane, caller, direction, cwd=str(target_dir), launch=launch)
+    except Exception as exc:
+        print(f"SPAWN REFUSED: launch may have created a session; check GET /pty/orphans. "
+              f"Bridge creation transport failed: {exc}")
+        sys.exit(2)
+    # A creation request can reach the renderer before its response is lost. Only
+    # grid_full is a documented pre-creation refusal; no guessed agent-id cleanup.
+    if not isinstance(created, dict):
+        print("SPAWN REFUSED: launch may have created a session; check GET /pty/orphans. "
+              "Bridge returned a malformed creation response.")
+        sys.exit(2)
+    if created.get("error") or created.get("ok") is False:
+        if split_mode and created.get("error") == "grid_full":
+            print(f"SPAWN REFUSED: {created.get('message') or created['error']}")
+        else:
+            print(f"SPAWN REFUSED: {created.get('message') or created.get('error')}; "
+                  "launch may have created a session; check GET /pty/orphans")
+        sys.exit(2)
+    session = created.get("session_id") or created.get("newSessionId")
+    if not session:
+        print("SPAWN REFUSED: bridge returned no session id; launch may have created a session; "
+              "check GET /pty/orphans. No session was guessed or deleted.")
+        sys.exit(2)
+    try:
+        why = fleet_policy.verify_seat(
+            resolved["agentId"], config.get_root(), wait=90,
+            backend=backend, allow_silent=not governed,
+            expect_model=floor_model, expect_thinking=thinking_level,
+        )
+    except Exception as exc:
+        why = f"fleet verification failed: {exc}"
+    if why:
+        try:
+            cleanup = _bridge_request("DELETE", f"/pty/{session}")
+        except Exception as exc:
+            print(f"SPAWN REFUSED: {why}; FATAL CLEANUP FAILED for session {session}: {exc}")
+            sys.exit(2)
+        if not isinstance(cleanup, dict) or cleanup.get("success") is not True or cleanup.get("ok") is False or cleanup.get("error"):
+            print(f"SPAWN REFUSED: {why}; FATAL CLEANUP FAILED for session {session}: {json.dumps(cleanup)}")
+            sys.exit(2)
+        print(f"SPAWN REFUSED: {why}; kill requested for session {session}; process reap pending: {json.dumps(cleanup)}")
+        sys.exit(2)
+    if split_mode:
+        rename_error = _rename_canvas_seat(str(session), name)
+        if rename_error:
+            print(f"Warning: canvas title not updated: {rename_error}; registration will retry", file=sys.stderr)
+    _record_fresh_name(name, resolved["agentId"], str(target_dir), backend, model, takeover,
+                       data_root=resolved.get("liteTuiDataRoot"))
+    print(json.dumps({"agent_id": resolved["agentId"], **created}, ensure_ascii=False))
+
+
+#: How long a fresh LiteTUI spawn waits for the seat's born conversation to appear on disk.
+FRESH_NAME_WAIT_SECONDS = 10.0
+
+
+def _record_fresh_name(name: str, agent_id: str, cwd: str, backend: str | None,
+                       model: str | None, takeover: bool, wait: float | None = None,
+                       *, data_root: str | None = None) -> None:
+    """Bind the born conversation using the launcher's authoritative data root.
+
+    Prefer the bridge's root over any caller-side installation. For old bridges,
+    retain _convo_root's explicit environment and LiteTUI-owned import fallback.
+    Missing roots are reported immediately; resolved roots are retried for delayed
+    first-turn persistence. Index failures never undo an already successful launch.
+    """
+    from . import agent_names
+    from .resume_seat import _convo_root, _read_json
+    prefix = f"Warning: name index not updated for {name!r}: "
+    try:
+        if data_root is not None and not isinstance(data_root, str):
+            raise ValueError("bridge liteTuiDataRoot must be a string")
+        if data_root is not None and data_root.strip():
+            bridge_root = Path(data_root).expanduser()
+            if not bridge_root.is_absolute():
+                raise ValueError("bridge liteTuiDataRoot must be an absolute path")
+            root = bridge_root.resolve() / ".convos"
+        else:
+            root = _convo_root()
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(prefix + f"LiteTUI data root unresolved ({exc}); the bridge must return "
+              "liteTuiDataRoot or set LITETUI_DATA_ROOT to the launched seat's data root",
+              file=sys.stderr)
+        return
+    wait_seconds = FRESH_NAME_WAIT_SECONDS if wait is None else wait
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            found = sorted(p.parent.name for p in root.glob("*/settings.json")
+                           if _read_json(p).get("seat_id") == agent_id)
+        except OSError as exc:
+            print(prefix + f"cannot scan LiteTUI data root {root}: {exc}", file=sys.stderr)
+            return
+        if len(found) == 1:
+            convo_id = found[0]
+            break
+        if len(found) > 1:
+            print(prefix + f"ambiguous: {len(found)} conversations with seat_id {agent_id} "
+                  f"under {root}: {', '.join(found)}; resolve the duplicate identities before indexing",
+                  file=sys.stderr)
+            return
+        if time.monotonic() >= deadline:
+            print(prefix + f"no matching conversation after {wait_seconds:g} seconds for seat_id "
+                  f"{agent_id} under {root}; the seat may not have persisted its first turn yet; "
+                  "once it has, run liteharness names --backfill --data-root "
+                  f'"{root.parent}" --apply', file=sys.stderr)
+            return
+        time.sleep(0.5)
+    try:
+        agent_names.record_name(name, agent_id, convo_id, cwd, backend=backend, model=model,
+                                takeover=takeover)
+    except agent_names.NameIndexError as exc:
+        print(f"Warning: name index not updated: {exc}", file=sys.stderr)
+
+
+def _names_backfill(argv: list[str]) -> None:
+    """Record unambiguous LiteTUI seats from <data-root>/.convos into names.json (dry run default)."""
+    from . import agent_names
+    root = None
+    if "--data-root" in argv:
+        at = argv.index("--data-root")
+        root = argv[at + 1] if at + 1 < len(argv) else None
+    if not root or not os.path.isdir(os.path.join(root, ".convos")):
+        print("names --backfill needs --data-root <dir> containing .convos", file=sys.stderr)
+        sys.exit(2)
+    apply = "--apply" in argv
+    try:
+        report = agent_names.backfill_from_convos(root, apply=apply)
+    except agent_names.NameIndexError as exc:
+        print(f"names --backfill refused: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if "--json" in argv:
+        print(json.dumps(report, indent=2))
+        return
+    skipped = report["skipped"]
+    print(f"{'APPLIED' if apply else 'DRY RUN (pass --apply to write)'}: scanned {report['scanned']} "
+          f"conversation(s) under {report['data_root']}; skipped {skipped['no_seat']} without a seat, "
+          f"{skipped['no_convo_jsonl']} without convo.jsonl, {skipped['unreadable']} unreadable")
+    print(f"  {'recorded' if apply else 'would record'}: {len(report['recorded'])}; "
+          f"already indexed: {len(report['already'])}; conflicts skipped: {len(report['conflicts'])}")
+    for r in report["recorded"]:
+        print(f"    + {r['name']}  agent {r['agent_id']}  convo {r['convo_id']}")
+    for c in report["conflicts"]:
+        print(f"    ! {c['name']}  [{c['reason']}]  {len(c['convos'])} conversation(s), "
+              f"{len(c['agent_ids'])} seat(s) -- not recorded")
+
+
+def cmd_names(argv: list[str]) -> None:
+    """`liteharness names --list [--json]` / `--backfill --data-root <dir> [--apply]` (T0236)."""
+    from . import agent_names
+    if "--backfill" in argv:
+        _names_backfill(argv)
+        return
+    if "--list" not in argv:
+        print("Usage: liteharness names --list [--json]\n"
+              "       liteharness names --backfill --data-root <LiteTUI data dir> [--apply] [--json]",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        rows = agent_names.list_names()
+    except agent_names.IndexCorrupt as exc:
+        print(f"names index unreadable: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if "--json" in argv:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("No named agents. A LiteTUI spawn or resume records one.")
+        return
+    print(f"{'NAME':<28} {'AGENT_ID':<36} {'CONVO_ID':<36} {'BACKEND/MODEL':<24} {'LAST_ACTIVE':<26} CWD")
+    for r in rows:
+        bm = "/".join(x for x in (r.get("backend"), r.get("model")) if x) or "-"
+        print(f"{r['name']:<28} {r['agent_id']:<36} {r['convo_id']:<36} {bm:<24} "
+              f"{str(r.get('last_active_at') or '-'):<26} {r.get('cwd') or '-'}")
 
 
 def cmd_spawn(
@@ -2968,24 +4167,140 @@ def cmd_spawn(
     team: str | None = None,
     split_mode: bool = False,
     split_pane: str | None = None,
-    # "vertical" = vertical divider = panes side-by-side, terminals stay TALL.
-    # "horizontal" stacks flat bands where leaf chrome eats the height
-    # (RULING, Ryan 2026-08-07: fleet splits must form a grid, columns first).
-    split_direction: str = "vertical",
+    # None (T906, the user 2026-09-25) = no direction is sent, so LiteSuite puts the
+    # new terminal in the pane's next standard-grid slot ("max terminals across"
+    # setting). "vertical" / "horizontal" (--direction) still force that divider.
+    split_direction: str | None = None,
     cognitive: str | None = None,
+    resume_agent_id: str | None = None,
+    resume_convo_id: str | None = None,
+    kill_old: bool = False,
+    backend: str | None = None,
+    thinking_level: str | None = None,
+    spawned_by: str | None = None,
+    spawn_cli: str = "claude",
+    takeover: bool = False,
 ) -> None:
-    """Spawn a new Claude Code session.
+    """Spawn a new Claude Code session or resume a Claude Code or LiteTUI split.
 
-    --split: spawn ALONGSIDE — split a canvas pane (default: the caller's own)
-             and boot the agent visibly in the new split
+    --split: fill an existing terminal pane (own, fleet, other active panes),
+             opening a new terminal pane only when none fits
     --pty: spawn via ConPTY daemon (enables send-input/read-output control)
-    default: spawn via Windows Terminal (visible tab, no stdin control)
+    default: spawn via Windows Terminal (visible window, no stdin control)
     """
     import subprocess
 
-    target_dir = cwd or os.getcwd()
+    if spawn_cli not in ("claude", "litetui", "codex"):
+        print("SPAWN REFUSED: --cli must be claude, litetui or codex. Nothing was spawned.")
+        sys.exit(2)
+    if spawn_cli == "codex":
+        # T0088-C (this branch only). Codex runs no liteharness hook, so it takes no tier, brief or
+        # cognitive architecture, and --pty is closed to it (a second daemon start is not allowed).
+        if (not split_mode or pty_mode or worktree or exec_cmd or kill_old or backend or permission_mode
+                or prompt or tier or team or cognitive or resume_agent_id or resume_convo_id):
+            print("SPAWN REFUSED: --cli codex takes only --split with --model, --thinking-level, --args, "
+                  "--pane, --direction, --cwd, --name and --spawned-by. Nothing was spawned.")
+            sys.exit(2)
+        _spawn_codex_split(model=model, thinking_level=thinking_level, additional_args=additional_args,
+                           cwd=cwd, name=name, pane=split_pane, direction=split_direction,
+                           spawned_by=spawned_by)
+        return
+    if not (resume_agent_id or resume_convo_id):
+        # T0236-T4: a worker or leader is born in an explicit repo root. Falling back to
+        # the CALLER's cwd is how seats ended up in the wrong tree. Resume takes its cwd
+        # from the name index.
+        if not cwd and (tier or "worker") in CWD_REQUIRED_TIERS:
+            print(f"SPAWN REFUSED: pass --cwd <repo root>; a {tier or 'worker'}-tier spawn never "
+                  "inherits the caller's cwd. Nothing was spawned.")
+            sys.exit(2)
+    if spawn_cli == "litetui" and not (resume_agent_id or resume_convo_id):
+        if worktree or exec_cmd or additional_args or kill_old or permission_mode:
+            print("SPAWN REFUSED: LiteTUI does not accept --worktree, --exec, --args, --kill-old or --permission-mode.")
+            sys.exit(2)
+        _spawn_litetui_agent(model=model, cwd=cwd, prompt=prompt, name=name, tier=tier,
+                             pty_mode=pty_mode, split_mode=split_mode, pane=split_pane,
+                             direction=split_direction, cognitive=cognitive,
+                             backend=backend, thinking_level=thinking_level,
+                             spawned_by=spawned_by, takeover=takeover)
+        return
+
+    if resume_agent_id or resume_convo_id:
+        if not split_mode or worktree or pty_mode or exec_cmd or additional_args:
+            print("SPAWN REFUSED: seat resume requires --split and cannot use --worktree, --pty, --exec or --args.")
+            sys.exit(2)
+        from .resume_seat import spawn_resume
+        try:
+            spawn_resume(agent_id=resume_agent_id, convo_id=resume_convo_id,
+                         pane=split_pane, direction=split_direction, cwd=cwd,
+                         name=name, tier=tier, model=model, backend=backend,
+                         thinking_level=thinking_level, spawned_by=spawned_by,
+                         kill_old=kill_old, prompt=prompt)
+        except ValueError as exc:
+            print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
+            sys.exit(2)
+        return
+    if takeover:
+        print("SPAWN REFUSED: --takeover applies only to a fresh --cli litetui spawn. Nothing was spawned.")
+        sys.exit(2)
+    if kill_old or backend or thinking_level:
+        print("SPAWN REFUSED: --kill-old, --backend and --thinking-level require --resume or --convo.")
+        sys.exit(2)
+
+    # T0122 (T1093): only the --pty branch launches exec_cmd; --split, canvas and
+    # terminal spawns always launch claude. The floor gate below reads exec_cmd,
+    # so without this it would certify a command that never runs. --split wins the
+    # route over --pty (spawn_mode below), so --split --pty --exec is refused too.
+    if exec_cmd and (split_mode or not pty_mode):
+        print("SPAWN REFUSED: --exec runs only with --pty alone; a --split, canvas or terminal spawn "
+              "always launches claude, so it would ignore the command. Nothing was spawned.")
+        sys.exit(2)
+
+    # T1025: the fleet floor runs before anything is named, created or launched.
+    refusal = _spawn_floor_refusal(model, exec_cmd)
+    if refusal:
+        print(refusal)
+        sys.exit(2)
+
+    # Absolute: the split path types a Set-Location into ANOTHER shell, where a
+    # relative path would resolve against that shell's cwd, not ours.
+    target_dir = os.path.abspath(cwd or os.getcwd())
+    if name:
+        # T916 item 4: a second live "Carmack" means inbox traffic routed by
+        # name reaches whichever registered first (b9278515; 37a37ec8 landed
+        # on the wrong seat). A live holder refuses the spawn. A holder whose
+        # session_pid a later registration owns is not a seat any more (the
+        # roster calls it superseded): its record is moved aside, as
+        # `register --takeover` does for a dead ghost.
+        from . import naming
+        holder = naming.is_name_taken(name)
+        if holder:
+            try:
+                held = json.loads((config.get_root() / "agents" / f"{holder}.json").read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                held = {}
+            if not _superseded_by_later_registration(holder, held):
+                print(f"SPAWN REFUSED: the name {name!r} is held by live seat {holder}. "
+                      "Nothing was spawned. Pick another --name, or retire that seat first.")
+                sys.exit(2)
+            backup = _evict_agent_records(holder)
+            print(f"  Name {name!r} was held by superseded record {holder[:8]}; moved to {backup}/.")
+    # Every refusal runs BEFORE --worktree creates anything, so a refused spawn
+    # leaves no worktree behind (fix cycle 1, F-2). The trust check is asked
+    # about the path the worktree WILL have; the write waits until it exists,
+    # because the key it writes is that worktree's own git root.
+    if not exec_cmd:  # only a claude launch has a trust menu to hang on
+        future = os.path.join(target_dir, ".worktrees", "spawn") if worktree else target_dir
+        refusal = _ensure_folder_trusted(future, check_only=True)
+        if refusal:
+            print(refusal)
+            sys.exit(2)
     if worktree:
         target_dir = _handle_worktree(target_dir)
+    if not exec_cmd:
+        refusal = _ensure_folder_trusted(target_dir)
+        if refusal:
+            print(refusal)
+            sys.exit(2)
 
     claude_str, resolved_model = _build_claude_cmd(model, permission_mode, additional_args, prompt, name)
 
@@ -3036,7 +4351,7 @@ def cmd_spawn(
     # one tier deep. Prefer config.get_agent_id(): LITEHARNESS_AGENT_ID is unset in
     # a hand-opened session (the same gap that silently defaults tier to "worker"),
     # so relying on the env alone would drop the link for every top-level spawn.
-    resolved_parent = os.environ.get("LITEHARNESS_AGENT_ID", "").strip() or (config.get_agent_id() or "")
+    resolved_parent = spawned_by or os.environ.get("LITEHARNESS_AGENT_ID", "").strip() or (config.get_agent_id() or "")
     if resolved_parent:
         context_env["LITEHARNESS_SPAWNED_BY"] = resolved_parent
 
@@ -3071,7 +4386,7 @@ def cmd_spawn(
     if name:
         context_env["LITEHARNESS_REQUESTED_NAME"] = name
 
-    # Cognitive architecture — MECHANICAL delivery (RULING, Ryan 2026-08-07:
+    # Cognitive architecture — MECHANICAL delivery (RULING, the user 2026-08-07:
     # "the orch flow is broken without them getting their correct prompts").
     # Discipline-based delivery ("tell the agent to read its file") failed
     # silently the same day the brief-below-the-fold bug did; a polymath spawn
@@ -3107,15 +4422,13 @@ def cmd_spawn(
 
     if spawn_mode == "split":
         # Spawn ALONGSIDE: split an existing canvas pane and boot the agent
-        # visibly in the new split — the multiplexer pattern (Ryan,
+        # visibly in the new split — the multiplexer pattern (the user,
         # 2026-08-06: "the whole point of the multiplexer is for the agents to
         # spawn alongside each other, in split panes"). Headless PTY is for
         # background work; when a human is watching, the fleet works on screen.
-        my_id = os.environ.get("LITEHARNESS_AGENT_ID", "").strip() or (config.get_agent_id() or "")
-        t0 = time.time()
+        my_id = resolved_parent
         agents_dir = config.get_root() / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
-        known = {p.stem for p in agents_dir.glob("*.json")}
 
         launch_parts = ["claude"]
         if resolved_model:
@@ -3124,17 +4437,19 @@ def cmd_spawn(
         if additional_args:
             launch_parts.append(additional_args)
         launch_cmd = " ".join(launch_parts)
-        if cwd:
-            safe_dir = target_dir.replace("'", "''")
-            launch_cmd = f"Set-Location -LiteralPath '{safe_dir}'; {launch_cmd}"
+        # Always — with no --cwd, target_dir is the SPAWNER's cwd. Guarding
+        # this on `if cwd:` left the split in the Fleet pane shell's own cwd
+        # (measured 2026-09-25: pty-11's shell started in the Fleet pane's
+        # folder and only reached its --cwd through this Set-Location).
+        safe_dir = target_dir.replace("'", "''")
+        launch_cmd = f"Set-Location -LiteralPath '{safe_dir}'; {launch_cmd}"
 
-        split_res = _bridge_request("POST", "/canvas/split", {
-            "paneId": split_pane or "self",
-            "agentId": my_id,
-            "direction": split_direction,
-        })
-        new_session = split_res.get("newSessionId")
-        mode_label = "split pane"
+        spawn_t0 = datetime.now(timezone.utc)
+        split_res = _place_split(split_pane, my_id, split_direction, cwd=target_dir)
+        new_session = (split_res.get("newSessionId")
+                       if not split_res.get("error") and split_res.get("ok") is not False else None)
+        placed_pane = split_res.get("paneId")
+        mode_label = "new terminal pane" if split_res.get("newPane") else "split pane"
         brief_via_env = False
         spawned_leaf_id = None
         actual_spawn_mode = "split"
@@ -3153,10 +4468,8 @@ def cmd_spawn(
             new_leaf = split_res.get("newLeafId")
             if new_leaf:
                 env_delivery["LITESUITE_LEAF_ID"] = str(new_leaf)
-            if split_pane and not str(split_pane).startswith("self"):
-                # Only when the caller named the panel do we KNOW the pane id —
-                # the split response does not echo the resolved alias back.
-                env_delivery["LITESUITE_PANE_ID"] = str(split_pane)
+            if placed_pane:
+                env_delivery["LITESUITE_PANE_ID"] = str(placed_pane)
             # Brief travels as a FILE + env pointer so the SessionStart hook
             # injects it into context (the guaranteed-delivery channel) instead
             # of racing the TUI via a second typed message.
@@ -3172,16 +4485,10 @@ def cmd_spawn(
                 brief_via_env = True
             spawned_leaf_id = new_leaf
             if name:
-                # Optimistic name-on-tab: the tab shows the agent's name the
-                # instant the split exists, seconds before the agent boots and
-                # its registration re-asserts it (hooks.register_presence).
-                try:
-                    _bridge_request("POST", "/canvas/rename-terminal", {
-                        "sessionId": str(new_session),
-                        "title": name,
-                    })
-                except Exception:
-                    pass  # cosmetic — never let a rename fail a spawn
+                # Optimistic title until registration asserts the accepted name.
+                rename_error = _rename_canvas_seat(str(new_session), name)
+                if rename_error:
+                    print(f"Warning: canvas title not updated: {rename_error}; registration will retry", file=sys.stderr)
             env_sets = "; ".join(
                 f"$env:{k}='{str(v).replace(chr(39), chr(39) * 2)}'"
                 for k, v in env_delivery.items()
@@ -3194,7 +4501,7 @@ def cmd_spawn(
             # typed launch so the agent renders color regardless of how the
             # host app was started; COLORTERM advertises what xterm.js truly is.
             env_hygiene = (
-                "Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue; "
+                "$env:NO_COLOR=$null; "
                 "$env:COLORTERM='truecolor'"
             )
             env_sets = f"{env_hygiene}; {env_sets}" if env_sets else env_hygiene
@@ -3211,45 +4518,53 @@ def cmd_spawn(
                 print(f"Error: could not launch claude in the split — {w.get('error', 'write failed')}")
                 sys.exit(1)
         else:
-            # Fallback: a fresh visible claude pane (auto-focused) — still on
-            # screen alongside, just not a split of the caller's pane.
-            print(f"  Split unavailable ({split_res.get('error', 'no result')}) — falling back to /canvas/claude")
-            claude_res = _bridge_request("POST", "/canvas/claude", {
-                "cwd": target_dir,
-                **({"model": resolved_model} if resolved_model else {}),
-            })
-            new_session = claude_res.get("session_id")
-            mode_label = "canvas pane (split fallback)"
-            actual_spawn_mode = "canvas"
-            if not new_session:
-                print(f"Error: split spawn failed — {claude_res.get('error', claude_res)}")
-                sys.exit(1)
+            # Placement exhausted safe options or creation is uncertain. Never
+            # start another seat after an ambiguous failure.
+            print(_split_refusal(split_res, split_pane))
+            sys.exit(2 if split_res.get("error") == "grid_full" else 1)
 
-        print(f"Spawned Claude session ({mode_label}, visible):")
+        # "Launched", not "Spawned": until the seat registers nothing proves it
+        # booted (T916-E: pty-4 died silently under a "Spawned … visible").
+        print(f"Launched claude in a {mode_label}; waiting for it to register:")
         print(f"  Canvas session: {new_session}")
         print(f"  Directory: {target_dir}")
 
         # The agent registers itself via hooks; only then do we know its UUID.
+        # 🔴 T916 item 6: match ONLY on the canvas session THIS spawn minted
+        # (the hook records LITESUITE_CANVAS_SESSION as canvas_session_id).
+        # "Any presence file newer than t0" adopted whichever agent in the
+        # fleet registered next: 2026-09-25 16:31 GripSmith's `--name Carmack`
+        # spawn claimed PassLink's worker 5355bb64, sent it GripSmith's brief
+        # (37a37ec8) and stamped tier=reviewer into its presence file.
+        # A `--resume <id>` seat keeps its old canvas_session_id (the hook
+        # never downgrades it, since an env pane may be inherited), so it is
+        # adopted BY ID instead, once it has registered after this spawn began
+        # (T916 B-1, Linus round 2 option a). The write below then points its
+        # canvas_session_id at this new pane. `--continue` and a bare
+        # `--resume` name no id: they fall to the canvas match and, if the seat
+        # kept an old pane, end in SPAWN FAILED. Loud, not wrong.
+        resume_id = _resumed_id(additional_args)
         new_uuid = None
         deadline = time.time() + 90
-        while time.time() < deadline:
-            for p in agents_dir.glob("*.json"):
-                if p.stem in known:
-                    continue
-                if p.stat().st_mtime >= t0 - 1:
-                    new_uuid = p.stem
-                    break
+        while new_session and time.time() < deadline:
+            if resume_id:
+                new_uuid = resume_id if _registered_since(resume_id, spawn_t0) else None
+            else:
+                new_uuid = _find_spawned_presence("canvas_session_id", str(new_session))
             if new_uuid:
                 break
             time.sleep(2)
 
         if not new_uuid:
             print(
-                "  Registration: NOT DETECTED within 90s — deliver the brief "
-                "manually via inbox once the agent appears in discover"
+                f"SPAWN FAILED: no seat registered from canvas session {new_session} "
+                "within 90s. Do not report it as spawned. The pane may hold a dead or "
+                "stuck claude; look at it, then free it with "
+                f"`liteharness pty-kill {new_session}` before spawning again."
             )
-            return
+            sys.exit(1)
 
+        print(f"Spawned: registered as {new_uuid}")
         print(f"  Agent ID: {new_uuid}")
         from . import naming
         if name and not naming.get_override(new_uuid) and not naming.is_name_taken(name, exclude_id=new_uuid):
@@ -3269,8 +4584,10 @@ def cmd_spawn(
             # resolver reads — writing it here means agents spawned INTO the
             # panel can themselves split it via paneId "self" (the multiplexer
             # compounds instead of dead-ending at one generation).
-            if split_pane and not str(split_pane).startswith("self") and not pdata.get("pane_id"):
-                pdata["pane_id"] = str(split_pane)
+            if placed_pane:
+                pdata["pane_id"] = str(placed_pane)
+                if isinstance(pdata.get("spatial"), dict):
+                    pdata["spatial"]["pane_id"] = str(placed_pane)
             if spawned_leaf_id and not pdata.get("leaf_id"):
                 pdata["leaf_id"] = str(spawned_leaf_id)
             config.atomic_write_json(ppath, pdata)
@@ -3309,7 +4626,9 @@ def cmd_spawn(
             )
             print(f"  Brief delivered via inbox ({msg_id})")
         if name:
-            print(f"  Name: {name}")
+            # The name the seat ACTUALLY holds — the hook keeps a generated one
+            # if the requested name was taken between our check and its boot.
+            print(f"  Name: {naming.get_name(new_uuid)}")
         return
 
     if spawn_mode == "canvas":
@@ -3324,6 +4643,12 @@ def cmd_spawn(
         bootstrap = _generate_bootstrap(resolved_model, name, prompt, target_dir, context_env)
         brief_path = _write_spawn_brief(bootstrap)
         context_env["LITEHARNESS_SPAWN_BRIEF"] = str(brief_path)
+        # The session id only exists after /pty/create, but env is fixed AT
+        # create, so the seat is tagged with a token minted here instead; its
+        # presence records it as provisional_id, which is what turn_seen reads.
+        import uuid as _uuid
+        spawn_token = f"canvas-spawn-{_uuid.uuid4().hex[:12]}"
+        context_env["LITEHARNESS_PROVISIONAL_ID"] = spawn_token
 
         canvas_parts = ["claude"]
         if resolved_model:
@@ -3375,12 +4700,9 @@ def cmd_spawn(
             if not r.get("ok"):
                 raise RuntimeError(r.get("error", "pty/write failed"))
 
-        def _canvas_read() -> str:
-            r = _bridge_request("POST", "/pty/read", {"session_id": session_id, "lines": 40})
-            return str(r.get("output", "")) if r.get("ok") else ""
-
+        t0 = time.time()
         status = _deliver_prompt(
-            _canvas_write, _canvas_read, brief_path,
+            _canvas_write, lambda: _turn_seen_since("provisional_id", spawn_token, t0), brief_path,
             nudge=_SPAWN_NUDGE + canvas_line,
             fallback=bootstrap + canvas_line,
             boot_timeout=15,
@@ -3474,16 +4796,9 @@ def cmd_spawn(
                 if not r.get("ok"):
                     raise RuntimeError(r.get("error", "send-input failed"))
 
-            def _pty_read() -> str:
-                r = pty_daemon.send_command({
-                    "cmd": "read-output",
-                    "agent_id": agent_id,
-                    "lines": 40,
-                })
-                return str(r.get("output", "")) if r.get("ok") else ""
-
+            t0 = time.time()
             status = _deliver_prompt(
-                _pty_write, _pty_read, brief_path,
+                _pty_write, lambda: _turn_seen_since("provisional_id", agent_id, t0), brief_path,
                 nudge=_SPAWN_NUDGE,
                 fallback=bootstrap,
                 boot_timeout=45,
@@ -3941,68 +5256,137 @@ def cmd_pty_list() -> None:
         print(f"  [{status}] {s['agent_id']} ({name}) — {s.get('cwd', '?')}")
 
 
-def cmd_pty_kill(agent_id: str) -> None:
-    """Kill an agent session — universal routing, not just the pty daemon.
+def _resolve_kill_target(arg: str) -> tuple[str, dict, list[str]]:
+    """(agent id, presence, ambiguous ids) for a UUID, a canvas session (pty-N-ts), a canvas
+    provisional id (canvas-<sid>) or a daemon id (pty-<ts>-<pid>).
 
-    Accepts a real agent UUID, a daemon session id (pty-*), or a canvas
-    provisional id (canvas-*). Resolution order:
-      1. presence.canvas_session_id      -> bridge DELETE /pty/<sid>
-      2. daemon id (given or linked)     -> pty daemon kill
-      3. presence.session_pid            -> OS kill (last resort)
-    The old daemon-only version reported "session not found" for every
-    canvas agent and every UUID (the provisional pty-* record and the real
-    UUID presence were never linked) — reaping then required a manual
-    taskkill by session_pid (orch E2E, 2026-08-06).
+    A canvas session id looks like a daemon id and has no presence file of its
+    own, so a bare `pty-14-…` used to load {} and find no route (T916 item 7).
+    The real seat's presence carries it as canvas_session_id or provisional_id.
+    More than one seat carrying the id is AMBIGUOUS (a pty child can inherit
+    its daemon-starter's LITESUITE_CANVAS_SESSION): all of them are returned
+    and nothing is picked (Linus M-3).
+    """
+    agents_dir = config.get_root() / "agents"
+    direct = agents_dir / f"{arg}.json"
+    sid = arg[len("canvas-"):] if arg.startswith("canvas-") else arg
+    found: list[tuple[str, dict]] = []
+    for p in agents_dir.glob("*.json"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if p == direct or data.get("canvas_session_id") == sid or data.get("provisional_id") == arg:
+            found.append((p.stem, data))
+    # The seat's own UUID record beats the spawner's provisional pty-/canvas- one.
+    seats = [f for f in found if not f[0].startswith(("pty-", "canvas-"))] or found
+    if len(seats) > 1:
+        return arg, {}, sorted(f[0] for f in seats)
+    return (*seats[0], []) if seats else (arg, {}, [])
+
+
+def _live_owner_pid(presence: dict) -> int | None:
+    """presence.session_pid, only while it is still the process that registered.
+
+    Never presence.pid: that is the SessionStart hook's own process, dead within
+    milliseconds, and its number is free for Windows to hand to anything else.
+    A session_pid is trusted only if that process was created BEFORE the seat
+    registered; a later create time means the number was reused. registered_at,
+    not started_at: started_at survives a resume, whose claude is newer (T916 fix
+    cycle 1, Linus M-2).
+    """
+    import psutil
+    if presence.get("exited_at"):  # T0236: swept offline, or self-declared exit: process is gone
+        return None
+    try:
+        pid = int(presence.get("session_pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        created = psutil.Process(pid).create_time()
+        registered = datetime.fromisoformat(
+            str(presence.get("registered_at") or presence.get("started_at"))
+        ).timestamp()
+    except (psutil.Error, ValueError, TypeError):
+        return None
+    return pid if created <= registered + 5 else None
+
+
+def _kill_pid_tree(pid: int) -> bool:
+    import subprocess as _sp
+    try:
+        if sys.platform == "win32":
+            return _sp.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=15).returncode == 0
+        os.kill(pid, 15)
+        return True
+    except Exception:
+        return False
+
+
+def cmd_pty_kill(agent_id: str) -> None:
+    """Kill an agent session: its claude process first, then its terminal.
+
+    Accepts a real agent UUID, a canvas session id (pty-N-ts), a canvas
+    provisional id (canvas-*) or a daemon id (pty-<ts>-<pid>); each resolves to
+    the seat's presence (_resolve_kill_target). Every route that applies runs:
+      1. session_pid (owning claude, reuse-checked) -> OS tree kill
+      2. canvas_session_id                          -> bridge DELETE /pty/<sid>
+      3. daemon id (given or linked provisional)    -> pty daemon kill
+    The claude goes first because closing the shell under it can leave it
+    running with no terminal.
     """
     from . import pty_daemon
 
-    presence: dict = {}
-    presence_path = config.get_root() / "agents" / f"{agent_id}.json"
-    if presence_path.exists():
-        try:
-            presence = json.loads(presence_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            presence = {}
-
+    resolved, presence, ambiguous = _resolve_kill_target(agent_id)
+    if ambiguous:
+        print(f"Error: {agent_id} matches {len(ambiguous)} seats: {', '.join(ambiguous)}. "
+              "Nothing was killed. Kill one by its agent id.")
+        sys.exit(1)
     killed_via: list[str] = []
 
-    # 1. Canvas session via the bridge
-    canvas_sid = presence.get("canvas_session_id") or (
-        agent_id[len("canvas-"):] if agent_id.startswith("canvas-") else None
-    )
+    owner = _live_owner_pid(presence)
+    if owner:
+        from .seat_lifecycle import append, identity
+        append({"event": "kill_requested", **identity(presence),
+                "owner": "liteharness-cli", "origin": {
+                    "source": "pty-kill:OS-process-tree", "actor_id": config.get_agent_id()}})
+    if owner and _kill_pid_tree(owner):
+        killed_via.append(f"session_pid {owner}")
+
+    # A pane is closed only for a seat that runs in one, or when the caller
+    # named the pane. A pty child can carry an INHERITED canvas_session_id,
+    # the pane of whoever started the daemon, which is not its own (M-3).
+    named_sid = agent_id[len("canvas-"):] if agent_id.startswith("canvas-") else agent_id
+    canvas_sid = presence.get("canvas_session_id")
+    if not (canvas_sid and (presence.get("spawn_mode") in ("canvas", "split") or canvas_sid == named_sid)):
+        canvas_sid = agent_id[len("canvas-"):] if agent_id.startswith("canvas-") else None
     if canvas_sid:
-        result = _bridge_request("DELETE", f"/pty/{canvas_sid}", None)
+        result = _bridge_request("DELETE", f"/pty/{canvas_sid}", None,
+                                 lifecycle_origin="liteharness-pty-kill")
         if result.get("success") or result.get("ok"):
             killed_via.append(f"canvas session {canvas_sid}")
 
-    # 2. Daemon session (direct id or the linked provisional)
-    daemon_id = agent_id if agent_id.startswith("pty-") else presence.get("provisional_id", "")
-    if daemon_id and str(daemon_id).startswith("pty-") and pty_daemon.is_daemon_running():
-        result = pty_daemon.send_command({"cmd": "kill", "agent_id": daemon_id})
+    daemon_id = presence.get("provisional_id") or (agent_id if agent_id.startswith("pty-") else "")
+    if (daemon_id and str(daemon_id).startswith("pty-") and daemon_id != canvas_sid
+            and pty_daemon.is_daemon_running()):
+        result = pty_daemon.send_command({"cmd": "kill", "agent_id": daemon_id,
+                                          "origin": {"source": "liteharness-pty-kill",
+                                                     "actor_id": config.get_agent_id()}})
         if result.get("ok"):
             killed_via.append(f"daemon session {daemon_id}")
 
-    # 3. OS-level fallback by owning PID
-    if not killed_via:
-        session_pid = presence.get("session_pid")
-        if session_pid:
-            try:
-                import subprocess as _sp
-                if sys.platform == "win32":
-                    _sp.run(["taskkill", "/PID", str(session_pid), "/T", "/F"],
-                            capture_output=True, timeout=15)
-                else:
-                    os.kill(int(session_pid), 15)
-                killed_via.append(f"session_pid {session_pid}")
-            except Exception:
-                pass
-
+    label = agent_id if resolved == agent_id else f"{agent_id} ({resolved})"
     if killed_via:
-        print(f"Killed {agent_id} via {', '.join(killed_via)}")
+        print(f"Killed {label} via {', '.join(killed_via)}")
     else:
         print(
-            f"Error: no kill route found for {agent_id} — no canvas session, "
-            f"no daemon session, no live session_pid in presence."
+            f"Error: no kill route found for {label} — no live session_pid, "
+            f"no canvas session and no daemon session."
         )
         sys.exit(1)
 
@@ -4013,7 +5397,7 @@ def _dedupe_by_session_pid(agents: list) -> tuple:
     `/resume` boots with a throwaway session id, SessionStart registers it, then
     the resume adopts the real id and registers AGAIN -- two rows, one process,
     ~13 seconds apart (measured 2026-08-19: pid 61112 GrimShard 14:56:31 then
-    Sentinel 14:56:45; pid 269264 LongRivet 14:56:08 then OpenBolt 14:56:20).
+    the orchestrator 14:56:45; pid 269264 LongRivet 14:56:08 then OpenBolt 14:56:20).
 
     The existing liveness check cannot catch this: BOTH rows carry the same
     LIVE pid, so `_pid_alive` is correctly True for each. A filter that asks
@@ -4103,11 +5487,27 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
             agents.append(agent)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
             # An unreadable presence file used to vanish here without a word, so a
-            # live agent simply stopped existing in the roll call. Sentinel's own
+            # live agent simply stopped existing in the roll call. the orchestrator's own
             # file was torn by a concurrent write and it took reading the raw bytes
             # to notice. A count that silently omits its failures is not a count.
             unreadable.append(f"{f.name}: {type(exc).__name__}")
             continue
+
+    if include_all:
+        current_ids = {a.get("agent_id") for a in agents}
+        for retired in (config.get_root() / "retired-agents").glob("*.json"):
+            try:
+                row = json.loads(retired.read_text(encoding="utf-8"))
+                if row.get("agent_id") not in current_ids:
+                    row["_retired_identity"] = True  # archive, not proof of observed exit
+                    row["_age_seconds"] = now - datetime.fromisoformat(row["retired_at"]).timestamp()
+                    agents.append(row)
+            except (OSError, ValueError, KeyError):
+                unreadable.append(f"retired/{retired.name}: unreadable")
+
+    # Parent tier is lineage evidence, even when its row is stale or outside the
+    # display limit. Capture it before filtering so restarted children stay visible.
+    orchestrator_ids = {a.get("agent_id") for a in agents if a.get("tier") == "orchestrator"}
 
     # Sort by most recent, then apply liveness filter (unless include_all).
     agents.sort(key=lambda a: a.get("_age_seconds", float("inf")))
@@ -4167,6 +5567,12 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
         print(f"  ({len(superseded)} superseded by a later registration on the same PID:",
               ", ".join(f"{_naming.get_name(a.get('agent_id',''))}/{a.get('session_pid')}"
                         for a in superseded) + ")")
+    from .seat_lifecycle import records as lifecycle_records, latest_for, log_path
+    try:
+        death_records = lifecycle_records() if include_all else []
+    except (OSError, ValueError) as exc:
+        print(f"WARNING: lifecycle evidence unavailable: {exc}")
+        death_records = []
     for a in agents:
         age = int(a.get("_age_seconds", 0))
         if age < 60:
@@ -4180,7 +5586,11 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
         # session_pid means the watcher is orphaned and the agent is a ghost.
         # The old rule was `age < 43200` (12h), so a corpse read as [active]
         # for half a day.
-        if a.get("exited_at"):
+        if a.get("_retired_identity"):
+            status = "ghost-archived"
+        elif a.get("status") == "offline":
+            status = "offline"
+        elif a.get("exited_at"):
             status = "exited"
         elif _is_live(a):
             status = "active"
@@ -4188,6 +5598,11 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
             status = "ghost"
         from . import naming
         agent_name = naming.get_name(a.get('agent_id', ''))
+        loop2_flag = (
+            "  ⚠ started by the orchestrator but not a leader (THE LOOP 2)"
+            if a.get("spawned_by") in orchestrator_ids and a.get("tier") != "leader"
+            else ""
+        )
 
         # Show spawn mode and handle info
         spawn_mode = a.get("spawn_mode", "")
@@ -4212,7 +5627,11 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
             spatial_info += f" pane={spatial['pane_id']}"
         if spatial.get("leaf_id"):
             spatial_info += f" leaf={spatial['leaf_id'][:8]}"
-        print(f"  [{status}] {agent_name} ({a.get('agent_id', '?')}) {tier} {a.get('cli', '?')}/{a.get('model', '?')} — {age_str}{handle_info}{spatial_info}")
+        thinking = f" think:{a['thinking_level']}" if a.get("thinking_level") else ""
+        parent = f" spawned by {a['spawned_by']}" if a.get("spawned_by") else ""
+        evidence = latest_for(a, death_records) if status != "active" else None
+        lifecycle_link = f" lifecycle={log_path()}#{evidence['record_id']}" if evidence else ""
+        print(f"  [{status}] {agent_name} ({a.get('agent_id', '?')}) {tier} {a.get('cli', '?')}/{a.get('model', '?')}{thinking} — {age_str}{handle_info}{spatial_info}{parent}{loop2_flag}{lifecycle_link}")
 
 
 def cmd_rag() -> None:
@@ -4409,7 +5828,15 @@ def main() -> None:
         print("  inbox [N] [--all] [--agent ID]  (--agent-id is an accepted alias; an UNKNOWN flag is rejected,")
         print("                                 never ignored) Read-only inbox view: full bodies, new+cur+done, newest N")
         print("  discover [count]               Discover active agents")
+        print("  handoffs --audit [--format table|json|both] [--out FILE] [--writable-legacy]")
+        print("                                 Read-only inventory of legacy handoff files + owner resolution")
+        print("  index --check --project ROOT   Check ROOT/AGENT_INDEX.md: exit 1 on a missing index, >12000 chars,")
+        print("                                 or a dead [text](target) markdown link (fenced code blocks are skipped)")
         print("  spawn [options]                Spawn a new Claude Code session")
+        print("  litetui [--agent-id ID] <verb>  LiteTUI GUI JSONL control (litetui --help)")
+        print("  fleet-check --backend B --model M --thinking-level T | --agent-id ID [--backend B] [--wait S] [--allow-silent]")
+        print("              [--expect-model M] [--expect-thinking T]")
+        print("                                 Check a launch (or a live seat) against the fleet floor")
         print("  sessions <cmd> [options]       Save/restore terminal agent sessions")
         # 🔴 TWO HELP TEXTS FOR ONE COMMAND. Keep them equal to register's own
         # usage line (search "Usage: liteharness register"), because they drift and
@@ -4423,6 +5850,7 @@ def main() -> None:
         print("           [--takeover] [--session-pid PID]")
         print("           [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID]")
         print("           [--workspace-id WID] [--project-id PID] [--canvas-session CSID]")
+        print("           [--thinking-level LEVEL] [--backend BACKEND] [--spawned-by AGENT_ID]")
         print("                                 Update agent presence info with spatial awareness data")
         print("  query-patterns [--top N] [--format text|json] [--query STR]")
         print("                                 Query task patterns (BM25)")
@@ -4485,7 +5913,14 @@ def main() -> None:
 
     cmd = sys.argv[1]
 
-    if cmd == "bootstrap":
+    if cmd == "litetui":
+        from .litetui_client import main as litetui_main
+        try:
+            litetui_main(sys.argv[2:])
+        except (ValueError, OSError) as exc:
+            print(f"LiteTUI control refused: {exc}", file=sys.stderr)
+            sys.exit(2)
+    elif cmd == "bootstrap":
         if len(sys.argv) < 3:
             print("Usage: liteharness bootstrap <project-path> [--no-git-hooks]")
             sys.exit(1)
@@ -4716,9 +6151,17 @@ def main() -> None:
         reg_project_id = None
         reg_canvas_session = None
         reg_takeover = False
+        reg_strict_identity = False
         reg_session_pid = None
+        reg_thinking_level = None
+        reg_backend = None
+        reg_spawned_by = None
         i = 2
         while i < len(sys.argv):
+            if sys.argv[i] == "--strict-identity":
+                reg_strict_identity = True
+                i += 1
+                continue
             if sys.argv[i] == "--takeover":
                 reg_takeover = True
                 i += 1
@@ -4770,12 +6213,22 @@ def main() -> None:
             elif sys.argv[i] == "--canvas-session" and i + 1 < len(sys.argv):
                 reg_canvas_session = sys.argv[i + 1]
                 i += 2
+            elif sys.argv[i] == "--thinking-level" and i + 1 < len(sys.argv):
+                reg_thinking_level = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--backend" and i + 1 < len(sys.argv):
+                reg_backend = sys.argv[i + 1]
+                i += 2
+            elif sys.argv[i] == "--spawned-by" and i + 1 < len(sys.argv):
+                reg_spawned_by = sys.argv[i + 1]
+                i += 2
             else:
                 i += 1
-        if not reg_agent_id:
-            print("Usage: liteharness register --agent-id ID [--cli CLI] [--model MODEL] [--name NAME] [--tier TIER] [--team TEAM] [--takeover] [--session-pid PID] [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID] [--workspace-id WID] [--project-id PID] [--canvas-session CSID]")
+        if not reg_agent_id or reg_agent_id.startswith("-"):
+            print("Error: --agent-id requires a non-empty identity that does not look like a flag.", file=sys.stderr)
+            print("Usage: liteharness register --agent-id ID [--cli CLI] [--model MODEL] [--name NAME] [--tier TIER] [--team TEAM] [--takeover] [--session-pid PID] [--pane-id PANE] [--leaf-id LEAF] [--session-id SID] [--thread-id TID] [--workspace-id WID] [--project-id PID] [--canvas-session CSID] [--thinking-level LEVEL] [--backend BACKEND] [--spawned-by AGENT_ID]")
             sys.exit(1)
-        cmd_register(reg_agent_id, reg_cli, reg_model, reg_name, reg_tier, reg_team, reg_pane_id, reg_leaf_id, reg_session_id, reg_thread_id, reg_workspace_id, reg_project_id, canvas_session=reg_canvas_session, takeover=reg_takeover, session_pid=reg_session_pid)
+        cmd_register(reg_agent_id, reg_cli, reg_model, reg_name, reg_tier, reg_team, reg_pane_id, reg_leaf_id, reg_session_id, reg_thread_id, reg_workspace_id, reg_project_id, canvas_session=reg_canvas_session, takeover=reg_takeover, session_pid=reg_session_pid, thinking_level=reg_thinking_level, backend=reg_backend, spawned_by=reg_spawned_by, strict_identity=reg_strict_identity)
     elif cmd == "pty-daemon":
         from . import pty_daemon
         daemon = pty_daemon.PtyDaemon()
@@ -4955,96 +6408,37 @@ def main() -> None:
         state = "ON" if enabled else "OFF"
         print(f"memory-nudge: {state} (cadence={cadence} — pointer every {cadence} UserPromptSubmit turn(s))")
     elif cmd == "spawn":
-        sp_model = None
-        sp_cwd = None
-        sp_worktree = False
-        sp_perm = None
-        sp_prompt = None
-        sp_name = None
-        sp_new_window = False
-        sp_args = None
-        sp_pty = False
-        sp_exec = None
-        sp_thread_id = None
-        sp_workspace_id = None
-        sp_project_id = None
-        sp_tier = None
-        sp_team = None
-        sp_split = False
-        sp_split_pane = None
-        sp_split_dir = "vertical"
-        sp_cognitive = None
-        i = 2
-        while i < len(sys.argv):
-            if sys.argv[i] == "--model" and i + 1 < len(sys.argv):
-                sp_model = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--cwd" and i + 1 < len(sys.argv):
-                sp_cwd = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--worktree":
-                sp_worktree = True
-                i += 1
-            elif sys.argv[i] == "--permission-mode" and i + 1 < len(sys.argv):
-                sp_perm = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--prompt" and i + 1 < len(sys.argv):
-                sp_prompt = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--name" and i + 1 < len(sys.argv):
-                sp_name = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--new-window":
-                sp_new_window = True
-                i += 1
-            elif sys.argv[i] == "--pty":
-                sp_pty = True
-                i += 1
-            elif sys.argv[i] == "--args" and i + 1 < len(sys.argv):
-                sp_args = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--exec" and i + 1 < len(sys.argv):
-                sp_exec = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--thread-id" and i + 1 < len(sys.argv):
-                sp_thread_id = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--workspace-id" and i + 1 < len(sys.argv):
-                sp_workspace_id = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--project-id" and i + 1 < len(sys.argv):
-                sp_project_id = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--tier" and i + 1 < len(sys.argv):
-                sp_tier = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--team" and i + 1 < len(sys.argv):
-                sp_team = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--split":
-                sp_split = True
-                i += 1
-            elif sys.argv[i] == "--pane" and i + 1 < len(sys.argv):
-                sp_split_pane = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--direction" and i + 1 < len(sys.argv):
-                sp_split_dir = sys.argv[i + 1]
-                i += 2
-            elif sys.argv[i] == "--cognitive" and i + 1 < len(sys.argv):
-                sp_cognitive = sys.argv[i + 1]
-                i += 2
-            else:
-                i += 1
-        cmd_spawn(
-            model=sp_model, cwd=sp_cwd, worktree=sp_worktree,
-            permission_mode=sp_perm, prompt=sp_prompt, name=sp_name,
-            new_window=sp_new_window, additional_args=sp_args,
-            pty_mode=sp_pty, exec_cmd=sp_exec,
-            thread_id=sp_thread_id, workspace_id=sp_workspace_id,
-            project_id=sp_project_id, tier=sp_tier, team=sp_team,
-            split_mode=sp_split, split_pane=sp_split_pane,
-            split_direction=sp_split_dir, cognitive=sp_cognitive,
-        )
+        cmd_spawn(**_parse_spawn_args(sys.argv[2:]))
+    elif cmd == "names":
+        cmd_names(sys.argv[2:])
+    elif cmd == "fleet-check":
+        cmd_fleet_check(sys.argv[2:])
+    elif cmd == "handoffs":
+        from .handoff_audit import cmd_handoffs
+        sys.exit(cmd_handoffs(sys.argv[2:]))
+    elif cmd == "lifecycle":
+        import argparse
+        from .seat_lifecycle import records, log_path, unexplained_since
+        parser = argparse.ArgumentParser(prog="liteharness lifecycle")
+        parser.add_argument("--since", help="ISO timestamp (orchestrator: previous successful tick)")
+        parser.add_argument("--unexplained", action="store_true")
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            rows = unexplained_since(records(), args.since) if args.unexplained else records(since=args.since)
+        except (OSError, ValueError) as exc:
+            print(f"Lifecycle check failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps({"path": str(log_path()), "records": rows, "count": len(rows)}, indent=2))
+    elif cmd == "index":
+        import argparse
+        from . import project_index
+        parser = argparse.ArgumentParser(prog="liteharness index")
+        parser.add_argument("--check", action="store_true", required=True)
+        parser.add_argument("--project", required=True, help="repo root holding AGENT_INDEX.md")
+        args = parser.parse_args(sys.argv[2:])
+        ok, report = project_index.check(args.project)
+        print("\n".join(report))
+        sys.exit(0 if ok else 1)
     elif cmd == "discover":
         # `int(sys.argv[2])` consumed argv by POSITION, so the documented
         # `discover --all` died with ValueError: invalid literal for int().

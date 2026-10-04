@@ -1,6 +1,6 @@
 """PatternScanner — indexes .liteharness/patterns.jsonl (project-local).
 
-Each entry becomes one chunk. Agent tier is inferred from session name/description.
+Each entry becomes one chunk. Agent tier comes from explicit record metadata.
 """
 from __future__ import annotations
 
@@ -16,19 +16,6 @@ from .base import BaseScanner
 logger = logging.getLogger(__name__)
 
 _PATTERNS_FILE = Path(".liteharness") / "patterns.jsonl"
-
-
-def _infer_tier(text: str) -> str:
-    t = text.lower()
-    if "polymathic" in t or "review" in t:
-        return "reviewer"
-    if "orchestrat" in t or "fleet" in t or "sentinel" in t:
-        return "orchestrator"
-    if "leader" in t or "team" in t or "decompos" in t:
-        return "leader"
-    if "think" in t or "architect" in t or "design" in t:
-        return "thinker"
-    return "worker"
 
 
 class PatternScanner(BaseScanner):
@@ -66,7 +53,7 @@ class PatternScanner(BaseScanner):
 
                     name = entry.get("name") or entry.get("session") or ""
                     description = entry.get("description") or entry.get("content") or ""
-                    tier = entry.get("tier") or _infer_tier(f"{name} {description}")
+                    tier = entry.get("tier") or "worker"
                     project = entry.get("project") or ""
 
                     content_parts = []

@@ -71,5 +71,5 @@ silently migrated here.
 - Native pipe integration seeds the registration that precedes a real watcher,
   so the common freshness rule can verify its owner.
 
-Ryan ordered FullBit to park after finishing this task. No successor task should
-be dispatched until Ryan explicitly releases the seat.
+the user ordered FullBit to park after finishing this task. No successor task should
+be dispatched until the user explicitly releases the seat.

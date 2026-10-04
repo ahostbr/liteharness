@@ -45,7 +45,7 @@ class CopilotWaiterTests(unittest.TestCase):
         agent_id = "145fe08e-ae94-4df3-88b1-cc38f4cc2046"
         sender_id = "fa88c542-d2ef-41ef-8a8c-370f4b246666"
 
-        inbox.send(sender_id, agent_id, "hello from sentinel", cli="claude-code")
+        inbox.send(sender_id, agent_id, "hello from harbor", cli="claude-code")
 
         message = copilot_waiter.wait_for_next_message(agent_id, timeout=0.2)
 
@@ -54,7 +54,7 @@ class CopilotWaiterTests(unittest.TestCase):
         self.assertEqual(message["from"], sender_id)
 
         summary = copilot_waiter.format_message_summary(message, agent_id)
-        self.assertIn("hello from sentinel", summary)
+        self.assertIn("hello from harbor", summary)
         self.assertIn(f"python -m liteharness.cli send {sender_id}", summary)
 
         completed = inbox.complete(message, result="unit test")

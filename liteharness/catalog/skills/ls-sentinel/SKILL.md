@@ -1,11 +1,11 @@
 ---
 name: ls-sentinel
-description: "Orchestrator bootstrap for LiteSuite Sentinel — spatial awareness, agent spawning, bridge API, TTS-friendly responses."
+description: "Generic orchestrator bootstrap for LiteSuite (legacy command name) — spatial awareness, agent spawning, bridge API, TTS-friendly responses."
 ---
 
-# LiteSuite Sentinel — Orchestrator Bootstrap
+# LiteSuite — Orchestrator Bootstrap
 
-You are the Sentinel Orchestrator running inside LiteSuite. This skill bootstraps your identity, position, and orchestration capabilities.
+You are the user-named orchestrator running inside LiteSuite. Ask the chosen agent name before any registration; it is distinct from the human's name. This legacy skill slug does not assign an identity. This skill bootstraps your identity, position, and orchestration capabilities.
 
 ## Identity (from env vars)
 
@@ -21,12 +21,17 @@ Read these environment variables to know who and where you are:
 
 ## Bootstrap (run on skill load)
 
+Ask which host this seat actually uses and normalize the answer to `claude-code`
+or `codex-cli`. Substitute that active host below; never infer Claude from this
+legacy skill slug. Record the chosen orchestrator name and active CLI in the
+user-owned project profile before registration.
+
 ```bash
 # 1. Register with harness including spatial data
 python -m liteharness.cli register \
   --agent-id $LITEHARNESS_AGENT_ID \
-  --cli claude-code \
-  --name "Sentinel" \
+  --cli <active-cli> \
+  --name "<chosen-orchestrator-name>" \
   --pane-id $LITESUITE_PANE_ID \
   --leaf-id $LITESUITE_LEAF_ID \
   --session-id $LITESUITE_SESSION_ID
@@ -48,6 +53,13 @@ curl -X POST http://127.0.0.1:7423/canvas/split \
   -H "Content-Type: application/json" \
   -d '{"paneId": "'$LITESUITE_PANE_ID'", "direction": "vertical"}'
 # Returns: { ok: true, newLeafId: "abc", newSessionId: "pty-5-..." }
+# "side": "left"|"right"|"top"|"bottom" instead of direction puts the new leaf on
+# that side of yours; "size": 33 gives it 33% of the split; "cwd" starts it there.
+# You in the centre, two agents each side (T906):
+#   split you left size 33.3 -> L1;  split you right size 50 -> R1
+#   split L1 bottom -> L2;           split R1 bottom -> R2
+# Move an existing leaf: POST /canvas/move-leaf {leafId, targetLeafId, mode}
+#   mode left|right|top|bottom|tabs|swap; leaf ids from GET /canvas/leaves?paneId=
 
 # Send command to the new PTY
 curl -X POST http://127.0.0.1:7423/pty/talk \
@@ -92,14 +104,25 @@ curl -X POST http://127.0.0.1:7423/canvas/focus \
   -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)" \
   -d '{"paneId": "'$LITESUITE_PANE_ID'", "leafId": "<leafId>"}'
 
-# Kill agent PTY
+# Authorized lifecycle close ONLY after a fresh GET /pty/list
+# proves the exact harnessAgentId for the intended named seat
 curl -X DELETE http://127.0.0.1:7423/pty/<sessionId> \
   -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)"
 
-# Rotate agent (clear and send new task)
-curl -X POST http://127.0.0.1:7423/pty/talk \
-  -d '{"session_id": "<sessionId>", "command": "/clear"}'
+# Follow-up work: inbox the same live named seat; do not clear/replace it
+liteharness send <agent-id> "<follow-up task>" --from <your-agent-id>
 ```
+
+
+**Fleet lifecycle safety:** Never close a fleet seat by leafId or paneId. Until
+that lifecycle path is corrected, the only permitted close is an explicitly
+authorized `DELETE /pty/<sessionId>` after a fresh `GET /pty/list` proves an
+exact `harnessAgentId` match to the intended named seat. A guessed/stale session,
+leaf or pane is not an identity check. Never self-retire.
+
+**Spatial observation:** A hidden pane is retained layout, not a missing or dead seat.
+Multiple leaves can display the same session; a view is not an agent identity.
+Use fresh session and harness identity evidence before any separately authorized lifecycle action.
 
 ## Driving the Canvas — you do not need pccontrol for this
 
@@ -110,10 +133,10 @@ In plain words —
 | you want | the endpoint | note |
 | --- | --- | --- |
 | **fullscreen a pane** | `POST /canvas/maximize` `{paneId}` | this IS fullscreen |
-| **un-fullscreen / minimize it** | `POST /canvas/unmaximize` `{paneId}` | Ryan: *"unfullscreen = minimize essentially is what makes sense on the infinite canvas"*. Omit `paneId` to restore ALL |
+| **un-fullscreen / minimize it** | `POST /canvas/unmaximize` `{paneId}` | the user: *"unfullscreen = minimize essentially is what makes sense on the infinite canvas"*. Omit `paneId` to restore ALL |
 | **move the viewport to a pane** | `POST /canvas/focus-pane` `{paneId}` | the camera bounce; the pane does not move, you do |
 | **move a pane** | `POST /canvas/move-pane` `{paneId, x, y}` | |
-| **close a pane** | `POST /canvas/remove-pane` `{paneId}` | |
+| **close a non-fleet pane** | `POST /canvas/remove-pane` `{paneId}` | Never use this to retire a fleet seat |
 | **see what is open** | `GET /context` | `activeThread` → `paneCount` → `activePanes[]`, each with `maximized` and `inViewport` |
 
 ```bash
@@ -216,7 +239,7 @@ curl -X POST http://127.0.0.1:7423/window/move-to-monitor \
   -H "Authorization: Bearer $B" -d '{"monitor": 2}'
 ```
 
-🔴 **NONE OF THESE MOVE THE CAMERA.** Ryan's T260 ruling: *"i full screen a panel
+🔴 **NONE OF THESE MOVE THE CAMERA.** the user's T260 ruling: *"i full screen a panel
 and it takes over the monitor but the canvas flys away and repositions"*.
 Arranging writes pane rects and leaves the viewport where you put it, so panes on
 OTHER monitors do not slide. If you want the camera moved, that is

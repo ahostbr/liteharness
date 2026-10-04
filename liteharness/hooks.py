@@ -203,7 +203,7 @@ KNOWN_ACTIONS: frozenset[str] = frozenset(
         "check", "register", "register-quiet", "heartbeat", "watch", "watch-auto",
         "deregister", "bridge", "stop-failure", "worktree-create", "worktree-remove",
         "task-created", "cwd-changed", "memory-nudge", "obs", "cleanup",
-        "compact-backup", "compact-log",
+        "compact-backup", "compact-log", "doctrine",
     }
 )
 
@@ -228,7 +228,7 @@ def _read_presence(path) -> dict:
     `existing.get("tier") or "worker"` / `prefer_known(model, existing…)`, so a
     read that fails does not merely lose information — it DEMOTES a live agent to
     tier=worker, model=unknown, and the write that follows makes the demotion
-    permanent. Measured 2026-09-02: Sentinel's own row went orchestrator ->
+    permanent. Measured 2026-09-02: the orchestrator's own row went orchestrator ->
     worker and claude-fable-5-1 -> unknown between 14:05:16Z and 14:06:07Z, with
     the heartbeat then carrying the demoted values (OpenBolt's catch, message
     0c171ad2). Nothing errored and nothing warned.
@@ -274,7 +274,7 @@ def _write_json_atomic(path, payload: dict) -> None:
 
     `Path.write_text` truncates then writes, so two writers racing on one
     presence file can leave a complete document followed by the tail of a longer
-    one. Observed on Sentinel's own file: a `register` and a watcher heartbeat
+    one. Observed on the orchestrator's own file: a `register` and a watcher heartbeat
     landed together and produced `...}session_pid": 342828\\n}`.
 
     That is not a cosmetic corruption. cmd_discover catches JSONDecodeError and
@@ -416,7 +416,7 @@ def _apply_hook_context(hook_input: dict) -> None:
         # registration flipped between two ids, `send <id>` alternated rc=0 and
         # rc=1 with nothing else changing, and a dispatch to the losing id was
         # indistinguishable from a task in progress. Measured 2026-08-29 across
-        # four sends in twenty minutes (Sentinel/OpenBolt, LiteSuite fleet).
+        # four sends in twenty minutes (the orchestrator/OpenBolt, LiteSuite fleet).
         #
         #   AN ID MUST BE DERIVED FROM ONE SOURCE. Where the CLI publishes a
         #   stable id of its own, the per-session payload must not outrank it.
@@ -560,7 +560,7 @@ def _resolve_memory_index_path() -> str:
             pass
     try:
         cwd = os.getcwd()
-        # Claude encodes project paths: C:\Projects\MyApp -> C--Projects-MyApp
+        # Claude encodes project paths: D:\Workspace\MyApp -> D--Workspace-MyApp
         cwd_encoded = cwd.replace(":\\", "--").replace("\\", "-").replace("/", "-")
         return str(Path.home() / ".claude" / "projects" / cwd_encoded / "memory" / "MEMORY.md")
     except OSError:
@@ -811,7 +811,14 @@ def check_inbox() -> None:
     # watcher freshness from the watcher's own clock, not an agent turn.
     # Deferral is SILENT: the watcher renders it, and a second copy in the turn — or a note
     # about having skipped one — is bookkeeping in someone's context.
-    if _a_live_watcher_is_attached(agent_id):
+    # Opt-in native Claude mod owns delivery only while its proven process
+    # lease is fresh. Stale/dead/invalid owners fall back to these legacy hooks.
+    from .mod_inbox import native_owner_active, native_recovery_pending
+    if native_owner_active(agent_id):
+        return
+    # A live legacy watcher reads only new/. After native failure, its fresh
+    # heartbeat must not strand native-owned cur receipts forever.
+    if _a_live_watcher_is_attached(agent_id) and not native_recovery_pending(agent_id):
         return
 
     if not _should_check():
@@ -1195,11 +1202,9 @@ def _purge_stale_agents() -> int:
             # so a surviving watcher keeps a corpse looking fresh.
             session_pid = data.get("session_pid")
             if session_pid and not _pid_alive(session_pid):
-                try:
-                    f.unlink()
+                from .seat_lifecycle import preserve_before_delete
+                if preserve_before_delete(f, data, "stale-agent-sweep:owner-process-gone"):
                     removed += 1
-                except OSError:
-                    pass
                 continue
 
             # 🔴 A LIVE PROCESS IS NOT STALE, WHATEVER THE CLOCK SAYS (T350).
@@ -1217,14 +1222,16 @@ def _purge_stale_agents() -> int:
             # Fast-path: agent recapped and has been idle > RECAP_STALE_SECONDS
             recap_at = data.get("recap_at")
             if recap_at and idle_seconds > RECAP_STALE_SECONDS:
-                f.unlink()
-                removed += 1
+                from .seat_lifecycle import preserve_before_delete
+                if preserve_before_delete(f, data, "stale-agent-sweep:recap-idle-owner-unknown"):
+                    removed += 1
                 continue
 
             # Normal path: agent idle > STALE_AGENT_SECONDS
             if idle_seconds > STALE_AGENT_SECONDS:
-                f.unlink()
-                removed += 1
+                from .seat_lifecycle import preserve_before_delete
+                if preserve_before_delete(f, data, "stale-agent-sweep:idle-owner-unknown"):
+                    removed += 1
         except (json.JSONDecodeError, OSError, ValueError):
             continue
     return removed
@@ -1648,6 +1655,11 @@ def register_presence() -> None:
     # the orchestrator. Same never-downgrade rule as tier: a re-register (resume,
     # compaction) must not erase a known parent by arriving with an empty env.
     spawned_by = os.environ.get("LITEHARNESS_SPAWNED_BY") or existing.get("spawned_by") or ""
+    # T918 (the user: "A <=2 KB tier card + pointer", "Once per event, not 4x"): after a
+    # compaction the seat is re-taught with a small tier card, not the full doctrine.
+    # SessionStart(source=compact) is the only compaction hook whose output is
+    # injected (0 of 160 register attachments came from Pre/PostCompact).
+    compacting = os.environ.get("LITEHARNESS_HOOK_SOURCE", "") == "compact"
 
     # Output identity block — this is what teaches the agent about LiteHarness.
     # If identity is fallback/unknown, do not emit a watcher command that can
@@ -1717,7 +1729,7 @@ def register_presence() -> None:
     # delete: deletion doubles as the delivery receipt and keeps resume/compact
     # fires from re-delivering a stale brief.
     _brief_path_str = os.environ.get("LITEHARNESS_SPAWN_BRIEF", "").strip()
-    if _brief_path_str:
+    if _brief_path_str and not compacting:
         _brief_file = Path(_brief_path_str)
         if _brief_file.exists():
             try:
@@ -1733,7 +1745,17 @@ def register_presence() -> None:
             except OSError:
                 pass
 
-    # Cognitive architecture — mechanical injection (RULING, Ryan 2026-08-07:
+    # Project index (T0237 WS2): the repo's committed AGENT_INDEX.md, right under
+    # the task so it lands above the ~2KB preview fold. Never kills SessionStart.
+    try:
+        from . import project_index as _project_index
+        _index_text = _project_index.brief_block(os.getcwd(), compacting=compacting)
+        if _index_text:
+            print(_index_text)
+    except Exception as _idx_exc:  # noqa: BLE001
+        print(f"[LITEHARNESS] project index unavailable ({_idx_exc!r})")
+
+    # Cognitive architecture — mechanical injection (RULING, the user 2026-08-07:
     # polymaths were not being instructed to read their prompts; discipline-
     # based delivery fails silently). Set by `liteharness spawn` when --name or
     # --cognitive matches the cognitive-architectures library. METHOD ONLY:
@@ -1749,7 +1771,7 @@ def register_presence() -> None:
     _cog_marker = config.get_root() / ".cog_printed" / f"{agent_id}"
     if _cog_path_str and _cog_marker.exists():
         _cog_path_str = ""
-    if _cog_path_str:
+    if _cog_path_str and not compacting:
         _cog_file = Path(_cog_path_str)
         if _cog_file.exists():
             try:
@@ -1776,7 +1798,8 @@ def register_presence() -> None:
             print(f"[LITEHARNESS] ⚠ cognitive architecture file missing: {_cog_path_str} "
                   f"— ask your spawner for your architecture file and Read it before acting.")
 
-    print(f"""[LITEHARNESS] Inter-agent messaging active. Do all of this before you answer anyone.
+    if not compacting:
+        print(f"""[LITEHARNESS] Inter-agent messaging active. Do all of this before you answer anyone.
   You are {agent_id} — tier {tier}, assigned at spawn. You do not choose your tier, and
   it is the only one you have: never assume orchestrator. CLI {cli} | model {model} | {local_now} local.
   {id_line}
@@ -1821,7 +1844,9 @@ def register_presence() -> None:
              python -m liteharness.cli discover
 """)
 
-    if needs_self_register:
+    if compacting:
+        pass  # the card below carries identity; the boot banner is not re-sent
+    elif needs_self_register:
         print(f"""  CLI/model not auto-detected — re-register with accurate info:
     python -m liteharness.cli register --agent-id {agent_id} --cli claude-code --model <your-model>
 """)
@@ -1857,6 +1882,12 @@ def register_presence() -> None:
     project_id = os.environ.get("LITESUITE_PROJECT_ID") or existing.get("project_id") or ""
     pane_id = os.environ.get("LITESUITE_PANE_ID") or existing.get("pane_id") or ""
     leaf_id = os.environ.get("LITESUITE_LEAF_ID") or existing.get("leaf_id") or ""
+    # T916-A: the architecture was injected above but never RECORDED, so a seat
+    # booted with --cognitive read as cognitive=None in its own presence file
+    # (measured 2026-09-25 on PassLink-Turing 5f47aa9c). Same never-downgrade
+    # rule as tier: a resume without the env keeps the known architecture.
+    _cog_env = os.environ.get("LITEHARNESS_COGNITIVE_FILE", "").strip()
+    cognitive = Path(_cog_env).stem if _cog_env else existing.get("cognitive") or ""
     registration_source = existing.get("registration_source")
     if registration_source != "takeover":
         if _explicit_identity_override():
@@ -1874,6 +1905,7 @@ def register_presence() -> None:
         "tier": tier,
         "team": team,
         "spawned_by": spawned_by,
+        "cognitive": cognitive,
         "started_at": existing.get("started_at") or now_iso,
         # registered_at anchors recap detection: _scan_for_recaps only honors
         # away_summary markers NEWER than the last registration, so a stale
@@ -1969,6 +2001,12 @@ def register_presence() -> None:
                 prov_path.unlink()
             except (json.JSONDecodeError, OSError):
                 pass
+    # Never-downgrade: the env value cannot tell "my pane" from "a pane I
+    # inherited" (a seat's Bash-tool children, a pty daemon it started, a
+    # LiteSuite relaunched from inside it all carry the split seat's value),
+    # so it only fills an EMPTY field. T916 B-1 is solved by the spawner
+    # instead: it adopts a `--resume <id>` seat by id and writes the new pane
+    # itself (Linus round 2, option a).
     canvas_session = os.environ.get("LITESUITE_CANVAS_SESSION", "").strip()
     if canvas_session and not presence.get("canvas_session_id"):
         presence["canvas_session_id"] = canvas_session
@@ -1993,6 +2031,9 @@ def register_presence() -> None:
     # access makes the rename fail occasionally on Windows even with the bounded
     # retry (measured 2026-08-08 under 6-way contention: 6.9% -> 1.0%, not
     # zero), and a boot-time traceback is how agents end up booting bare.
+    from .seat_lifecycle import capture_registration_identity
+    capture_registration_identity(presence)
+    presence.pop("lifecycle_registry_record_id", None)
     try:
         config.atomic_write_json(path, presence)
         # Existing roster logic supersedes the earlier ordinary record by
@@ -2002,7 +2043,9 @@ def register_presence() -> None:
         print(f"[LITEHARNESS] presence write skipped ({exc.__class__.__name__}) — "
               f"the inbox watcher rewrites it on its next heartbeat.")
     else:
-        # A FIRST registration is pushed to every live orchestrator (Ryan
+        from .seat_lifecycle import registration
+        registration(presence, "liteharness-session-register")
+        # A FIRST registration is pushed to every live orchestrator (the user
         # 2026-09-12); resume/compaction re-registrations of a known id are not.
         if not existing:
             from .announce import announce_registration
@@ -2043,7 +2086,8 @@ def register_presence() -> None:
                 pass  # older app build without the route, or bridge busy — cosmetic
         # Block A: Spatial identity + API cheatsheet (env-gated, no HTTP required)
         bridge_url = _bridge_url()
-        print(f"""
+        if not compacting:
+            print(f"""
 [LITESUITE] You are pane {pane_id or '(not set)'} on the LiteSuite canvas, workspace {workspace_id or 'default'}.
   Bridge {bridge_url}, header `Authorization: Bearer $LITESUITE_BRIDGE_TOKEN`.
     GET  /context            canvas state — panes carry x/y/width/height, maximized and
@@ -2053,14 +2097,16 @@ def register_presence() -> None:
     POST /canvas/split       {{paneId, direction}}   /canvas/tab        {{paneId, leafId}}
     POST /canvas/browser     {{url, paneId?}}        — paneId navigates THAT pane in place
     POST /canvas/media       {{path|url}}            /canvas/editor     {{filePath}}
+    POST /canvas/present|center|background {{kind, path|url}} — canvas action=help has the rules
+    POST /canvas/clear       {{what?}}               GET /canvas/state
     POST /canvas/focus-pane  {{paneId}}              /canvas/move-pane  {{paneId, x, y}}
     POST /canvas/maximize    {{paneId}}              /canvas/unmaximize {{paneId?}} (omit = all)
     POST /pty/talk           {{session_id, command}} /pty/read          {{session_id}}
     POST /session/register   register self for discovery
-  paneId takes aliases everywhere: self / self:<agentId> / sentinel.
+  paneId takes aliases everywhere: self / self:<agentId>.
 
-  SHOW THE HUMAN THINGS — pick the surface. Each mints an auto-focused pane
-  (focus:false opts out), so they actually SEE what you put up:
+  SHOW THE HUMAN THINGS — pick the surface (pane tools auto-focus; focus:false opts out):
+    a RESULT to look at     -> canvas action=present (image/video/model); glb -> center; image/video -> background
     image/video/audio file  -> /canvas/media {{"path": "C:/abs/file.png"}} (forward slashes)
     media URL               -> /canvas/media {{"url": "https://..."}}
     live site or HTML file  -> /canvas/browser {{"url": ...}}
@@ -2070,7 +2116,7 @@ def register_presence() -> None:
     speak into their chat   -> python -m liteharness.cli send orchestrator-chat "..." — that
                                seat always watches, and bubbles + speaks what you send.
 
-  SPAWN VISIBLE (RULING, Ryan 2026-08-07). The multiplexer is the point: the human watches
+  SPAWN VISIBLE (RULING, the user 2026-08-07). The multiplexer is the point: the human watches
   the fleet work side by side. EVERY tier agent — worker, thinker, reviewer — is a visible
   split of one Fleet panel, never an invisible Agent() subagent, never a WT tab.
     mint once   -> POST /canvas/terminal {{"title": "Fleet"}} -> paneId
@@ -2085,7 +2131,7 @@ def register_presence() -> None:
 
         # Block B: Canvas state fetch (HTTP-gated, requires live bridge)
         # Re-injection guard: skip if pane_id was already in existing presence
-        if not existing.get("pane_id") and _bridge_listening():
+        if not compacting and not existing.get("pane_id") and _bridge_listening():
             try:
                 import urllib.request
                 req = urllib.request.Request(
@@ -2120,7 +2166,13 @@ def register_presence() -> None:
     try:
         from . import prompts as _prompts
 
-        _prompts.emit(tier, litesuite_hint=bool(bridge_token or pane_id))
+        if compacting:
+            print(f"[LITEHARNESS] {agent_id} ({presence.get('name')}), tier {tier}: context was "
+                  f"compacted. Check your inbox watcher; send with "
+                  f"`python -m liteharness.cli send <id> \"...\" --from {agent_id}`.")
+            print(_prompts.tier_card(tier))
+        else:
+            _prompts.emit(tier, litesuite_hint=bool(bridge_token or pane_id))
     except Exception as exc:  # noqa: BLE001 — delivery must never kill SessionStart
         print(f"[LITEHARNESS] ⚠ TIER PREAMBLE DELIVERY FAILED ({exc!r}) — "
               f"you are operating without tier doctrine; report this upward.")
@@ -2157,37 +2209,29 @@ def deregister() -> None:
     path = config.get_root() / "agents" / f"{agent_id}.json"
     if path.exists():
         try:
-            path.unlink()
-            print(f"[LITEHARNESS] Agent {agent_id} deregistered (session stopped)")
-        except OSError:
+            from .seat_lifecycle import preserve_before_delete
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if preserve_before_delete(path, data, "session-end-hook"):
+                print(f"[LITEHARNESS] Agent {agent_id} deregistered (identity archived)")
+        except (OSError, ValueError):
             pass
 
 
 def bridge_assistant_message(hook_input: dict) -> None:
-    """Forward the DESIGNATED Sentinel's replies to Orchestrator Chat via AgentBridge.
+    """Forward only this directly mapped live singleton orchestrator's Stop reply.
 
-    Identity-gated (2026-08-06 decomposition): fires when THIS agent's presence
-    name is "Sentinel" — the seat follows the live agent holding the name, not
-    a pane env var. (The old LITESUITE_SENTINEL_PANE_ID gate was set by nothing
-    and never fired; it is honored as a legacy override if present.)
-    Called by the Stop hook in the plugin hooks.json.
+    Operational process/registry consistency is not same-user cryptographic auth.
+    No env nomination, adoption, registry writes or shared transport changes.
     """
-    import urllib.request
+    from .assistant_identity import assistant_generation
+    from .assistant_transport import send_assistant
 
-    pane_id = os.environ.get("LITESUITE_SENTINEL_PANE_ID", "")
-    agent_id = config.get_agent_id()
-    if not pane_id:
-        try:
-            presence_path = config.get_root() / "agents" / f"{agent_id}.json"
-            presence = json.loads(presence_path.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        if str(presence.get("name", "")).strip().lower() != "sentinel":
-            return
-        pane_id = str(presence.get("pane_id") or "")
-
+    generation = assistant_generation(hook_input, config.get_root())
+    if generation is None:
+        return
+    agent_id, pane_id = generation[0]
     content = hook_input.get("last_assistant_message", "") or hook_input.get("output", "")
-    if not content or not content.strip():
+    if not isinstance(content, str) or not content.strip():
         return
 
     token_path = Path.home() / ".litesuite" / "bridge-token"
@@ -2200,20 +2244,16 @@ def bridge_assistant_message(hook_input: dict) -> None:
         except Exception:
             pass
 
-    _log(f"bridge: agent_id={agent_id} pane_id={pane_id} content_len={len(content)}")
-
     try:
         token = token_path.read_text(encoding="utf-8").strip()
-    except (FileNotFoundError, PermissionError):
-        _log(f"SKIP: no bridge token at {token_path}")
+    except (OSError, UnicodeError):
+        _log("SKIP: credential unavailable")
+        return
+    if len(token) == 0:
         return
 
-    # Derived from the transcript, not minted here — see _last_assistant_event_id.
-    # Absent (old transcript, oversized entry) is a valid state: the consumer
-    # falls back to its transitional content guard.
+    # Derived from the transcript, not minted here. Preserve event derivation.
     event_id = _last_assistant_event_id(hook_input.get("transcript_path"))
-    _log(f"bridge: event_id={event_id or 'NONE'}")
-
     payload = json.dumps({
         "role": "assistant",
         "content": content,
@@ -2223,22 +2263,14 @@ def bridge_assistant_message(hook_input: dict) -> None:
         "agent_id": agent_id,
         "message_id": event_id,
     }).encode("utf-8")
-
-    req = urllib.request.Request(
-        f"{_bridge_url()}/v1/sentinel/assistant-message",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        method="POST",
-    )
-
+    # Re-prove immediately before HTTP; a deregistered/changed seat cannot send.
+    if assistant_generation(hook_input, config.get_root()) != generation:
+        return
     try:
-        resp = urllib.request.urlopen(req, timeout=5)
-        _log(f"POST ok: status={resp.status}")
-    except Exception as e:
-        _log(f"POST failed: {e}")
+        status = send_assistant(payload, token)
+        _log(f"POST ok: status={status}")
+    except Exception:
+        _log("POST failed: assistant transport refused or unavailable")
 
 
 def _last_assistant_event_id(transcript_path: str | None) -> str | None:
@@ -2256,7 +2288,7 @@ def _last_assistant_event_id(transcript_path: str | None) -> str | None:
     same transcript entry and compute the same id, while a genuine repeat of
     identical text is a different turn and keeps its own id. A content hash
     would fail that second half — it cannot tell a duplicate delivery from
-    Sentinel saying "Quiet hold." twice.
+    the orchestrator saying "Quiet hold." twice.
 
     ⚠️ TAIL-READ, BOUNDED. Transcripts reach six figures of lines (171,322
     measured 2026-08-31), and this runs inside a 10s Stop hook, so we read only
@@ -2343,6 +2375,86 @@ def _slim_obs_value(value, depth: int = 0):
             return f"[array:{len(value)}]"
         return [_slim_obs_value(v, depth + 1) for v in value[:_OBS_SLIM_MAX_ARRAY]]
     return value
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T918 guard: WARN ONLY (the user's pick "warn-all": "Softer; relies on me reading
+# it"). Runs inside the existing `obs PreToolUse` process, so it costs a presence
+# read, never a new process. It never blocks: no permissionDecision is emitted.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: File tools whose target path is known before the call. A Bash command that edits
+#: a file (sed -i, a Python write, git apply) cannot be decided from its text, so the
+#: guard does NOT see edits made through Bash.
+GUARD_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+#: "Source" = a file with one of these suffixes, WHEREVER it is (the orchestrator d52beebe:
+#: keep the warning on scripts/*.py and on .html/.tsx/.ts/.py anywhere), unless
+#: GUARD_EXEMPT below says it is prose the orchestrator is meant to write.
+SOURCE_SUFFIXES = frozenset({
+    ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".rs", ".go",
+    ".java", ".kt", ".cs", ".c", ".cc", ".cpp", ".h", ".hpp", ".swift", ".rb",
+    ".php", ".lua", ".sql", ".ps1", ".psm1", ".sh", ".bat", ".cmd", ".css",
+    ".scss", ".html", ".vue", ".svelte",
+})
+
+#: "Tier role" (the orchestrator ruling 7a47fe07 (3), exact): an Agent() whose subagent_type,
+#: after any "plugin:" prefix, starts with one of these. Read-only scouts (Explore,
+#: general-purpose, ...) are exempt: the bootstrap lets any tier dispatch them.
+TIER_ROLE_PREFIXES = ("polymathic-", "thinker-", "reviewer-")
+
+
+#: What the orchestrator IS meant to write (the orchestrator d52beebe). The scratchpad is
+#: session-specific; it is recognised by its shape, <temp>/claude/<project>/<session>/
+#: scratchpad/, which Claude Code gives every session's scratch directory.
+GUARD_EXEMPT = {
+    "source": "policy provenance",
+    "suffixes": (".md", ".txt"),
+    "patterns": (
+        r"[\\/]temp[\\/]claude[\\/][^\\/]+[\\/][^\\/]+[\\/]scratchpad(?:[\\/]|$)",
+        r"[\\/]\.claude[\\/]skills[\\/](?:.+[\\/])?skill\.md$",
+    ),
+}
+
+
+def _is_source(path_str: str) -> bool:
+    if not path_str:
+        return False
+    import re as _re
+
+    path = Path(path_str)
+    if path.suffix.lower() in GUARD_EXEMPT["suffixes"]:
+        return False
+    if any(_re.search(p, path_str, _re.IGNORECASE) for p in GUARD_EXEMPT["patterns"]):
+        return False
+    return path.suffix.lower() in SOURCE_SUFFIXES
+
+
+def pretooluse_guard(hook_input: dict) -> list[str]:
+    """The warnings this tool call earns; [] for almost every call."""
+    tool = str(hook_input.get("tool_name") or "")
+    tool_input = hook_input.get("tool_input") or {}
+    if not isinstance(tool_input, dict):
+        return []
+    warnings: list[str] = []
+    if tool in GUARD_EDIT_TOOLS:
+        target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+        if _is_source(target):
+            row = _read_presence(config.get_root() / "agents" / f"{config.get_agent_id()}.json")
+            if row.get("tier") == "orchestrator":
+                warnings.append(
+                    f"T918 guard (warn only): an orchestrator is editing source ({target}). "
+                    "THE LOOP 1: the orchestrator never writes code; hand the change to a leader."
+                )
+    elif tool in ("Agent", "Task"):
+        kind = str(tool_input.get("subagent_type") or "")
+        if kind.rsplit(":", 1)[-1].startswith(TIER_ROLE_PREFIXES):
+            warnings.append(
+                f"T918 guard (warn only): Agent(subagent_type={kind!r}) stands in for a tier role. "
+                "THE LOOP 3: workers, thinkers and reviewers are visible splits "
+                "(liteharness spawn --split --tier <role> --cognitive <polymath>), never Agent()."
+            )
+    return warnings
 
 
 def emit_obs_event(hook_input: dict, event_type: str) -> None:
@@ -2460,9 +2572,72 @@ def register_worktree(hook_input: dict) -> None:
 
     try:
         path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
-        print(f"[LITEHARNESS] Worktree registered: {worktree_path} ({branch})")
+        # stderr, never stdout: on WorktreeCreate stdout IS the worktree path.
+        print(f"[LITEHARNESS] Worktree registered: {worktree_path} ({branch})", file=sys.stderr)
     except OSError:
         pass
+
+
+def create_worktree(hook_input: dict) -> int:
+    """Create the worktree Claude Code asked for. Returns the process exit code.
+
+    A WorktreeCreate command hook REPLACES Claude's own `git worktree add`, and
+    Claude reads its stdout as the worktree path (docs call it the last non-empty
+    line; we hold ourselves to the stricter "the path and nothing else"). No path,
+    a non-zero exit or a failed hook fails the creation. Payload, per the raw docs
+    https://code.claude.com/docs/en/hooks.md (WorktreeCreate input): the common
+    fields plus `name`, a slug such as "bold-oak-a3f2". This used to be
+    register_worktree alone, which printed a banner and created nothing, so every
+    `isolation: "worktree"` agent failed. Everything human-readable goes to stderr.
+
+    The directory is <repo root>/.worktrees/<name> (workspace convention). Claude
+    only needs the path back, and refuses one that contains `.`/`..` segments or
+    passes through a symlink below the repository root, so it is resolved here.
+    Registration is a side effect that must never fail the creation.
+    """
+    import re
+    import subprocess
+
+    def fail(msg: str) -> int:
+        print(f"[LITEHARNESS] worktree-create: {msg}", file=sys.stderr)
+        return 1
+
+    def git(*args: str, cwd: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True)
+
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(hook_input.get("name") or "")).strip("-.")
+    if not name:
+        return fail("payload has no usable name")
+    cwd = str(hook_input.get("cwd") or os.getcwd())
+
+    # The COMMON dir's parent is the main checkout even when cwd is itself a
+    # linked worktree, so worktrees never nest inside each other.
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=cwd)
+    if common.returncode != 0:
+        return fail(f"{cwd} is not inside a git repository: {common.stderr.strip()}")
+    target = (Path(common.stdout.strip()).parent / ".worktrees" / name).resolve()
+    branch = f"worktree-{name}"
+
+    listed = git("worktree", "list", "--porcelain", cwd=cwd).stdout
+    known = {Path(line[9:]).resolve() for line in listed.splitlines() if line.startswith("worktree ")}
+    if target in known and target.is_dir():
+        pass  # Claude re-asks for a name it already got: hand the same tree back
+    elif target.exists():
+        return fail(f"{target} exists and is not a registered worktree; refusing to touch it")
+    else:
+        has_branch = git("rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", cwd=cwd).returncode == 0
+        args = ["worktree", "add", str(target), branch] if has_branch else ["worktree", "add", "-b", branch, str(target)]
+        added = git(*args, cwd=cwd)
+        sys.stderr.write(added.stdout + added.stderr)
+        if added.returncode != 0 or not target.is_dir():
+            return fail(f"git worktree add failed for {target}")
+
+    try:
+        register_worktree({"worktree_path": str(target), "branch": branch})
+    except Exception as exc:  # registration is bookkeeping, not creation
+        print(f"[LITEHARNESS] worktree-create: registration skipped: {exc}", file=sys.stderr)
+    sys.stdout.write(f"{target}\n")
+    return 0
 
 
 def deregister_worktree(hook_input: dict) -> None:
@@ -2630,7 +2805,7 @@ def update_cwd(hook_input: dict) -> None:
 # file vanishes (purge, deregister) — instead of reinventing tier=worker /
 # model=unknown defaults over a live agent's registration. That default-
 # recreate path is how every orchestrator restart self-demoted in the
-# registry (the 2026-06-10 Sentinel handover bug).
+# registry (the 2026-06-10 the orchestrator handover bug).
 _LAST_PRESENCE: dict = {}
 
 
@@ -2682,6 +2857,16 @@ def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> N
             if not recovered_owner or not _pid_alive(recovered_owner):
                 return
         updates: dict = {"watcher_last_seen" if is_watcher else "agent_last_seen": now}
+        # T916 item 3: the spawner's proof that a turn RAN. The terminal tail
+        # cannot give it (raw /pty/read repaint bytes: no match on a busy pane,
+        # leftovers from an old turn on an idle one), so the nudge was retyped
+        # while the turn it started was running. Only a turn fires these two.
+        # Write-ONCE per registration (register_presence rebuilds the row
+        # without it): PostToolUse is the hottest hook, so after the first
+        # stamp this costs only the read above, never another field write.
+        if (not is_watcher and not presence.get("turn_seen_at")
+                and os.environ.get("LITEHARNESS_HOOK_EVENT") in ("UserPromptSubmit", "PostToolUse")):
+            updates["turn_seen_at"] = now
         if recovered_owner:
             updates["session_pid"] = recovered_owner
         if is_watcher:
@@ -2887,7 +3072,7 @@ WATCH_AUTO_RERESOLVE_WINDOW_S = 60.0
 """How long a watch-auto watcher keeps re-asking who owns its pid.
 
 🔴 T563. `_watch_identity_after_supersede` answers correctly — ONCE, AT ARM TIME
-— and on a `/resume` the answer it needs DOES NOT EXIST YET. Measured on Ryan's
+— and on a `/resume` the answer it needs DOES NOT EXIST YET. Measured on the host session's
 seat 2026-09-10: claude.exe 29436 started 08:58:42, watch-auto armed 08:58:46 on
 the STARTUP uuid, and the seat's real presence registered 08:59:07 — 21 SECONDS
 AFTER THE WATCHER. The guard did not fail; it was asked too early.
@@ -2985,6 +3170,11 @@ def watch_inbox(
                         # skipped for the wrong recipient was never added to
                         # `seen_ids`, so the next scan picks it up.
 
+            from .mod_inbox import native_owner_active
+            if native_owner_active(agent_id):
+                update_heartbeat(agent_id=agent_id, is_watcher=True)
+                continue
+
             # Scan only new/ — cur/ is for claimed messages owned by other watchers
             if not inbox.INBOX_NEW.exists():
                 update_heartbeat(agent_id=agent_id, is_watcher=True)
@@ -3022,7 +3212,7 @@ def watch_inbox(
                 msg_type = msg.get("type", "notification")
                 # Two producer shapes share this maildir: the Python CLI writes
                 # top-level {body}; the desktop GlobalInbox (e.g. the seat's
-                # Orchestrator Chat relay) nests {payload:{text}}. Ryan's first
+                # Orchestrator Chat relay) nests {payload:{text}}. the user's first
                 # live seat-message notified with an EMPTY body (2026-08-06).
                 body = msg.get("body", "")
                 if not body:
@@ -3198,6 +3388,41 @@ def compact_log(hook_input: dict) -> None:
         )
 
 
+_MANUAL_REGISTER_REFUSAL = (
+    "[LITEHARNESS] hooks register did NOTHING: it got no hook JSON on stdin, so it was "
+    "not run by a CLI's SessionStart hook and has no session to register.\n"
+    "  Re-register this seat:  python -m liteharness.cli register --agent-id <id> "
+    "--cli claude-code --model <model> [--tier <tier>]\n"
+    "  Reload your doctrine:   python -m liteharness.hooks doctrine [--tier <tier>]"
+)
+
+
+def reload_doctrine(argv: list[str]) -> None:
+    """Print this seat's tier preamble and cognitive architecture again, the two
+    things SessionStart injects, for a seat whose context lost them (T916-B).
+    Registers and writes nothing."""
+    agent_id = config.get_agent_id()
+    presence = _read_presence(config.get_root() / "agents" / f"{agent_id}.json")
+    if "--tier" in argv and argv.index("--tier") + 1 < len(argv):
+        tier, source = argv[argv.index("--tier") + 1], "--tier"
+    elif presence.get("tier"):
+        tier, source = presence["tier"], f"presence {agent_id}"
+    else:
+        tier, source = os.environ.get("LITEHARNESS_TIER") or "worker", "env/default"
+    print(f"[LITEHARNESS] doctrine for {agent_id}: tier {tier} (from {source}). Nothing was registered.")
+    from . import prompts as _prompts
+
+    _prompts.emit(tier)
+    cognitive = presence.get("cognitive") or ""
+    arch = _prompts.resolve_cognitive_file(cognitive, tier) if cognitive else None
+    if arch is None:
+        print(f"[LITEHARNESS] no cognitive architecture recorded for {agent_id}."
+              if not cognitive else f"[LITEHARNESS] ⚠ cognitive {cognitive!r} resolved to no file.")
+        return
+    print(f"## Cognitive Architecture — {cognitive} (METHOD, not tier) — {arch}\n"
+          f"{arch.read_text(encoding='utf-8')}")
+
+
 def main() -> None:
     """CLI entry point for hook scripts."""
     # Fix Windows cp1252 encoding — message bodies may contain unicode (arrows, emoji, etc.)
@@ -3248,14 +3473,37 @@ def main() -> None:
     # Read stdin JSON from hook-supporting CLIs (Codex, Copilot, Claude Code)
     # watch mode is long-running and shouldn't consume stdin
     hook_input: dict = {}
-    if action not in ("watch", "watch-auto"):
+    if action not in ("watch", "watch-auto", "doctrine"):
         hook_input = _read_hook_stdin()
         if hook_input:
             _apply_hook_context(hook_input)
 
+    # T0318: reuse only existing Claude catalog events. Display failure must
+    # never replace inbox, heartbeat, memory-nudge, Stop or deny semantics.
+    if (action, hook_input.get("hook_event_name")) in {
+        ("check", "SessionStart"), ("memory-nudge", "UserPromptSubmit"),
+        ("check", "PostToolUse"), ("obs", "Stop"),
+    }:
+        try:
+            from . import paste_history
+
+            paste_history.handle(hook_input, action, config.get_agent_id(), config.get_root() / "agents")
+        except Exception:
+            print("[paste-history] display unavailable; existing hook continues", file=sys.stderr)
+
     if action == "check":
         check_inbox()
         update_heartbeat()
+    elif action in ("register", "register-quiet") and not hook_input and not (
+        os.environ.get("LITEHARNESS_CLI") == "litecode" or os.environ.get("LITECODE_SESSION_ID")
+    ):
+        # T916-B: run by hand, there is no hook JSON and so no session id to
+        # register under. It used to return silently (read as "done"), or, with
+        # LITEHARNESS_TRANSCRIPT_PATH set, register a model=unknown row.
+        print(_MANUAL_REGISTER_REFUSAL, file=sys.stderr)
+        sys.exit(1)
+    elif action == "doctrine":
+        reload_doctrine(sys.argv[2:])
     elif action == "register":
         # Sub-agents (spawned via Agent tool) trigger SessionStart hooks too,
         # but they shouldn't register — only top-level sessions should.
@@ -3383,7 +3631,7 @@ def main() -> None:
     elif action == "stop-failure":
         log_stop_failure(hook_input)
     elif action == "worktree-create":
-        register_worktree(hook_input)
+        sys.exit(create_worktree(hook_input))
     elif action == "worktree-remove":
         deregister_worktree(hook_input)
     elif action == "task-created":
@@ -3410,6 +3658,15 @@ def main() -> None:
             # every session immediately, no hooks.json change needed.
             sync_task_completed(hook_input)
         if event_type:
+            if event_type == "PreToolUse":
+                try:
+                    warnings = pretooluse_guard(hook_input)
+                except Exception:  # a guard must never take the seat down
+                    warnings = []
+                if warnings:
+                    text = "\n".join(warnings)
+                    print(json.dumps({"systemMessage": text, "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse", "additionalContext": text}}))
             emit_obs_event(hook_input, event_type)
     elif action == "compact-backup":
         compact_backup(hook_input)

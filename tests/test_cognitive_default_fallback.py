@@ -48,14 +48,14 @@ def test_a_generated_architecture_still_wins_over_default(tmp_path, monkeypatch)
     """A name with its own file must NOT be shadowed by the fallback.
 
     🔴 THIS TEST USED TO ASSERT A FILE THAT DOES NOT SHIP, AND ITS RESULT WAS DECIDED BY
-    ANOTHER REPOSITORY. It called `resolve_cognitive_file("Sentinel", "orchestrator")`
-    and demanded `sentinel.md`. Diagnosed 2026-09-04 (T351): `resolve_prompts_dir()`
+    ANOTHER REPOSITORY. It called `resolve_cognitive_file("the orchestrator", "orchestrator")`
+    and demanded `marker.md`. Diagnosed 2026-09-04 (T351): `resolve_prompts_dir()`
     resolves to the LiteSuite sibling checkout — on this box
-    `C:/Projects/LiteSuite/resources/liteharness-plugin/prompts` — whose
+    `C:/workspace/LiteSuite/resources/liteharness-plugin/prompts` — whose
     `cognitive-architectures/orchestrator/` contains exactly ONE file, `default.md`.
-    `sentinel.md` exists nowhere in liteharness-oss and by design never will: an
+    `marker.md` exists nowhere in liteharness-oss and by design never will: an
     orchestrator identity is GENERATED per user by `/ls-init-liteharness` and ships to
-    nobody, which is why the name deliberately does not default to Sentinel.
+    nobody, which is why the name deliberately does not default to the orchestrator.
 
         A UNIT TEST WHOSE VERDICT DEPENDS ON A DIFFERENT REPOSITORY'S CONTENTS IS
         REPORTING ON THAT REPOSITORY, NOT ON THIS CODE.
@@ -72,7 +72,7 @@ def test_a_generated_architecture_still_wins_over_default(tmp_path, monkeypatch)
     skips rather than passes — which is honest, and is not the same as running clean.
 
     ⬜ The earlier fixture note is kept because it names the same class of error: this
-    once asserted `ryan.md`, the architecture named after the HUMAN, while the resolver
+    once asserted `the user.md`, the architecture named after the HUMAN, while the resolver
     keys on the AGENT's name — so that file resolved for nobody and the real
     orchestrator silently ran `default.md` for months.
     """
@@ -115,7 +115,7 @@ def test_read_and_write_paths_slug_identically():
     `.lower()`, so it looked for `the warden.md` — a SPACE, not a hyphen — missed, and
     fell through to the tier default.
 
-    The two agree for every single-word name, including "Sentinel", which is why this
+    The two agree for every single-word name, including "the orchestrator", which is why this
     survived: it is invisible on the only configuration the author ever ran, and breaks
     for the first user who picks a two-word name.
 
@@ -142,7 +142,7 @@ def test_read_and_write_paths_slug_identically():
             target.unlink(missing_ok=True)
 
 
-@pytest.mark.parametrize("name", ["Warden", "Sentinel", "Atlas", "zzz-no-such-agent"])
+@pytest.mark.parametrize("name", ["Warden", "Harbor", "Atlas", "zzz-no-such-agent"])
 def test_any_orchestrator_name_resolves(name):
     """THE REGRESSION. Any orchestrator resolves to something readable, never None."""
     hit = resolve_cognitive_file(name, "orchestrator")
@@ -253,7 +253,7 @@ def test_slug_is_filesystem_safe():
     assert orchestrator_slug("atlas_prime") == "atlas-prime"
     # Path separators and reserved chars are stripped, not substituted — a name can
     # never escape the orchestrator/ directory or produce an invalid Windows filename.
-    assert orchestrator_slug("Sen/tin\\el:*?") == "sentinel"
+    assert orchestrator_slug("Har/bo\\r:*?") == "harbor"
     assert "/" not in orchestrator_slug("../../etc/passwd")
     assert "\\" not in orchestrator_slug("..\\..\\windows")
     assert orchestrator_slug("") == "default"

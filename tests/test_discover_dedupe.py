@@ -2,7 +2,7 @@
 
 `/resume` boots with a throwaway session id, SessionStart registers it, then the
 resume adopts the real id and registers again — two rows, one process. Measured
-2026-08-19: pid 61112 (GrimShard 14:56:31 -> Sentinel 14:56:45) and pid 269264
+2026-08-19: pid 61112 (GrimShard 14:56:31 -> the orchestrator 14:56:45) and pid 269264
 (LongRivet 14:56:08 -> OpenBolt 14:56:20), ~13s apart.
 
 The pre-existing liveness filter cannot catch this. Both rows carry the SAME
@@ -22,27 +22,27 @@ def _a(agent_id, pid, registered_at, name=None):
 def test_two_rows_one_pid_collapse_to_the_later_registration():
     rows = [
         _a("grimshard", 61112, "2026-08-19T14:56:31"),
-        _a("sentinel", 61112, "2026-08-19T14:56:45"),
+        _a("harbor", 61112, "2026-08-19T14:56:45"),
     ]
     kept, superseded = _dedupe_by_session_pid(rows)
     assert len(kept) == 1, "one process must produce one row"
-    assert kept[0]["agent_id"] == "sentinel", "the ADOPTED (later) id wins, not the throwaway"
+    assert kept[0]["agent_id"] == "harbor", "the ADOPTED (later) id wins, not the throwaway"
     assert [s["agent_id"] for s in superseded] == ["grimshard"]
 
 
 def test_order_of_input_does_not_change_the_winner():
     """The later registration wins even when it is seen first."""
     rows = [
-        _a("sentinel", 61112, "2026-08-19T14:56:45"),
+        _a("harbor", 61112, "2026-08-19T14:56:45"),
         _a("grimshard", 61112, "2026-08-19T14:56:31"),
     ]
     kept, superseded = _dedupe_by_session_pid(rows)
-    assert kept[0]["agent_id"] == "sentinel"
+    assert kept[0]["agent_id"] == "harbor"
     assert [s["agent_id"] for s in superseded] == ["grimshard"]
 
 
 def test_distinct_pids_are_never_collapsed():
-    rows = [_a("sentinel", 61112, "t1"), _a("openbolt", 269264, "t2")]
+    rows = [_a("harbor", 61112, "t1"), _a("openbolt", 269264, "t2")]
     kept, superseded = _dedupe_by_session_pid(rows)
     assert len(kept) == 2 and superseded == []
 
@@ -63,7 +63,7 @@ def test_rows_without_a_session_pid_are_never_grouped():
 def test_mixed_fleet_the_real_2026_08_19_shape():
     rows = [
         _a("grimshard", 61112, "2026-08-19T14:56:31"),
-        _a("sentinel", 61112, "2026-08-19T14:56:45"),
+        _a("harbor", 61112, "2026-08-19T14:56:45"),
         _a("longrivet", 269264, "2026-08-19T14:56:08"),
         _a("openbolt", 269264, "2026-08-19T14:56:20"),
         _a("silverbolt", 221020, "2026-08-19T15:01:00"),
@@ -71,7 +71,7 @@ def test_mixed_fleet_the_real_2026_08_19_shape():
     ]
     kept, superseded = _dedupe_by_session_pid(rows)
     ids = sorted(a["agent_id"] for a in kept)
-    assert ids == ["openbolt", "sentinel", "silentchoke", "silverbolt"]
+    assert ids == ["harbor", "openbolt", "silentchoke", "silverbolt"]
     assert sorted(s["agent_id"] for s in superseded) == ["grimshard", "longrivet"]
 
 

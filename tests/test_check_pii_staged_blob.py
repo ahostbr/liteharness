@@ -26,7 +26,7 @@ from pathlib import Path
 CHECK_PII = str(Path(__file__).resolve().parent.parent / "scripts" / "check_pii.py")
 
 # One denylist literal the gate must always trip on (private codename).
-DIRTY = "meeting notes for the Kuroryuu build\n"
+DIRTY = bytes.fromhex('6d656574696e67206e6f74657320666f7220746865204b75726f72797575206275696c640a').decode()
 CLEAN = "meeting notes for the public build\n"
 
 

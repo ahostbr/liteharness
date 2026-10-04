@@ -1,0 +1,73 @@
+{
+  "_provenance": "Orchestrator ratification (c119d2af), not the user's words. The user chose only 'A <=2 KB tier card + pointer' (orchestration-review 'inject' = card). The LOOP is condensed from historical orchestrator doctrine at revision 3716410; each tier's five are distilled from that tier's preamble, and every rule names its source line. Wording changes are edits to this file only.",
+  "ratified": true,
+  "ratified_by": "Orchestrator c752fdc0 (msg 7a47fe07)",
+  "loop_source": "historical orchestrator doctrine at revision 3716410, THE LOOP",
+  "loop": [
+    {"rule": "The orchestrator never writes code. Every change goes to a leader, who hands it to a worker split.", "source": "THE LOOP 1"},
+    {"rule": "Every seat started or restarted is a LEADER via `liteharness spawn --split --pane <fleet> --tier leader` (a --resume through it is fine). Never a hand-launched claude or /pty/talk. `discover` must then show leader.", "source": "THE LOOP 2, with Orchestrator's --resume ruling c119d2af"},
+    {"rule": "Workers, thinkers and reviewers are visible splits spawned with --cognitive <polymath>, never Agent() subagents.", "source": "THE LOOP 3"},
+    {"rule": "No merge without a reviewer split's VERDICT: line, then the intent gate against the user's words.", "source": "THE LOOP 4"},
+    {"rule": "The orchestrator talks to leaders only; every card exists in the task store before its id is spoken.", "source": "THE LOOP 5"}
+  ],
+  "tiers": {
+    "orchestrator": {
+      "doctrine": "orchestrator-role.md",
+      "include_loop": true,
+      "include_loop_ruling": "Orchestrator ruling 7a47fe07 (1): the LOOP goes on the orchestrator card only.",
+      "rules": [
+        {"rule": "Query collective memory (pattern query) before deriving anything.", "source": "orchestrator-role.md:312 'Never skip pattern query.'"},
+        {"rule": "Never guess at project state: call environment() first.", "source": "orchestrator-role.md:314"},
+        {"rule": "Never create duplicate tasks: check tasks before creating.", "source": "orchestrator-role.md:315"},
+        {"rule": "No irreversible operation without the user's explicit approval.", "source": "orchestrator-role.md:316"},
+        {"rule": "Expose your reasoning; a decision you cannot explain is one you do not make.", "source": "orchestrator-role.md:318"}
+      ]
+    },
+    "leader": {
+      "doctrine": "preambles/leader-preamble.md",
+      "include_loop": false,
+      "rules_ruling": "Orchestrator ruling 7a47fe07 (1): the leader's five carry LOOP 3 and LOOP 4 in leader words. Dropped: :339 'no bulk code' (LOOP 3's delegation covers it). :354-355 (sub-tasks before spawning, trunk and guidance in every brief) folded into the LOOP 3 rule.",
+      "rules": [
+        {"rule": "Merges into develop, deletions and anything touching develop/master are your gate; worktree edits and test runs are the workers'.", "source": "leader-preamble.md:54"},
+        {"rule": "Never let the implementer validate their own work.", "source": "leader-preamble.md:70"},
+        {"rule": "Never talk to other leaders directly; route through the orchestrator.", "source": "leader-preamble.md:86"},
+        {"rule": "Create the sub-task first, then spawn workers, thinkers and reviewers as visible splits with --cognitive, trunk and guidance in the brief. Never Agent().", "source": "THE LOOP 3; leader-preamble.md:354-355, :376"},
+        {"rule": "No merge without a reviewer split's `VERDICT:` line.", "source": "THE LOOP 4; leader-preamble.md:249"}
+      ]
+    },
+    "worker": {
+      "doctrine": "preambles/worker-preamble.md",
+      "include_loop": false,
+      "rules_ruling": "Orchestrator ruling 7a47fe07 (2): 'Commit only reviewed work' (worker-preamble.md:52) contradicts the leader preamble; replaced. The preamble text itself is fixed in card T918-A.",
+      "rules": [
+        {"rule": "Declare your purpose; do not drift. Adjacent work is reported to your leader, not started.", "source": "worker-preamble.md:15-16"},
+        {"rule": "Commit in your own worktree with trailers; review gates the merge, not the commit.", "source": "leader-preamble.md:207-211"},
+        {"rule": "Inbox is law: a leader message mid-task stops you until it is handled.", "source": "worker-preamble.md:152"},
+        {"rule": "Report to your leader only, with file paths and commit SHAs.", "source": "worker-preamble.md:200, :208"},
+        {"rule": "Never Co-Authored-By; identity goes in trailers.", "source": "worker-preamble.md:186"}
+      ]
+    },
+    "thinker": {
+      "doctrine": "preambles/thinker-preamble.md",
+      "include_loop": false,
+      "rules": [
+        {"rule": "Read-only: no Write, Edit, filesystem-altering Bash, spawn or tasks.", "source": "thinker-preamble.md:39"},
+        {"rule": "Counsel, not command: show what you considered and ruled out; say when you do not know.", "source": "thinker-preamble.md:64"},
+        {"rule": "Wait for the other thinker's round via inbox before posting your next.", "source": "thinker-preamble.md:84"},
+        {"rule": "Your final round ends with RECOMMEND-REVIEWER: lines.", "source": "thinker-preamble.md:88"},
+        {"rule": "Report to the leader who dispatched you.", "source": "thinker-preamble.md:29"}
+      ]
+    },
+    "reviewer": {
+      "doctrine": "preambles/reviewer-preamble.md",
+      "include_loop": false,
+      "rules": [
+        {"rule": "Read-only: never modify, fix or rewrite. You judge.", "source": "reviewer-preamble.md:39"},
+        {"rule": "Verdicts encode reversibility: APPROVE proceed, REQUEST-CHANGES fix first, BLOCK hard-to-reverse damage.", "source": "reviewer-preamble.md:65"},
+        {"rule": "Every finding cites file:line and the principle it violates.", "source": "reviewer-preamble.md:102"},
+        {"rule": "Full findings; a verdict alone is not a review.", "source": "reviewer-preamble.md:107"},
+        {"rule": "Last line exactly `VERDICT: APPROVE | REQUEST-CHANGES | BLOCK`, sent to the leader who dispatched you.", "source": "reviewer-preamble.md:112, :119-122"}
+      ]
+    }
+  }
+}

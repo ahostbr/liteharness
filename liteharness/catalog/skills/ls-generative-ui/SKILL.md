@@ -1,11 +1,28 @@
 ---
 name: ls-generative-ui
-description: "LiteSuite Generative UI — render interactive widgets inline in Frontier Chat / Sentinel Chat. Use prompt_widget when you need the user's input to continue (confirmations, forms, picks). Use render_widget for fire-and-forget displays (charts, stat cards, dashboards). Triggers on 'render widget', 'prompt widget', 'ls-generative-ui', 'show me a chart', 'ask the user', 'confirm before', 'show a form', or whenever a visual or interactive answer is clearer than prose."
+description: "LiteSuite Generative UI — render interactive widgets inline in Frontier Chat / the orchestrator Chat. CHAT PANES ONLY: a canvas terminal seat is refused and shows UI through Theater instead (the `theater` tool and the `ls-theater` skill). Use prompt_widget when you need the user's input to continue (confirmations, forms, picks). Use render_widget for fire-and-forget displays (charts, stat cards, dashboards). Triggers on 'render widget', 'prompt widget', 'ls-generative-ui', 'show me a chart', 'ask the user', 'confirm before', 'show a form', or whenever a visual or interactive answer is clearer than prose."
 ---
 
 # Generative UI
 
-Render interactive widgets directly inside the chat conversation. Two tools, three bands.
+Render interactive widgets directly inside a Frontier Chat or the orchestrator Chat conversation. Two tools, three bands.
+
+## Who can use this: Frontier Chat and the orchestrator Chat only
+
+`render_widget`, `prompt_widget` and `ui_render` work for **Frontier Chat** (every provider) and **the orchestrator Chat**. A **canvas
+terminal seat** (its tool process has `LITESUITE_LEAF_ID`) is refused with:
+
+> Terminal seats show UI through Theater: theater open ... (see the Theater skill). Quick yes/no: use AskUserQuestion.
+
+If you are a terminal seat:
+
+- **Anything visual, several questions, or uploads** → the `theater` tool (actions `open`, `question` with
+  `wait`, `media`, `status`, `help`) and the **Theater skill** (`ls-theater`, in `skills/ls-theater/`). Call `theater` with `action: "help"` for its
+  current arguments. The page opens in a new LiteSuite browser pane and each answer comes back to your inbox.
+- **A quick yes/no or pick-one** → `AskUserQuestion`.
+- **Show an image, video, audio or file** → `theater` `media`.
+
+Everything below is for Frontier Chat and the orchestrator Chat.
 
 ## Choose the right tool
 
@@ -28,7 +45,7 @@ When calling `prompt_widget`, you MUST provide:
 
 - `type` — `"catalog"` | `"html"` | `"specs"`
 - `requestId` — unique identifier per call. Generate `"widget-{8 random hex chars}"` (e.g. `"widget-7f3a9e2c"`). **Must be unique per call.**
-- `agentId` — your agent identifier (session UUID or `"sentinel-chat"` if unknown)
+- `agentId` — your registered session UUID; if unknown, resolve it before making an attributed request
 - `timeout` — optional; auto-expire after N milliseconds. Omit to wait indefinitely.
 
 Plus the band-specific fields below.
@@ -283,7 +300,7 @@ genui.CategoryBadge    { "category": "backend", "color": "blue" }
 
 ## Codex agents
 
-Codex agents get the same `render_widget` tool via MCP — hand them the companion reference in this skill's directory: `codex-generative-ui.md` (tool schema + band selection + examples in Codex-friendly form).
+A Codex seat in a canvas terminal is a terminal seat: it uses Theater (see the top of this file). For a Codex agent that reaches these tools from Frontier, the companion reference is `codex-generative-ui.md` in this skill's directory.
 
 ## Best practices
 

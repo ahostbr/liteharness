@@ -3,7 +3,7 @@
 The registry is one JSON file per agent, and a watcher heartbeat rewrites a
 record with tmp-write + `os.replace` (hooks.py:270-286). A `glob("*.json")` that
 runs inside that window comes back missing exactly the record being rewritten.
-REPRODUCED 2026-09-03 (Sentinel, `scratchpad/race_probe.py`, mechanism by
+REPRODUCED 2026-09-03 (the orchestrator, `scratchpad/race_probe.py`, mechanism by
 OpenBolt 6feaf389): 45,103 rewrites against 375,989 reads produced one listing
 short of the rewritten record. One such listing is enough for `cmd_send` to
 refuse a live id with "not registered ... Pass --force" — seen against a98678ea

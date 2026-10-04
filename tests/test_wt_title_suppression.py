@@ -13,7 +13,7 @@ class TestWtSegmentTitleFlags:
         session = {
             "session_id": "abc12345-dead-beef-1234-567890abcdef",
             "cli": "claude",
-            "cwd": "C:/Projects",
+            "cwd": "C:/workspace",
             "name": "TestSeat",
         }
         segment = _wt_segment(session)
@@ -28,7 +28,7 @@ class TestWtSegmentTitleFlags:
         session = {
             "session_id": "abc12345-dead-beef-1234-567890abcdef",
             "cli": "claude",
-            "cwd": "C:/Projects",
+            "cwd": "C:/workspace",
             "name": "OpenBolt",
         }
         title = _terminal_title(session)
@@ -38,7 +38,7 @@ class TestWtSegmentTitleFlags:
         session = {
             "session_id": "abc12345-dead-beef-1234-567890abcdef",
             "cli": "claude",
-            "cwd": "C:/Projects",
+            "cwd": "C:/workspace",
         }
         segment = _wt_segment(session)
         title_idx = segment.index("--title")

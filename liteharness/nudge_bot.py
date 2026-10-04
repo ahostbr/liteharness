@@ -2,7 +2,7 @@
 LiteHarness Nudge Bot — autonomous agent feedback loop.
 
 Watches the inbox for agent reports and auto-replies with pattern-matched
-encouragement, impersonating Sentinel. Keeps agents churning without
+encouragement, impersonating the orchestrator. Keeps agents churning without
 burning orchestrator context.
 
 Usage:
@@ -58,7 +58,7 @@ class LMStudioReplyProvider:
                 {
                     "role": "system",
                     "content": (
-                        "You are drafting one short LiteHarness Nudge reply as Sentinel. "
+                        "You are drafting one short LiteHarness Nudge reply on behalf of the configured orchestrator. "
                         "Reply only to the existing agent. Do not mention policies, do not "
                         "spawn agents, do not approve destructive actions, and do not include "
                         "shell commands. Keep it direct and under two sentences."
@@ -109,7 +109,7 @@ class NudgeBot:
         self.config_path = Path(config_path).expanduser()
         self.lmstudio = lmstudio or LMStudioConfig()
         self.lmstudio_provider = LMStudioReplyProvider(self.lmstudio) if self.lmstudio.enabled else None
-        self.sentinel_id: str = ""
+        self.sender_id: str = ""
         self.target_agents: list[str] = []  # empty = all agents
         self.rules: list[NudgeRule] = []
         self.escalation_keywords: list[str] = []
@@ -131,7 +131,18 @@ class NudgeBot:
         import yaml
 
         raw = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
-        self.sentinel_id = raw.get("sentinel_id", "")
+        if not isinstance(raw, dict):
+            raise ValueError("Nudge config must be a mapping with sender_id set to an orchestrator UUID")
+        allowed = {"sender_id", "target_agents", "escalation_keywords", "default_responses", "log_file", "rules"}
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported nudge config keys: {sorted(unknown)}. "
+                             "Migrate the sender UUID setting to sender_id; remove obsolete keys.")
+        sender_id = raw.get("sender_id", "")
+        if not sender_id:
+            raise ValueError("Nudge config requires sender_id: <existing orchestrator UUID>")
+        self._validate_sender(sender_id)
+        self.sender_id = sender_id
         self.target_agents = raw.get("target_agents", [])
         self.escalation_keywords = [k.lower() for k in raw.get("escalation_keywords", [])]
         self.default_responses = raw.get("default_responses", ["Copy. Continue working."])
@@ -150,8 +161,8 @@ class NudgeBot:
 
         self._config_mtime = self.config_path.stat().st_mtime
         mode = f"targeting {len(self.target_agents)} agents" if self.target_agents else "all agents"
-        logger.info("Config loaded: %d rules, %d escalation keywords, %s, sentinel=%s",
-                     len(self.rules), len(self.escalation_keywords), mode, self.sentinel_id[:8])
+        logger.info("Config loaded: %d rules, %d escalation keywords, %s, sender=%s",
+                     len(self.rules), len(self.escalation_keywords), mode, self.sender_id[:8])
 
     def _check_config_reload(self):
         try:
@@ -232,15 +243,29 @@ class NudgeBot:
         except (OSError, json.JSONDecodeError):
             return False
 
+    def _validate_sender(self, sender_id):
+        # Existing presence store is authoritative; display names never route replies.
+        import uuid
+        try:
+            sender = str(uuid.UUID(sender_id))
+            if sender != sender_id:
+                raise ValueError("sender_id must be a canonical UUID")
+            presence = json.loads((config.get_root() / "agents" / f"{sender}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("sender_id requires an existing orchestrator UUID presence") from exc
+        if not isinstance(presence, dict) or presence.get("agent_id") != sender or presence.get("tier") != "orchestrator":
+            raise ValueError("sender_id presence must identify the same orchestrator UUID")
+
     def _send_reply(self, to_agent: str, body: str):
-        inbox.send(from_agent=self.sentinel_id, to_agent=to_agent, body=body)
+        self._validate_sender(self.sender_id)
+        inbox.send(from_agent=self.sender_id, to_agent=to_agent, body=body)
 
     def run(self):
         from .hooks import _create_watcher
 
-        logger.info("Nudge bot online — watching inbox as Sentinel (%s)", self.sentinel_id[:8])
+        logger.info("Nudge bot online — watching inbox on behalf of the configured orchestrator (%s)", self.sender_id[:8])
         mode = "lmstudio" if self.lmstudio.enabled else "template"
-        print(f"[NUDGE-BOT] Online. Impersonating Sentinel ({self.sentinel_id[:8]}). Config: {self.config_path}. Mode: {mode}", flush=True)
+        print(f"[NUDGE-BOT] Online. Replying on behalf of the configured orchestrator ({self.sender_id[:8]}). Config: {self.config_path}. Mode: {mode}", flush=True)
 
         watcher = _create_watcher(str(inbox.INBOX_ROOT))
 
@@ -268,12 +293,12 @@ class NudgeBot:
                     to = msg.get("to", "")
                     sender = msg.get("from", "")
 
-                    # Only handle messages addressed to Sentinel or broadcast
-                    if to != self.sentinel_id and to != "broadcast":
+                    # Only handle messages addressed to the orchestrator or broadcast
+                    if to != self.sender_id and to != "broadcast":
                         continue
 
                     # Never reply to self
-                    if sender == self.sentinel_id:
+                    if sender == self.sender_id:
                         self.seen_ids.add(msg_id)
                         continue
 

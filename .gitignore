@@ -43,16 +43,16 @@ liteharness/catalog/skills/streaming-sl-obs/
 liteharness/catalog/skills/ls-release-litesuite/
 
 # Operator-internal architecture reference — never vendor into the public catalog.
-# Ryan's ruling 2026-08-16. Also removed from PUBLIC_SKILLS and added to
+# Catalog policy: also removed from PUBLIC_SKILLS and added to
 # PRIVATE_SKILLS in scripts/sync_catalog.py; the gitignore alone would not have
 # stopped the sync from vendoring it.
 liteharness/catalog/skills/ls-arch-opus/
 
 # The whole ls-arch* family is operator-internal — it reads LiteSuite's own
-# docs/architecture/ tree. Ryan's ruling 2026-08-16: none of it ships until
-# end-user arch docs are generated per project by that user's own Sentinel.
+# docs/architecture/ tree. None of it ships until end-user architecture docs
+# are generated per project by that user's own orchestrator.
 # Also removed from PUBLIC_SKILLS and added to PRIVATE_SKILLS in
 # scripts/sync_catalog.py — the gitignore alone does not stop the vendor step.
+# ls-arch-gen is public and is NOT excluded here (see PUBLIC_SKILLS).
 liteharness/catalog/skills/ls-arch/
 liteharness/catalog/skills/ls-arch-fable/
-liteharness/catalog/skills/ls-arch-gen/

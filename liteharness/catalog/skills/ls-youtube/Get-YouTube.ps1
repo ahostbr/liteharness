@@ -1,6 +1,6 @@
 # Get-YouTube.ps1 — Full pipeline: metadata, VIDEO, subtitles, parse, FRAMES, DB save, output
 #
-# T894, RYAN 2026-09-18: "grab this video down the vdieo and transript . extract
+# T894, User request 2026-09-18: "grab this video down the vdieo and transript . extract
 # the frames with ffmpeg ... then edit the skill to include this workflow and
 # rename it only ls-youtube drop the rest".
 #
@@ -23,7 +23,7 @@ param(
     [string]$MediaRoot = (Join-Path $HOME '.litesuite/youtube'),
 
     # Frames per second handed to ffmpeg's fps filter. 1 = one frame per second
-    # of runtime (846 frames for a 14:06 video, measured on Ryan's URL).
+    # of runtime (846 frames for a 14:06 video, measured on the reference URL).
     [double]$Fps = 1,
 
     # Seconds between frames, as an alternative spelling of -Fps for sparse
@@ -139,7 +139,7 @@ try {
     }
 
     # ── 2b. Download the video ────────────────────────────────────────────────
-    # RYAN: "grab this video down the vdieo". Muxed mp4 preferred, falling back
+    # User request: "grab this video down the vdieo". Muxed mp4 preferred, falling back
     # to bestvideo+bestaudio and then to whatever exists, because a 1080p+ stream
     # on YouTube is video-only and the plain `b[ext=mp4]` would silently hand
     # back a lower-resolution copy instead. Measured on 1vw39QCcQjg: 1920x1080,
@@ -175,7 +175,7 @@ try {
     }
 
     # ── 2c. Extract frames with ffmpeg ────────────────────────────────────────
-    # RYAN: "extract the frames with ffmpeg". One jpg per sampled instant into
+    # User request: "extract the frames with ffmpeg". One jpg per sampled instant into
     # <video_id>/frames/%05d.jpg. -q:v 2 is ffmpeg's near-best JPEG quality; the
     # frames are for reading slides and UI out of a screencast, and the default
     # quantiser blurs small text.

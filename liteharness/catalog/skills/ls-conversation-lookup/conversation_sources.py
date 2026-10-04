@@ -1,5 +1,6 @@
 """Provider adapters for local conversation archives. Never modifies source logs."""
 import json
+import hashlib
 import os
 import re
 import time
@@ -65,15 +66,67 @@ def conversation_files():
                 yield file
 
 
-def records(file):
-    with open(file, encoding='utf-8', errors='replace') as stream:
-        for line in stream:
-            try:
-                record = json.loads(line)
-            except (ValueError, TypeError):
-                continue  # Active logs can end in a torn JSON record.
-            if isinstance(record, dict):
-                yield record
+def source_signature(file):
+    stat = Path(file).stat()
+    return f"{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+
+
+_RECORD_END = re.compile(br'\r\n|\n|\r(?!$)')
+
+
+def raw_records(file, budget=None):
+    """Linear universal-newline segmentation, retaining offsets and exact bytes."""
+    with open(file, 'rb') as stream:
+        buffer, offset, number, eof = bytearray(), 0, 0, False
+        start, scan_from = 0, 0
+        while True:
+            # Delay a trailing CR until the next byte disambiguates CRLF.
+            match = _RECORD_END.search(buffer, scan_from)
+            if match:
+                end = match.end()
+            elif eof and len(buffer) > start:
+                end = len(buffer)
+            else:
+                end = None
+            if end is not None:
+                raw = bytes(buffer[start:end])
+                number += 1
+                yield number, offset + start, raw
+                start = scan_from = end
+                # Compact only at chunk boundaries, not once per small record.
+                if start == len(buffer) or start >= 65536:
+                    del buffer[:start]
+                    offset += start
+                    start = scan_from = 0
+                continue
+            if eof:
+                return
+            scan_from = max(start, len(buffer) - 1)
+            if budget is not None:
+                if budget['remaining'] <= 0 or time.monotonic() >= budget['deadline']:
+                    return
+                amount = min(65536, budget['remaining'])
+            else:
+                amount = 65536
+            block = stream.read(amount)
+            if budget is not None:
+                budget['remaining'] -= len(block)
+            buffer.extend(block)
+            eof = not block
+
+
+def records(file, budget=None):
+    signature = source_signature(file)
+    for number, offset, raw in raw_records(file, budget):
+        try:
+            record = json.loads(raw.decode('utf-8', errors='replace'))
+        except (ValueError, TypeError):
+            continue  # Active logs can end in a torn JSON record.
+        if isinstance(record, dict):
+            record.update({'_line_number': number, '_byte_offset': offset,
+                           '_byte_length': len(raw), '_record_hash': hashlib.sha256(raw).hexdigest(),
+                           '_source_signature': signature})
+            yield record
 
 
 def identity(file):
@@ -100,14 +153,14 @@ def identity(file):
     return provider, file.stem, project
 
 
-def normalized_records(file):
+def normalized_records(file, budget=None):
     """Adapt Codex response items to Claude's message envelope.
 
     Ignore Codex event_msg mirrors, system/developer instructions and reasoning
     records. response_item is the authoritative source for visible messages and
     tool exchanges, so messages are not indexed twice.
     """
-    for number, record in enumerate(records(file)):
+    for number, record in enumerate(records(file, budget=budget)):
         kind = record.get('type')
         if kind in ('user', 'assistant'):
             yield record
@@ -140,4 +193,5 @@ def normalized_records(file):
             continue
         yield {'type': role, 'message': {'content': content},
                'timestamp': record.get('timestamp', ''),
+               **{key: value for key, value in record.items() if key.startswith('_')},
                'uuid': item.get('id') or f"{item.get('call_id', 'message')}:{number}"}

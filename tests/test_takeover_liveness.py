@@ -76,8 +76,11 @@ def test_ghost_sharing_a_live_pid_is_NOT_live():
     warm. Only the later registration wins.
     """
     with _Root() as root:
-        _write_agent(root, "ghost", registered_at=_now(-60), last_seen=_now())
-        _write_agent(root, "successor", registered_at=_now(0))
+        # Both registered AFTER this process started (T1027: an earlier stamp on a
+        # live pid is a REUSED pid, which would make "ghost" dead for the wrong
+        # reason); only their order matters here.
+        _write_agent(root, "ghost", registered_at=_now(0), last_seen=_now())
+        _write_agent(root, "successor", registered_at=_now(1))
         assert cli._agent_record_live("ghost") is False, (
             "the dead predecessor still reads as LIVE — the probe is measuring the claimant"
         )
@@ -96,8 +99,8 @@ def test_a_lone_live_record_is_still_live():
 def test_two_records_on_DIFFERENT_pids_do_not_supersede_each_other():
     """The rule is per-pid. An unrelated agent must never retire someone's name."""
     with _Root() as root:
-        _write_agent(root, "a", registered_at=_now(-60), session_pid=os.getpid())
-        _write_agent(root, "b", registered_at=_now(0), session_pid=os.getpid() + 1)
+        _write_agent(root, "a", registered_at=_now(0), session_pid=os.getpid())
+        _write_agent(root, "b", registered_at=_now(1), session_pid=os.getpid() + 1)
         assert cli._agent_record_live("a") is True
 
 
@@ -114,8 +117,8 @@ def test_a_record_with_no_session_pid_is_never_grouped():
 def test_an_exited_successor_does_not_supersede():
     """A row that has already declared `exited_at` cannot retire anyone."""
     with _Root() as root:
-        _write_agent(root, "holder", registered_at=_now(-60))
-        _write_agent(root, "dead_later", registered_at=_now(0), exited_at=_now(0))
+        _write_agent(root, "holder", registered_at=_now(0))
+        _write_agent(root, "dead_later", registered_at=_now(1), exited_at=_now(1))
         assert cli._agent_record_live("holder") is True
 
 

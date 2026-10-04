@@ -142,6 +142,14 @@ def _pid_alive(pid: int | None) -> bool:
         return False
 
 
+#: How long a record with an ALIVE owning pid still holds its name. ONE bar, read
+#: by is_name_taken AND by `register --takeover`'s liveness check (T1027): the two
+#: used to disagree (43200 s here, 600 s there), so a holder quiet for 700 s was
+#: "taken" to a plain register and a "dead ghost" to --takeover, which evicted it.
+#: The bound exists only because a pid can be reused after its owner died.
+NAME_HELD_SECONDS = 43200
+
+
 def is_name_taken(name: str, exclude_id: str | None = None) -> str | None:
     """Check if a name is already in use by a live agent. Returns the agent_id or None.
 
@@ -167,10 +175,16 @@ def is_name_taken(name: str, exclude_id: str | None = None) -> str | None:
             if data.get("exited_at"):
                 continue
             last_seen = datetime.fromisoformat(data.get("last_seen", "")).timestamp()
-            if now - last_seen > 43200:
+            if now - last_seen > NAME_HELD_SECONDS:
                 continue
             session_pid = data.get("session_pid")
             if session_pid and not _pid_alive(session_pid):
+                continue
+            # T1027 (Dijkstra L1): a REUSED pid is alive but not the holder's —
+            # the same guard hooks applies before adopting a record. Imported in
+            # the function, the way hooks imports naming, to keep the two acyclic.
+            from .hooks import _record_belongs_to_process
+            if session_pid and not _record_belongs_to_process(agent_id, session_pid):
                 continue
             agent_name = get_name(agent_id)
             if agent_name.lower() == name.lower():

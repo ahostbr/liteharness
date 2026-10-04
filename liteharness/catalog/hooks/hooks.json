@@ -1,4 +1,7 @@
 {
+  "modules": [
+    "./register.mjs"
+  ],
   "hooks": {
     "SessionStart": [
       {
@@ -373,8 +376,7 @@
           {
             "type": "command",
             "command": "python -m liteharness.hooks worktree-create",
-            "timeout": 10000,
-            "async": true
+            "timeout": 10000
           }
         ]
       },

@@ -119,7 +119,7 @@ def _build_summary_prompt(
     task_description: str,
     summary_type: str,
     agent_name: str | None = None,
-    user_name: str = "Ryan",
+    user_name: str = "",
 ) -> str:
     """Build the TTS summary prompt."""
     if summary_type == "stop":
@@ -129,13 +129,15 @@ def _build_summary_prompt(
     else:
         context = "The user's attention is needed."
 
+    address = (f'ALWAYS start with "{user_name}, " (name followed by comma)'
+               if user_name else "Do not address the listener by name; use a neutral announcement")
     return f"""Generate a brief TTS announcement summarizing COMPLETED work.
 
 {task_description}
 Context: {context}
 
 Requirements:
-- ALWAYS start with "{user_name}, " (name followed by comma)
+- {address}
 - Under 20 words total
 - Summarize the SPECIFIC outcome — mention key details from the result
 - Use past tense — work is DONE
@@ -149,7 +151,7 @@ def generate_summary(
     task_description: str,
     summary_type: str,
     agent_name: str | None = None,
-    user_name: str = "Ryan",
+    user_name: str = "",
     port: int = _DEFAULT_PORT,
 ) -> str | None:
     """Generate AI summary via LiteSuite's /v1/llm/generate endpoint."""
@@ -455,7 +457,10 @@ def main() -> None:
     settings = get_settings()
     tts_config = settings.get("tts", {})
     smart_summaries = tts_config.get("smartSummaries", False)
-    user_name = tts_config.get("userName", "Ryan")
+    user_name = tts_config.get("userName", "")
+    user_name = user_name.strip() if isinstance(user_name, str) else ""
+    if user_name == "Your Name":
+        user_name = ""
     voice = tts_config.get("voice") or args.voice or "en-GB-SoniaNeural"
 
     # Read stdin hook context
@@ -494,17 +499,12 @@ def main() -> None:
     # Enforce userName prefix on AI-generated messages
     if message and user_name and user_name != "Your Name":
         if not message.startswith(user_name):
-            stripped = message
-            if stripped.lower().startswith("ryan,"):
-                stripped = stripped[5:].lstrip()
-            elif stripped.lower().startswith("ryan "):
-                stripped = stripped[4:].lstrip()
-            message = f"{user_name}, {stripped}"
+            message = f"{user_name}, {message}"
 
     # Fall back to provided fallback message
     if not message:
         fallback = args.fallback
-        if fallback and not fallback.startswith(user_name):
+        if fallback and user_name and not fallback.startswith(user_name):
             message = (
                 f"{user_name}{fallback}"
                 if fallback.startswith(",")

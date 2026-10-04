@@ -2,7 +2,7 @@
 
 The three modes are deliberately unequal in risk, and the tests are weighted the
 same way: `print` is inert, `os` touches the Windows task scheduler, and `app`
-writes Ryan's live scheduler config. Everything that writes is exercised against
+writes the user's live scheduler config. Everything that writes is exercised against
 an injected home and an injected command runner, never the real ones.
 
 🔴 THE LOCK IS THE POINT OF THE `app` MODE. LiteSuite's scheduler and this CLI

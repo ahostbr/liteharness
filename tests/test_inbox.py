@@ -20,7 +20,7 @@ class InboxSendTests(unittest.TestCase):
             ):
                 inbox.send(
                     "codex-123",
-                    "sentinel",
+                    "harbor",
                     "hello",
                     cli="codex-desktop",
                     surface="desktop",

@@ -1,5 +1,32 @@
 # LiteHarness
 
+## LiteTUI control (third GUI-RPC client)
+
+```text
+python -m liteharness.cli litetui --help
+python -m liteharness.cli litetui --agent-id <full-UUID> status
+python -m liteharness.cli litetui --agent-id <full-UUID> load <model> --ctx 8192
+python -m liteharness.cli litetui spawn --split --resume <Name> --cwd <repo-root>
+```
+
+Verbs: spawn, status, load/unload, model, thinking, context, backend, engine
+start/stop/status, compact, reconnect, send and read. Target flags precede the
+verb. Attachment uses the matching LiteTUI build's existing authenticated GUI
+JSONL dispatcher; it does not type into a terminal or create a replacement.
+Spawn delegates to the existing spawn/resume owner (including named/live-seat
+rules), not an RPC launch operation. A fresh spawn's explicit effort is checked
+against the parent's connected catalogue, or LiteTUI's read-only pinned/cache
+capability reader when no endpoint is advertised. Unknown capability and a
+connected refusal are final; there is no duplicate model list here.
+
+Load/context/start delegate to LiteTUI's existing backend owners and VRAM guard;
+this client has no second gate or bypass. A per-runtime token authenticates the
+loopback endpoint under OS-user-local trust, not isolation from same-user
+processes. Timeouts after dispatch are ambiguous: inspect state, never retry
+a mutation automatically. There is no cross-connection replay/exactly-once
+cache. Live CLI attachment and positive model/engine operations require separate
+runtime authorization; fake-peer tests alone do not establish those proofs.
+
 **Portable multi-CLI agent orchestration engine.** The Python runtime + universal installer for the LiteHarness ecosystem.
 
 ## What this package is
@@ -56,6 +83,28 @@ liteharness install --cli cursor --path E:/portable/.cursor   # Custom dir
 | claude | (use `liteharness-plugin` via Claude's `/plugin install` instead) | |
 
 **All targets are opt-in.** The setup wizard auto-detects which CLIs you have installed and pre-ticks those — you decide what to install where. For CLIs not auto-detected, the wizard accepts a custom install dir via filepicker.
+
+## Card tiers and review chain
+
+Before **every new card**, recommend a process tier and ask the human through your question
+channel to choose **both** the tier and the card's thinking level. The latter depends on
+available credits and usage, not the process tier; respect any active model/thinking floor.
+Record both choices on the card when supported.
+
+| Tier | Name | Team and review | Fits | Time-box |
+|---|---|---|---|---|
+| **1** | Quick | One seat builds and self-reviews; leader reads the diff and merges | Label, guard, config, test fix or doc; about 30 lines or fewer, one area | 30 minutes |
+| **2** | Standard | One seat thinks, builds, self-reviews; leader reviews the diff, at most one fix round | Feature slice or rooted bug, one repo | 2 hours |
+| **3** | Deep | Worker + thinker(s) + separate reviewer seat; reviewer VERDICT | Security, deletion, data, several repos, or anything the human must see to believe | Half a day |
+
+Run **only touched tests, never full suites**, at every tier. Check the human's words against the result before
+merge (one line at tiers 1–2; full intent gate at tier 3). Nothing is done until the human
+has seen it. A card that does not converge in its time-box goes back to the human for
+**ship / descope / drop**, not an unbounded review chain.
+
+The task database belongs to LiteSuite's `litesuite-tools`; this public runtime does not
+ship a second task store. Existing Claude Code task mirrors are recorded without a tier
+until the human assigns one through the board.
 
 ## Quick Start (runtime)
 
@@ -131,7 +180,7 @@ Every agent gets a deterministic two-word name derived from its UUID (e.g., Swif
 
 ```bash
 liteharness discover
-# [active] Sentinel (fa88c542) claude-code/opus — 0s ago
+# [active] the orchestrator (fa88c542) claude-code/opus — 0s ago
 # [active] PrimeFlint (b2db8be8) claude-code/opus — 7m ago
 ```
 

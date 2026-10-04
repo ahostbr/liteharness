@@ -1,5 +1,11 @@
 # Generative UI — render_widget (Codex companion)
 
+> **Frontier Chat / the orchestrator Chat only.** In a canvas terminal seat (`LITESUITE_LEAF_ID` set) these tools refuse with:
+> "Terminal seats show UI through Theater: theater open ... (see the Theater skill). Quick yes/no: use
+> AskUserQuestion." There, use the `theater` tool (actions `open`, `question` with `wait`, `media`,
+> `status`, `help`; call `help` for its current arguments) and the Theater skill (`ls-theater`), or `AskUserQuestion`
+> for a quick yes/no.
+
 You have access to a `render_widget` MCP tool that renders interactive widgets inline in the chat conversation. For BLOCKING interactions (confirmations, forms, picks) the sibling tool `prompt_widget` shares the same shape and additionally requires `requestId` + `agentId` — see SKILL.md in this directory.
 
 ## Tool Schema

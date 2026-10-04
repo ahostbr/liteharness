@@ -96,7 +96,7 @@ Document the current contract as **two shipped defaults plus preserved valid
 user overrides**. Installer and shipped config already agree on that contract.
 Do not silently strip the third hook or make all users inherit this machine's
 customization. Adding UserPromptSubmit/check to the defaults is a separate
-behavior decision for Ryan; this audit does not make it on his behalf.
+behavior decision for the user; this audit does not make it on his behalf.
 
 No production code change is justified by the observed event-count difference.
 The existing targeted preservation/idempotence tests should remain the gate.

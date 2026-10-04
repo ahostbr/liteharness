@@ -39,7 +39,7 @@ def compose(body: str, **kw) -> str:
 
 
 def test_short_body_is_passed_through_verbatim():
-    body = "ALIVE. cwd C:/Projects/LiteTUI, tree clean, nothing in flight."
+    body = "ALIVE. cwd C:/workspace/LiteTUI, tree clean, nothing in flight."
     out = compose(body)
 
     assert body in out, "a body that fits must appear unaltered"

@@ -29,7 +29,7 @@ class Client:
             raise delivery.DeliveryError("reply lost after submit")
 
 
-def envelope(root, ident="message-1", target="recipient", sender="sentinel"):
+def envelope(root, ident="message-1", target="recipient", sender="harbor"):
     folder = root / "inbox" / "new"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{ident}.json"

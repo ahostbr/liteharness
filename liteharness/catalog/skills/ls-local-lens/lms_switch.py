@@ -4,7 +4,7 @@ LMS Switch — LM Studio model manager for Local Lens.
 
 🔴 THIS SCRIPT SHIPS NO MODEL LINEUP. It asks LM Studio what exists, every run.
 
-Ruling, Ryan 2026-08-23: "just ask me what model and context i want at the time
+Ruling, the user 2026-08-23: "just ask me what model and context i want at the time
 ... dont hardcode models."
 
 The version this replaces carried a `MODELS` registry (keys, default contexts and

@@ -1,3 +1,5 @@
+> Legacy reference only. Generate from the resolved shipped `default.md`; do not use this competing template. Current fleet/merge doctrine outranks its legacy instructions.
+
 # {{TITLE}} — Orchestrator Mode
 
 > _"{{KERNEL_QUOTE}}"_
@@ -82,7 +84,7 @@ When a worker reports DONE:
 
 - Everything flows automatically including the final PR
 - Polymathic reviewers inspect the PR diff
-- All APPROVE → auto-merge
+- Required review approval → current human intent gate before merge; merged remains reviewing until human look
 - Any BLOCK → pause and notify human (BLOCK always escalates)
   {{HITL_OFF_EXTRAS}}
 

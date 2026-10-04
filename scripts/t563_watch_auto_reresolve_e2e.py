@@ -6,7 +6,7 @@ proves the arm-time guard; this proves the part that guard cannot reach.
 
 🔴 THE ORDER IS THE WHOLE TEST, and it is the opposite of T418's. That script
 registers both rows and THEN arms, so the guard has its answer waiting. The
-failure Ryan hit does it the other way round:
+failure the user hit does it the other way round:
 
     08:58:42  claude.exe 29436 starts
     08:58:46  watch-auto arms on the STARTUP uuid        <- 4 s in
@@ -23,7 +23,7 @@ build the world first.
 honours it first (hooks.py:332) precisely so a non-Claude parent can name the
 owning process; without it the ancestor walk looks for claude.exe and finds this
 script instead. Pinning it makes the watcher and both registrations agree about
-WHICH pid is being taken over — which is the real condition on Ryan's box, where
+WHICH pid is being taken over — which is the real condition on the user's box, where
 they agree because they share one claude.exe.
 
 Usage:  python scripts/t563_watch_auto_reresolve_e2e.py [--gap-seconds 20] [--runs 2]
@@ -126,7 +126,7 @@ def one_run(gap_seconds: float, run_no: int) -> bool:
                 print("  UNSOUND: the watcher did not arm on the startup id; nothing was tested")
                 return False
 
-            # ── the gap. On Ryan's box this was 21 seconds. ──────────────────
+            # ── the gap. On the user's box this was 21 seconds. ──────────────────
             time.sleep(gap_seconds)
             register(home, RESUMED, "resume", session_pid)
             print(f"  run {run_no}: takeover registered {gap_seconds:.0f}s after the arm")

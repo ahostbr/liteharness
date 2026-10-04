@@ -289,7 +289,7 @@ class SupersedesIsAReferenceTests(unittest.TestCase):
 
     def test_a_row_the_validating_reader_would_drop_is_still_a_target(self) -> None:
         """⚠️ THE CHECK READS RAW LINES ON PURPOSE, and this is not hypothetical:
-        measured 2026-09-18 on the live C:/Projects store, 21 of 502 rows carry
+        measured 2026-09-18 on the live C:/workspace store, 21 of 502 rows carry
         PROSE in `outcome` (713-2253 chars) and are rejected by the validating
         reader. Those rows are real records. A reference check built on a
         validating view would refuse every retirement naming one of them.

@@ -65,6 +65,25 @@ python -m liteharness.cli send <leader-id> "BLOCKED: <reason>" --from $LITEHARNE
 - Worker preamble: `${CLAUDE_SKILL_DIR}/../../prompts/preambles/worker-preamble.md`
 - Cognitive architectures: `${CLAUDE_SKILL_DIR}/../../prompts/cognitive-architectures/workers/`
 
+## Source-backed intent carry
+
+Read `lst run tasks action=intent operation=read task_id=<card>` before building.
+Carry exact quote IDs/text, session/timestamp, current revision and numbered clause
+IDs into the brief. Label clause wording PROPOSED until the user confirms it in UI;
+a card title, assistant repetition or search hit is not raw human source evidence.
+Use the existing conversation lookup for candidates and validate raw human spans.
+Missing raw archives mean explicit no-source, never invented the user intent.
+
+Map EVERY clause to file:line/test evidence and disclose remaining misses. Record
+actual builder identity/model/family/thinking and diff SHA-256. The product blind
+intent review receives ONLY clauses + diff and requires an independent different
+model family; a mission's same-family code review is not that ledger gate. Agree
+per clause with the review. Candidate-ready requires all MET, current revision/
+diff and builder agreement; it is not merge authority or the user outcome ticks.
+the user alone confirms/ticks by explicit renderer clicks ('confirmed in UI', not
+proof of authentication). Never call confirm/tick from tools/CLI/bridge, and do
+not equate a model's MET verdict with a human tick.
+
 ## Work Protocol
 
 1. Execute assigned task

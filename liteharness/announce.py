@@ -1,6 +1,6 @@
 """Tell every live orchestrator when a seat joins the board or takes a new name.
 
-Ryan, 2026-09-12 11:5x: a second Codex Desktop task (SilentCrypt) had been
+the user, 2026-09-12 11:5x: a second Codex Desktop task (SilentCrypt) had been
 editing LiteSuite for an hour before the orchestrator saw it - on a screenshot,
 not on the board. `discover` answers when asked; nothing PUSHED the arrival.
 "add something to registration of new agents that auto alerts the orch".

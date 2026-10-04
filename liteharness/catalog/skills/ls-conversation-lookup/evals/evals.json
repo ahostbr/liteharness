@@ -20,5 +20,7 @@
   { "query": "run the test suite and fix failures", "should_trigger": false },
   { "query": "help me plan the authentication system", "should_trigger": false },
   { "query": "what's on my screen right now", "should_trigger": false },
-  { "query": "consult the polymaths about this architecture", "should_trigger": false }
+  { "query": "consult the polymaths about this architecture", "should_trigger": false },
+  { "query": "find exact Widget.render() history and cite JSONL path and line", "should_trigger": true },
+  { "query": "search prior conversations and give an evidence packet with coverage and unknowns", "should_trigger": true }
 ]

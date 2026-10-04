@@ -1,13 +1,24 @@
 {
-  "source_repo": "ahostbr/liteharness-plugin",
-  "source_path": "C:\\Projects\\LiteSuite\\resources\\liteharness-plugin",
-  "synced_at": "2026-08-18T16:26:24.094008+00:00",
+  "source_repo": "ahostbr/LiteSuite",
+  "source_commit": "186b41b682ffd5531cc9a3a31123c8690c2a97c7",
+  "source_path": "resources/liteharness-plugin",
+  "kept_from_catalog": {
+    "ls-draw": "catalog-only, e9cd75b",
+    "ls-consult": "ahead of source, 90410bf 20fe0e7",
+    "ls-conversation-lookup": "ahead of source, 1173e8e",
+    "ls-gen-image-or-video": "ahead of source, dbaf186 f38e0d9",
+    "ls-liteharness": "ahead of source, 1380f18 ecb3488",
+    "ls-mark": "ahead of source, ad8456e c9ee13e",
+    "ls-youtube": "ahead of source, 3f49aef"
+  },
+  "synced_at": "2026-09-26T03:15:51.251824+00:00",
   "subtrees": [
     "skills",
     "agents",
     "commands",
     "hooks"
   ],
-  "file_count": 396,
-  "hash": "27e5d5257a76"
+  "file_count": 417,
+  "hash": "5b2faea0ce78",
+  "release_overlay": "Identity-portable runtime/doctrine and reconciled onboarding template; base source and retained catalog origins recorded above. Hash describes this release snapshot, not an untouched source archive."
 }

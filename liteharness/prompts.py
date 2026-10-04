@@ -6,7 +6,7 @@ every agent to "read your tier preamble before acting" without saying where, no 
 code loaded them, and the TS spawner that did load them (a) pointed at a directory absent
 from packaged builds and (b) is dormant (worker_cli=litecode). Verified 2026-08-07.
 
-Two delivery modes (Ryan's ruling, 2026-08-07 — "liteharness essentially has two modes"):
+Two delivery modes (the user's ruling, 2026-08-07 — "liteharness essentially has two modes"):
 
   litesuite   — the agent runs INSIDE a LiteSuite pane (bridge token / pane id present).
                 LiteSuite itself teaches app operation via the Spatial Bootstrap cheatsheet
@@ -52,6 +52,9 @@ FALLBACK_TIER_FILE = "preambles/worker-preamble.md"
 #: Delivered in BOTH modes — the harness methodology (tiers, task board, branching,
 #: commit trailers, HITL).
 ALWAYS_FILES = ["bootstrap-harness.md"]
+
+#: App-only doctrine: standalone seats may have neither the canvas nor this file.
+LITESUITE_FILES = ["canvas-display.md"]
 
 #: standalone-only doctrine layer, per tier ("the whole litesuite prompts" — outside
 #: LiteSuite these are unreachable by path, so they ride inline).
@@ -120,9 +123,9 @@ def resolve_prompts_dir() -> Tuple[Optional[Path], str]:
     # SIBLING checkout. The walk-up above only fires when this package sits INSIDE
     # LiteSuite, which was true while it lived at LiteSuite/packages/liteharness and
     # stopped being true the moment it moved to its own repo (2026-08-12). From
-    # C:\Projects\liteharness-oss the walk-up looks for C:\Projects\resources\... and
+    # <workspace>/liteharness-oss the walk-up looks for <workspace>/resources/... and
     # C:\resources\..., neither of which exists, so a dev box silently lost its repo
-    # root and fell through to the packaged install - which still ships ryan.md.
+    # root and fell through to the packaged install - which still ships the user.md.
     # Caught by diagnose() during the merge, not by any test: every resolution still
     # "worked", it just answered from the wrong tree.
     for parent in list(here.parents)[:8]:
@@ -176,7 +179,7 @@ def resolve_cognitive_file(name: str, tier: str | None = None) -> Optional[Path]
     # MUST use the same slug function the WRITE path uses (resolve_orchestrator_target).
     # A bare .lower() matches it for single-word names and DIVERGES for every multi-word
     # one: "The Warden" is written as `the-warden.md` and was looked up as `the warden.md`,
-    # which silently fell through to the tier default. Invisible for "Sentinel" — the one
+    # which silently fell through to the tier default. Invisible for "the orchestrator" — the one
     # name the author tested — and broken for the first user who picks two words.
     slug = orchestrator_slug(name)
     if not name or not name.strip():
@@ -254,7 +257,7 @@ def user_prompts_dir() -> Path:
     So the entire output of the user's interview was being written into a directory a
     package manager owns. On the next `plugin update` the architecture is orphaned and
     verify_orchestrator_identity() silently starts returning the SHIPPED DEFAULT for an
-    orchestrator that worked yesterday — the ryan.md failure again, with TIME as the axis
+    orchestrator that worked yesterday — the the user.md failure again, with TIME as the axis
     instead of naming.
 
     ⭐⭐ The tell was an asymmetry already in this module: resolve_skill_target() writes to
@@ -505,7 +508,11 @@ def compose(tier: str, mode: str) -> str:
     else:
         sections.append(_fill_slots(body))
 
-    for rel in ALWAYS_FILES + (STANDALONE_EXTRAS.get(tier_key, []) if mode == "standalone" else []):
+    mode_files = (
+        LITESUITE_FILES if mode == "litesuite"
+        else STANDALONE_EXTRAS.get(tier_key, []) if mode == "standalone" else []
+    )
+    for rel in ALWAYS_FILES + mode_files:
         text = _read(prompts_dir, rel)
         if text is None:
             missing.append(rel)
@@ -536,6 +543,43 @@ def compose(tier: str, mode: str) -> str:
     return header + "\n\n" + "\n\n---\n\n".join(sections)
 
 
+TIER_CARDS_FILE = Path(__file__).with_name("tier_cards.json")
+
+#: the user's ceiling for what a compaction re-injects: "A <=2 KB tier card + pointer".
+TIER_CARD_MAX_BYTES = 2048
+
+
+def tier_card(tier: str) -> str:
+    """The <=2 KB card SessionStart(source=compact) prints instead of the full doctrine.
+
+    Composed from tier_cards.json, so ratified wording is a one-file edit: the LOOP
+    (only where the tier's include_loop is true), the tier's own five rules, and the
+    pointer to the full doctrine plus the command that reprints it. A tier with no
+    entry gets the pointer alone.
+    """
+    import json
+
+    data = json.loads(TIER_CARDS_FILE.read_text(encoding="utf-8"))
+    key = (tier or "worker").strip().lower()
+    entry = data.get("tiers", {}).get(key, {})
+    lines = [f"## Tier card: {key} (after compaction; the full doctrine is one Read away)"]
+    if entry.get("include_loop"):
+        lines.append("THE LOOP (outranks everything):")
+        lines += [f"{i}. {r['rule']}" for i, r in enumerate(data.get("loop", []), 1)]
+    if entry.get("rules"):
+        lines.append(f"Your {key} rules:")
+        lines += [f"{i}. {r['rule']}" for i, r in enumerate(entry["rules"], 1)]
+    prompts_dir, source = resolve_prompts_dir()
+    doctrine = entry.get("doctrine") or TIER_FILES.get(key) or FALLBACK_TIER_FILE
+    if prompts_dir is not None:
+        where = f"{prompts_dir / doctrine} and {prompts_dir / ALWAYS_FILES[0]}"
+    else:
+        where = f"<prompt library not found: {source}>"
+    lines.append(f"Full doctrine: {where}. "
+                 f"Reprint it with your architecture: python -m liteharness.hooks doctrine")
+    return "\n".join(lines)
+
+
 def emit(tier: str, litesuite_hint: Optional[bool] = None) -> None:
     """Print the composed preamble into SessionStart stdout (→ agent context).
 
@@ -553,11 +597,23 @@ def emit(tier: str, litesuite_hint: Optional[bool] = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def resolve_skill_target(name: str) -> Tuple[Optional[Path], str]:
+def identity_cli(cli: str | None = None) -> str:
+    """Normalize supported identity hosts; omitted CLI preserves Claude callers."""
+    if cli is not None and not isinstance(cli, str):
+        raise ValueError("identity CLI must be claude-code or codex-cli")
+    key = "claude-code" if cli is None else cli.strip().lower()
+    aliases = {"claude": "claude-code", "claude-code": "claude-code",
+               "codex": "codex-cli", "codex-cli": "codex-cli"}
+    if key not in aliases:
+        raise ValueError(f"unsupported identity CLI {cli!r}; choose claude-code or codex-cli")
+    return aliases[key]
+
+
+def resolve_skill_target(name: str, cli: str | None = None) -> Tuple[Optional[Path], str]:
     """Where the GENERATED slash-command skill for an orchestrator must be written.
 
     `/ls-init-liteharness` produced a personality file and nothing else, so the
-    command that loads it — Ryan's `/sentinel` — was a hand-built personal skill that
+    command that loads it — the user's `/marker` — was a hand-built personal skill that
     existed on exactly one machine. Every other user finished the interview with an
     architecture they had no way to invoke.
 
@@ -569,14 +625,16 @@ def resolve_skill_target(name: str) -> Tuple[Optional[Path], str]:
     Returns (path, reason). Never invents a fallback location: a skill written
     somewhere Claude Code does not scan is not a command, it is an unread file.
     """
+    host = identity_cli(cli)
     home = Path.home()
     if not home or not str(home).strip():
         return None, "no home directory resolved"
     slug = orchestrator_slug(name)
-    return home / ".claude" / "skills" / slug / "SKILL.md", f"claude-code skills dir for {slug!r}"
+    directory = ".claude" if host == "claude-code" else ".agents"
+    return home / directory / "skills" / slug / "SKILL.md", f"{host} skills dir for {slug!r}"
 
 
-def verify_orchestrator_identity(name: str) -> Tuple[bool, str]:
+def verify_orchestrator_identity(name: str, cli: str | None = None) -> Tuple[bool, str]:
     """Assert a generated orchestrator is actually LOADABLE under its own name.
 
     Generation is not done when the files exist — it is done when the RESOLVER
@@ -587,13 +645,14 @@ def verify_orchestrator_identity(name: str) -> Tuple[bool, str]:
          correct behaviour and also means a personalised file that landed in the wrong
          place is indistinguishable from success. Checking only "did it resolve" can
          never see this; you must check WHICH FILE resolved.
-      2. The architecture is named after the HUMAN. A `ryan.md` sitting beside
+      2. The architecture is named after the HUMAN. A `the user.md` sitting beside
          `default.md` looks like a completed interview and is never loaded by anything,
          because the resolver keys on the AGENT's name.
 
     Returns (ok, detail). Callers must be LOUD on False — an orchestrator silently
     running the generic architecture is the exact outcome the interview exists to avoid.
     """
+    identity_cli(cli)  # Reject unsupported hosts before architecture early returns.
     slug = orchestrator_slug(name)
     arch = resolve_cognitive_file(name, "orchestrator")
     if arch is None:
@@ -608,7 +667,7 @@ def verify_orchestrator_identity(name: str) -> Tuple[bool, str]:
     if arch.stat().st_size == 0:
         return False, f"architecture for {name!r} is EMPTY ({arch})"
 
-    skill, why = resolve_skill_target(name)
+    skill, why = resolve_skill_target(name, cli)
     if skill is None:
         return False, f"no skill target resolved: {why}"
     if not skill.is_file():
@@ -627,13 +686,13 @@ def verify_orchestrator_identity(name: str) -> Tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
-def diagnose(name: str = "Sentinel", tier: str = "orchestrator") -> str:
+def diagnose(name: str, tier: str = "orchestrator") -> str:
     """Show what EVERY candidate root holds, not just the winner.
 
     `resolve_prompts_dir()` returns the FIRST root that exists, which is the right
     behaviour and also means a single resolved path cannot reveal that two roots
     DISAGREE. Disagreeing roots is not hypothetical: on 2026-08-12 the repo tree
-    carried `sentinel.md` while the installed plugin cache still carried `ryan.md`,
+    carried `marker.md` while the installed plugin cache still carried `the user.md`,
     so the same call answered differently depending on which machine ran it, with no
     error either way.
 
@@ -688,4 +747,6 @@ def diagnose(name: str = "Sentinel", tier: str = "orchestrator") -> str:
 if __name__ == "__main__":  # pragma: no cover
     import sys
 
-    print(diagnose(sys.argv[1] if len(sys.argv) > 1 else "Sentinel"))
+    if len(sys.argv) != 2 or not sys.argv[1].strip():
+        raise SystemExit("Usage: python -m liteharness.prompts <chosen-orchestrator-name>")
+    print(diagnose(sys.argv[1]))

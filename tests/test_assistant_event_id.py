@@ -49,7 +49,7 @@ def test_distinguishes_a_genuine_repeat_from_a_duplicate(tmp_path):
     """Identical TEXT in two turns must NOT collapse — that is a real repeat.
 
     This is why the id is the turn's identity and not a hash of `content`:
-    Sentinel says "Quiet hold." twice and both belong on screen.
+    the orchestrator says "Quiet hold." twice and both belong on screen.
     """
     path = _write(tmp_path, [
         {"type": "assistant", "uuid": "a1", "message": {"id": "msg_1", "text": "Quiet hold."}},

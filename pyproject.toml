@@ -49,6 +49,7 @@ include = ["liteharness*"]
 [tool.setuptools.package-data]
 liteharness = [
   "hooks_configs/*.json",
+  "tier_cards.json",
   "hooks_configs/*.ts",
   "cli_scripts/**/*.py",
   "cli_scripts/**/*.md",
@@ -77,10 +78,52 @@ liteharness = [
 # The catalog globs are recursive, so anything sitting in a skill directory on
 # the build machine ships. 0.2.2 and 0.2.3 both carried stray __pycache__/*.pyc
 # picked up from local runs.
+# ASCII letter classes make the precise runtime families explicit on POSIX too.
+# fnmatch '*' spans separators: suffix patterns cover catalog root and all depths.
+# Marker/lock/cache components require separate root and nested patterns.
+# Actual release artifacts must still pass complete raw payload verification.
 [tool.setuptools.exclude-package-data]
 liteharness = [
-  "catalog/**/__pycache__/*",
-  "catalog/**/*.pyc",
+  "catalog/*.[pP][yY][cC]",
+  "catalog/*.[dD][bB]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]3",
+  "catalog/*.[dD][bB]-[wW][aA][lL]",
+  "catalog/*.[dD][bB]-[sS][hH][mM]",
+  "catalog/*.[dD][bB]-[jJ][oO][uU][rR][nN][aA][lL]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]-[wW][aA][lL]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]-[sS][hH][mM]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]-[jJ][oO][uU][rR][nN][aA][lL]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]3-[wW][aA][lL]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]3-[sS][hH][mM]",
+  "catalog/*.[sS][qQ][lL][iI][tT][eE]3-[jJ][oO][uU][rR][nN][aA][lL]",
+  "catalog/.[lL][aA][sS][tT]_[iI][nN][dD][eE][xX][eE][dD]",
+  "catalog/*/.[lL][aA][sS][tT]_[iI][nN][dD][eE][xX][eE][dD]",
+  "catalog/[iI][nN][dD][eE][xX].[lL][oO][cC][kK]",
+  "catalog/*/[iI][nN][dD][eE][xX].[lL][oO][cC][kK]",
+  "catalog/__[pP][yY][cC][aA][cC][hH][eE]__/*",
+  "catalog/*/__[pP][yY][cC][aA][cC][hH][eE]__/*",
+]
+"liteharness.catalog" = [
+  "*.[pP][yY][cC]",
+  "*.[dD][bB]",
+  "*.[sS][qQ][lL][iI][tT][eE]",
+  "*.[sS][qQ][lL][iI][tT][eE]3",
+  "*.[dD][bB]-[wW][aA][lL]",
+  "*.[dD][bB]-[sS][hH][mM]",
+  "*.[dD][bB]-[jJ][oO][uU][rR][nN][aA][lL]",
+  "*.[sS][qQ][lL][iI][tT][eE]-[wW][aA][lL]",
+  "*.[sS][qQ][lL][iI][tT][eE]-[sS][hH][mM]",
+  "*.[sS][qQ][lL][iI][tT][eE]-[jJ][oO][uU][rR][nN][aA][lL]",
+  "*.[sS][qQ][lL][iI][tT][eE]3-[wW][aA][lL]",
+  "*.[sS][qQ][lL][iI][tT][eE]3-[sS][hH][mM]",
+  "*.[sS][qQ][lL][iI][tT][eE]3-[jJ][oO][uU][rR][nN][aA][lL]",
+  ".[lL][aA][sS][tT]_[iI][nN][dD][eE][xX][eE][dD]",
+  "*/.[lL][aA][sS][tT]_[iI][nN][dD][eE][xX][eE][dD]",
+  "[iI][nN][dD][eE][xX].[lL][oO][cC][kK]",
+  "*/[iI][nN][dD][eE][xX].[lL][oO][cC][kK]",
+  "__[pP][yY][cC][aA][cC][hH][eE]__/*",
+  "*/__[pP][yY][cC][aA][cC][hH][eE]__/*",
 ]
 
 [tool.pytest.ini_options]

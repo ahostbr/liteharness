@@ -190,7 +190,8 @@ class PtySession:
         self._sender_thread.start()
 
     def _spawn(self, cmd: str, cwd: str, env: dict[str, str] | None = None) -> None:
-        spawn_env = {**os.environ, **(env or {})}
+        from uuid import uuid4
+        spawn_env = {**os.environ, **(env or {}), "LITEHARNESS_SEAT_RUN_ID": str(uuid4())}
         if IS_WINDOWS:
             from winpty import PtyProcess
             import shlex, shutil
@@ -216,6 +217,10 @@ class PtySession:
             os.close(slave)
             self._master_fd = master
 
+        from .seat_lifecycle import ProcessLifecycle
+        self.lifecycle = ProcessLifecycle(
+            spawn_env.get("LITEHARNESS_AGENT_ID") or self.agent_id,
+            self.agent_id, self.proc.pid, time.time(), spawn_env)
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
 
@@ -231,6 +236,7 @@ class PtySession:
                     if not data:
                         break
 
+                    self.lifecycle.data(data)
                     with self._lock:
                         self.output_buffer.append(data)
                         if len(self.output_buffer) > OUTPUT_BUFFER_SIZE:
@@ -241,6 +247,23 @@ class PtySession:
                     break
         finally:
             self.alive = False
+            # EOF is not proof of process exit. Observe the owned process independently;
+            # never manufacture an exit code from a reader failure or close request.
+            threading.Thread(target=self._observe_exit, daemon=True).start()
+
+    def _observe_exit(self) -> None:
+        try:
+            if IS_WINDOWS:
+                while self.proc.isalive():
+                    time.sleep(0.1)
+                code = self.proc.exitstatus
+            else:
+                code = self.proc.wait()
+            signal = -code if isinstance(code, int) and code < 0 and not IS_WINDOWS else None
+            self.lifecycle.exit(code, signal)
+        except Exception as exc:
+            # An unavailable status is not an observed death. Preserve diagnostic error.
+            self.lifecycle.record("exit_observation_failed", owner_error=type(exc).__name__)
 
     def _send_loop(self) -> None:
         while self.alive:
@@ -273,7 +296,8 @@ class PtySession:
             chunks = self.output_buffer[-lines:]
             return "".join(chunks)
 
-    def kill(self) -> None:
+    def kill(self, origin: dict | None = None) -> None:
+        self.lifecycle.request_kill(origin)
         self.alive = False
         try:
             self._send_queue.put_nowait(None)
@@ -397,7 +421,7 @@ class PtyDaemon:
     def _cleanup(self) -> None:
         with self._lock:
             for session in self.sessions.values():
-                session.kill()
+                session.kill({"source": "python-daemon-shutdown"})
             self.sessions.clear()
         LOCK_FILE.unlink(missing_ok=True)
 
@@ -570,7 +594,8 @@ class PtyDaemon:
         if not session:
             return {"ok": False, "error": "session not found"}
 
-        session.kill()
+        session.kill(req.get("origin") if isinstance(req.get("origin"), dict) else
+                     {"source": "python-daemon-kill-unknown-requester"})
         return {"ok": True, "agent_id": agent_id}
 
 

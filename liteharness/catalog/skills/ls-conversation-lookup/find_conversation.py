@@ -17,6 +17,8 @@ Usage:
     python find_conversation.py --index-embeddings --force   # force full embedding rebuild
     python find_conversation.py --index-memory               # build/update memory .md index
     python find_conversation.py --index-memory --force       # force full memory rebuild
+    python find_conversation.py --search "literal" --packet   # exact-first evidence JSON
+    python find_conversation.py --backfill-provenance         # explicit human-only line recovery
     python find_conversation.py --stats                      # show index statistics
 """
 import sys
@@ -35,6 +37,7 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import Counter
+from types import SimpleNamespace
 from conversation_sources import conversation_files, identity, normalized_records, serialized_index
 
 LM_STUDIO_URL = "http://localhost:1234/v1"
@@ -60,6 +63,8 @@ SKIP_PATTERNS = ["litegauntlet", "AppData-Local-Temp"]
 
 # Auto-index staleness
 INDEX_STALENESS_FILE = DATA_DIR / ".last_indexed"
+EVIDENCE_SCAN_MAX_BYTES = 8 * 1024 * 1024
+EVIDENCE_SCAN_MAX_SECONDS = 1.0
 INDEX_STALENESS_SEC = 300  # 5 minutes
 
 
@@ -323,7 +328,26 @@ def get_db(create=False):
             );
         """)
         conn.commit()
+        _ensure_provenance_columns(conn)
     return conn
+
+
+def _ensure_provenance_columns(conn):
+    """Add nullable columns atomically; old readers and retained rows remain valid."""
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        for table, columns in {
+            'messages': [('line_number', 'INTEGER'), ('byte_offset', 'INTEGER'), ('byte_length', 'INTEGER'), ('record_hash', 'TEXT'), ('source_signature', 'TEXT')],
+            'embeddings': [('file_path', 'TEXT'), ('line_start', 'INTEGER'), ('line_end', 'INTEGER'), ('byte_offset', 'INTEGER'), ('byte_length', 'INTEGER'), ('record_hash', 'TEXT'), ('source_signature', 'TEXT')],
+        }.items():
+            existing = {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}
+            for name, kind in columns:
+                if name not in existing:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {name} {kind}')
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def _ensure_embedding_tables(conn):
@@ -395,7 +419,7 @@ def parse_jsonl_messages(file_path):
         if not text or not text.strip():
             continue
         yield {"uuid": obj.get("uuid", ""), "timestamp": obj.get("timestamp", ""),
-               "type": obj.get("type"), "text": text}
+               "type": obj.get("type"), "text": text, "line_number": obj.get("_line_number"), **{k[1:]: v for k, v in obj.items() if k in ("_byte_offset", "_byte_length", "_record_hash", "_source_signature")}}
 
 
 @serialized_index
@@ -446,8 +470,8 @@ def cmd_index(force=False):
             for msg in parse_jsonl_messages(jsonl_path):
                 conn.execute(
                     "INSERT INTO messages (conversation_id, project, message_uuid, "
-                    "timestamp, msg_type, file_path) VALUES (?,?,?,?,?,?)",
-                    (conv_id, project, msg["uuid"], msg["timestamp"], msg["type"], fp))
+                    "timestamp, msg_type, file_path, line_number, byte_offset, byte_length, record_hash, source_signature) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (conv_id, project, msg["uuid"], msg["timestamp"], msg["type"], fp, msg["line_number"], msg["byte_offset"], msg["byte_length"], msg["record_hash"], msg["source_signature"]))
                 rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
                 conn.execute("INSERT INTO messages_fts (rowid, content) VALUES (?,?)",
                              (rowid, msg["text"]))
@@ -626,7 +650,17 @@ def _chunk_conversation(file_path):
             "text": chunk_text,
             "ts_start": group[0].get("timestamp", ""),
             "ts_end": group[-1].get("timestamp", ""),
+            "line_start": group[0]["line_number"],
+            "line_end": group[-1]["line_number"],
+            "byte_offset": group[0]["byte_offset"],
+            "byte_length": group[-1]["byte_offset"] + group[-1]["byte_length"] - group[0]["byte_offset"],
+            "source_signature": group[0]["source_signature"],
         })
+    import hashlib
+    with open(file_path, 'rb') as stream:
+        for chunk in chunks:
+            stream.seek(chunk['byte_offset'])
+            chunk['record_hash'] = hashlib.sha256(stream.read(chunk['byte_length'])).hexdigest()
     return chunks
 
 
@@ -673,9 +707,9 @@ def cmd_index_embeddings(force=False):
                 for chunk, vector in zip(chunks, vectors):
                     conn.execute(
                         "INSERT INTO embeddings (conversation_id, project, chunk_index, chunk_text, "
-                        "timestamp_start, timestamp_end, embedding) VALUES (?,?,?,?,?,?,?)",
+                        "timestamp_start, timestamp_end, embedding, file_path, line_start, line_end, byte_offset, byte_length, record_hash, source_signature) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (conv_id, project, chunk["index"], chunk["text"], chunk["ts_start"],
-                         chunk["ts_end"], _vec_to_blob(vector.tolist())))
+                         chunk["ts_end"], _vec_to_blob(vector.tolist()), fp, chunk["line_start"], chunk["line_end"], chunk["byte_offset"], chunk["byte_length"], chunk["record_hash"], chunk["source_signature"]))
                 conn.execute(
                     "INSERT OR REPLACE INTO embedded_files (file_path, mtime, chunk_count) VALUES (?,?,?)",
                     (fp, source_mtime, len(chunks)))
@@ -1192,6 +1226,10 @@ def _print_stats(conn):
 
 def main():
     args = sys.argv[1:]
+    # Opt-in ruling commands must never trigger the normal auto-index writer.
+    if "--index-rulings" in args or "--search-rulings" in args:
+        from ruling_index import run_cli
+        sys.exit(run_cli(args, DB_PATH))
     if not args:
         print("Usage: find_conversation.py <id-prefix> [--summarize | --extract]")
         print("       find_conversation.py --search \"query\" [-n N] [--project NAME] [--mode bm25|semantic|hybrid|memory|all]")
@@ -1202,10 +1240,15 @@ def main():
         sys.exit(1)
 
     # ── Auto-index if stale (before any search/lookup) ──────────────────
-    is_index_cmd = "--index" in args or "--index-embeddings" in args or "--index-memory" in args
+    is_index_cmd = "--backfill-provenance" in args or "--index" in args or "--index-embeddings" in args or "--index-memory" in args
     is_stats_cmd = "--stats" in args
     if not is_index_cmd and not is_stats_cmd and "--no-refresh" not in args:
-        _check_and_auto_index()
+        if "--packet" in args:
+            from contextlib import redirect_stdout
+            with redirect_stdout(sys.stderr):
+                _check_and_auto_index()
+        else:
+            _check_and_auto_index()
 
     # ── Search mode ─────────────────────────────────────────────────────
     if "--search" in args:
@@ -1239,6 +1282,13 @@ def main():
             di = args.index("--date")
             date = args[di + 1] if di + 1 < len(args) else None
 
+        if any(flag in args for flag in ('--exact-first', '--citations', '--packet')):
+            from lookup_evidence import search_evidence
+            search_evidence(SimpleNamespace(**globals()), query, top_n, project, msg_type,
+                            mode, hours, date, exact_first='--exact-first' in args or '--packet' in args,
+                            packet='--packet' in args, citations='--citations' in args or '--packet' in args)
+            return
+
         if mode == "memory":
             cmd_search_memory(query, top_n, mem_type=msg_type)
         elif mode == "all":
@@ -1253,6 +1303,11 @@ def main():
             cmd_search_hybrid(query, top_n, project, msg_type, hours=hours, date=date)
         else:
             cmd_search(query, top_n, project, msg_type, hours=hours, date=date)
+        return
+
+    if '--backfill-provenance' in args:
+        from lookup_evidence import backfill_provenance
+        backfill_provenance(SimpleNamespace(**globals()))
         return
 
     # ── Index memory mode ─────────────────────────────────────────────

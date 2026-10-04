@@ -54,7 +54,7 @@ cannot receive a turn. The app-private pipe schema may change; failures retain m
 
 The passing candidates run from the isolated T370 worktree. Repository integration and
 global deployment are separate: the machine's editable package points at another shared
-checkout with unmerged work. Sentinel tracks that deployment decision as T376. Do not
+checkout with unmerged work. the orchestrator tracks that deployment decision as T376. Do not
 overwrite that checkout or silently repoint global Python. After integration and the
 runtime decision, run the canonical installer to synchronize all Codex skill aliases,
 then restart each attached watcher in its own task. This report does not claim a fleet

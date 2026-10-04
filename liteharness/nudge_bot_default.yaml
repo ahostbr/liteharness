@@ -2,7 +2,7 @@
 # Pattern rules checked in order — first match wins.
 # Each rule has a regex pattern and a list of responses (random pick).
 
-sentinel_id: "00000000-0000-0000-0000-000000000000"
+sender_id: "00000000-0000-0000-0000-000000000000"
 
 # Target mode: empty list = all agents, or list specific agent IDs
 # target_agents: []                               # all agents (default)

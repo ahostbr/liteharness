@@ -99,7 +99,7 @@ def _verify(root: Path, pattern_id: str, level: str, **kw) -> str:
         cli.cmd_verify_pattern(
             pattern_id=pattern_id,
             level=level,
-            actor=kw.pop("actor", "ryan"),
+            actor=kw.pop("actor", "avery"),
             project=str(root),
             **kw,
         )
@@ -226,7 +226,7 @@ class PatternVerifiedTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit, msg=repr(kw)):
                     cli.cmd_revoke_pattern(
-                        pattern_id=pid, actor="ryan", project=str(self.root), **kw
+                        pattern_id=pid, actor="avery", project=str(self.root), **kw
                     )
         self.assertIn("[VERIFIED]", _query_text(self.root, "Northwind"))
 
@@ -236,7 +236,7 @@ class PatternVerifiedTests(unittest.TestCase):
                 pattern_id=pid,
                 reason="approval was based on a stale run",
                 prior_attestation_id=attestation_id,
-                actor="ryan",
+                actor="avery",
                 project=str(self.root),
             )
         self.assertIn("[UNVERIFIED]", _query_text(self.root, "Northwind"))
@@ -355,7 +355,7 @@ class PatternVerifiedTests(unittest.TestCase):
                 "attestation_id": "a" * 36,
                 "pattern_id": "legacy:" + "0" * 64,
                 "level": "human",
-                "actor": "ryan",
+                "actor": "avery",
                 "evidence_ref": "conv:x",
                 "timestamp": "2026-08-25T00:00:00+00:00",
             }) + "\n",

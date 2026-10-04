@@ -6,7 +6,7 @@ Each CLI has a canonical install layout. This module:
 2. Resolves the canonical install path for a CLI's skills/agents.
 3. Copies the bundled catalog into that path — opt-in only.
 
-Per Ryan's rule: NEVER auto-install across all detected CLIs without explicit user
+Per the user's rule: NEVER auto-install across all detected CLIs without explicit user
 opt-in. The setup wizard renders a checklist, and only ticked CLIs get installed.
 For CLIs the user wants to install to that aren't auto-detected, the caller passes
 an explicit `--path` override.

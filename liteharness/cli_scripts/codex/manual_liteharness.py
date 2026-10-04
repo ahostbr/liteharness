@@ -56,52 +56,42 @@ def current_project() -> str:
 
 
 def detect_process_context() -> dict:
+    """This process's ancestor chain (pid, parent, name, cmdline), walked
+    in-process with psutil.
+
+    T926: this was one PowerShell `Get-CimInstance Win32_Process` (WMI) query
+    per ancestor under a 5 s subprocess timeout, and that timeout was no
+    bound. The walk took 2.8 s to 49 s on the same 8-process chain from one
+    run to the next (WMI latency, so load-dependent), and a PowerShell killed
+    mid-query stayed alive ~20 s until its WMI call returned. Its stdout pipe
+    stayed open, so subprocess.run's untimed post-kill communicate() blocked
+    for 17.8 s. Registration (`start`) inherited all of it.
+    psutil.parent() also refuses a ppid whose number was reused by a newer
+    process, which the WMI walk followed blindly.
+    """
     if os.name != "nt":
         return {}
-    script = r"""
-$ErrorActionPreference = 'Stop'
-$startPid = [int]$env:LITEHARNESS_START_PID
-$seen = @{}
-$rows = @()
-$currentPid = $startPid
-while ($currentPid -and -not $seen.ContainsKey($currentPid)) {
-  $seen[$currentPid] = $true
-  $row = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid"
-  if (-not $row) { break }
-  $rows += [pscustomobject]@{
-    pid = [int]$row.ProcessId
-    parent = [int]$row.ParentProcessId
-    name = [string]$row.Name
-    cmdline = if ($null -ne $row.CommandLine) { [string]$row.CommandLine } else { '' }
-  }
-  $currentPid = [int]$row.ParentProcessId
-}
-$rows | ConvertTo-Json -Depth 4 -Compress
-"""
-    env = os.environ.copy()
-    env["LITEHARNESS_START_PID"] = str(os.getpid())
     try:
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        import psutil
+        proc = psutil.Process()
+    except Exception:  # noqa: BLE001 - never block registration
         return {}
-    if result.returncode != 0 or not result.stdout.strip():
-        return {}
-    try:
-        rows = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {}
-    if isinstance(rows, dict):
-        rows = [rows]
-    if not isinstance(rows, list):
+    rows: list[dict] = []
+    seen: set[int] = set()
+    while proc is not None and proc.pid not in seen:
+        seen.add(proc.pid)
+        try:
+            try:
+                cmdline = " ".join(proc.cmdline())
+            except (psutil.Error, OSError):
+                cmdline = ""  # protected processes refuse their command line
+            rows.append({"pid": proc.pid, "parent": proc.ppid(), "name": proc.name(), "cmdline": cmdline})
+            proc = proc.parent()
+        # psutil 7 re-raises an unrecognised Windows error as a bare OSError
+        # (_pswindows.py:657): stop the walk, never abort registration.
+        except (psutil.Error, OSError):
+            break
+    if not rows:
         return {}
     context: dict = {"ancestry": rows}
     for row in rows:

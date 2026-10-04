@@ -1,0 +1,141 @@
+@'
+
+describe("CUE4Parse panel inputs (T0281)", () => {
+  const cue = { id: "cue4parse", mode: "headless", status: "ready" } as never;
+  const form = {
+    input: "D:/Archives", outputDir: "D:/Converted", attested: true,
+    ueVersion: " GAME_UE5_7 ", assets: " /Game/Meshes/Cube.Cube \n/Game/Textures/Grid.Grid\n",
+    mappings: " D:/Mappings/game.usmap ", aesKeyEnv: " GAME_AES_KEY ",
+  };
+
+  it("sends all four trimmed CUE4Parse fields with line-separated object selections", () => {
+    expect(converterRunProblem(cue, form)).toBeNull();
+    expect(converterRequest(cue, form)).toEqual({
+      converterId: "cue4parse", rightsAttested: true, input: "D:/Archives", outputDir: "D:/Converted",
+      ueVersion: "GAME_UE5_7", assets: ["/Game/Meshes/Cube.Cube", "/Game/Textures/Grid.Grid"],
+      mappings: "D:/Mappings/game.usmap", aesKeyEnv: "GAME_AES_KEY",
+    });
+  });
+
+  it("omits blank optional mappings/key name and accepts CRLF selections", () => {
+    const optional = { ...form, assets: "Game/Cube.Cube\r\n\r\n /Game/Grid.Grid ", mappings: " ", aesKeyEnv: " " };
+    expect(converterRunProblem(cue, optional)).toBeNull();
+    expect(converterRequest(cue, optional)).toEqual({
+      converterId: "cue4parse", rightsAttested: true, input: "D:/Archives", outputDir: "D:/Converted",
+      ueVersion: "GAME_UE5_7", assets: ["Game/Cube.Cube", "/Game/Grid.Grid"],
+    });
+  });
+
+  it.each(["", "5.7", "GAME_UE5_7;cmd", `GAME_${"a".repeat(129)}`])("refuses invalid version %s", (ueVersion) => {
+    expect(converterRunProblem(cue, { ...form, ueVersion })).toMatch(/version|EGame/i);
+  });
+  it.each(["", "/Game/../Cube.Cube", "D:/Cube.uasset", "/Game/Cube", "/Game/Cube.Cube\n/game/cube.cube", "a".repeat(4097), Array(1001).fill("/Game/Cube.Cube").join("\n")])("refuses invalid or duplicate selections %#", (assets) => {
+    expect(converterRunProblem(cue, { ...form, assets })).toMatch(/asset|object/i);
+  });
+  it.each(["relative.usmap", "D:relative.usmap", "D:/Mappings/game.txt"])("refuses invalid mappings %s", (mappings) => {
+    expect(converterRunProblem(cue, { ...form, mappings })).toMatch(/usmap/i);
+  });
+  it.each([`0x${"a".repeat(64)}`, "1BAD_NAME", "KEY=value", "KEY NAME", "a".repeat(129)])("refuses literal/invalid AES name %# without echoing it", (aesKeyEnv) => {
+    const problem = converterRunProblem(cue, { ...form, aesKeyEnv });
+    expect(problem).toMatch(/environment variable NAME/i);
+    expect(problem).not.toContain(aesKeyEnv);
+    expect(() => converterRequest(cue, { ...form, aesKeyEnv })).toThrow(/environment variable NAME/i);
+  });
+
+  it("keeps rights/setup gates first and other converter requests unchanged", () => {
+    expect(converterRunProblem(cue, { ...form, attested: false, ueVersion: "" })).toMatch(/rights/i);
+    expect(converterRunProblem({ id: "cue4parse", mode: "headless", status: "needs-setup" } as never, form)).toMatch(/set.*up/i);
+    expect(converterRequest({ id: "unitypy", mode: "headless" } as never, form)).toEqual({
+      converterId: "unitypy", rightsAttested: true, input: "D:/Archives", outputDir: "D:/Converted",
+    });
+    expect(converterRequest({ id: "fmodel-cue4parse", mode: "launch" } as never, form)).toEqual({
+      converterId: "fmodel-cue4parse", rightsAttested: true,
+    });
+  });
+});
+'@ | Add-Content apps/web/src/litesuite/components/panels/game-director/gameDirectorLogic.test.ts
+@'
+
+describe("Game Director wizard: CUE4Parse inputs (T0281)", () => {
+  let run: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    run = vi.fn(async (): Promise<ConverterRunResult> => ({
+      ok: true, mode: "headless", outputs: ["D:/Converted/cube.glb"], log: [], error: null,
+    }));
+    installBridge(makeBridge({
+      converters: vi.fn(async () => [...CONVERTERS_WITH_MODES, {
+        ...CONVERTERS[0]!, id: "cue4parse", name: "CUE4Parse", mode: "headless" as const, status: "ready" as const,
+      }]),
+      runConverter: run as unknown as GameDirectorApi["runConverter"],
+    }));
+  });
+  async function openCue() {
+    await walkToAddons();
+    click("converter-toggle-cue4parse");
+    await waitFor(() => expect(q("converter-form-cue4parse")).not.toBeNull());
+    await fill("converter-input-cue4parse", "D:/Archives");
+    await fill("converter-output-cue4parse", "D:/Converted");
+  }
+  const submit = () => q("converter-submit-cue4parse") as HTMLButtonElement;
+
+  it("carries all four fields over IPC and resets the rights tick for the next run", async () => {
+    await openCue();
+    await fill("converter-version-cue4parse", " GAME_UE5_7 ");
+    await fill("converter-assets-cue4parse", " /Game/Meshes/Cube.Cube \n/Game/Textures/Grid.Grid ");
+    await fill("converter-mappings-cue4parse", " D:/Mappings/game.usmap ");
+    await fill("converter-aes-env-cue4parse", " GAME_AES_KEY ");
+    expect(submit().disabled).toBe(true);
+    submit().click();
+    expect(run).not.toHaveBeenCalled();
+    click("converter-attest-cue4parse");
+    await waitFor(() => expect(submit().disabled).toBe(false));
+    submit().click();
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    expect(run).toHaveBeenCalledWith({
+      converterId: "cue4parse", rightsAttested: true, input: "D:/Archives", outputDir: "D:/Converted",
+      ueVersion: "GAME_UE5_7", assets: ["/Game/Meshes/Cube.Cube", "/Game/Textures/Grid.Grid"],
+      mappings: "D:/Mappings/game.usmap", aesKeyEnv: "GAME_AES_KEY",
+    });
+    await waitFor(() => expect(text("converter-output-file-cue4parse")).toBe("D:/Converted/cube.glb"));
+    expect((q("converter-attest-cue4parse") as HTMLInputElement).checked).toBe(false);
+    expect(submit().disabled).toBe(true);
+  });
+
+  it("refuses a literal AES value before IPC, then accepts a NAME", async () => {
+    await openCue();
+    await fill("converter-version-cue4parse", "GAME_UE5_7");
+    await fill("converter-assets-cue4parse", "/Game/Cube.Cube");
+    const literal = `0x${"a".repeat(64)}`;
+    await fill("converter-aes-env-cue4parse", literal);
+    click("converter-attest-cue4parse");
+    await waitFor(() => expect(text("converter-problem-cue4parse")).toMatch(/environment variable NAME/i));
+    expect(text("converter-problem-cue4parse")).not.toContain(literal);
+    expect(submit().disabled).toBe(true);
+    submit().click();
+    expect(run).not.toHaveBeenCalled();
+    await fill("converter-aes-env-cue4parse", "GAME_AES_KEY");
+    await waitFor(() => expect(submit().disabled).toBe(false));
+    submit().click();
+    await waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    expect(run.mock.calls[0]![0].aesKeyEnv).toBe("GAME_AES_KEY");
+    expect(run.mock.calls[0]![0]).not.toHaveProperty("mappings");
+  });
+
+  it("requires version/unique object paths and never shows CUE fields on UnityPy/GUI rows", async () => {
+    await openCue();
+    click("converter-attest-cue4parse");
+    await waitFor(() => expect(text("converter-problem-cue4parse")).toMatch(/version|EGame/i));
+    await fill("converter-version-cue4parse", "GAME_UE5_7");
+    await fill("converter-assets-cue4parse", "/Game/Cube.Cube\n/game/cube.cube");
+    await waitFor(() => expect(text("converter-problem-cue4parse")).toMatch(/unique/i));
+    expect(submit().disabled).toBe(true);
+    submit().click();
+    expect(run).not.toHaveBeenCalled();
+    for (const id of ["unitypy", "fmodel-cue4parse"]) {
+      click(`converter-toggle-${id}`);
+      await waitFor(() => expect(q(`converter-form-${id}`)).not.toBeNull());
+      for (const field of ["version", "assets", "mappings", "aes-env"]) expect(q(`converter-${field}-${id}`)).toBeNull();
+    }
+  });
+});
+'@ | Add-Content apps/web/src/litesuite/components/panels/game-director/gameDirector.browser.tsx

@@ -1,6 +1,6 @@
 """Unit tests for librarian_checks — repo, sha, path, and attestation resolution.
 
-The nested-repo case is the reason repo qualification exists: C:\\Projects is
+The nested-repo case is the reason repo qualification exists: C:\\workspace is
 itself a git repo with other repos NESTED inside it, so an unqualified
 `git cat-file` from the outer root REFUTES perfectly valid inner-repo shas.
 The checker must resolve the INNERMOST enclosing root and must refuse to guess
@@ -203,7 +203,7 @@ class LibrarianChecksTests(unittest.TestCase):
                 "attestation_id": "a1a1a1a1-b2b2-4c3c-8d4d-e5e5e5e5e5e5",
                 "pattern_id": pattern["pattern_id"],
                 "level": "human",
-                "actor": "ryan",
+                "actor": "avery",
                 "evidence_ref": "conv:test",
                 "timestamp": "2026-08-25T01:00:00+00:00",
             }) + "\n",

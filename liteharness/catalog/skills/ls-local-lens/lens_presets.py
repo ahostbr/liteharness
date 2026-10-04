@@ -2,7 +2,7 @@
 """Role presets for Local Lens — model-AGNOSTIC sampling + system prompts.
 
 Lifted verbatim out of lms_switch.py when that script was rewritten to stop
-hardcoding a model lineup (Ryan, 2026-08-23). These presets never named a
+hardcoding a model lineup (the user, 2026-08-23). These presets never named a
 model, so they never went stale: they describe HOW to ask, not WHOM.
 
 Empirically tuned via optimize_08b.py's test battery.

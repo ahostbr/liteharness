@@ -265,7 +265,7 @@ def test_one_stop_forwards_once_even_though_the_hook_runs_twice(home, tmp_path):
 
 
 def test_a_GENUINE_second_stop_still_forwards(home, tmp_path):
-    """🔴 THE CONTROL, and the half Ryan explicitly wants kept.
+    """🔴 THE CONTROL, and the half the user explicitly wants kept.
 
     A seat that stops five times in a row IS the signal. A dedupe that keyed on
     content, or that simply suppressed a repeat, would pass the arm above and

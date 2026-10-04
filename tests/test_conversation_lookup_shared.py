@@ -54,7 +54,7 @@ class SharedLookupTests(unittest.TestCase):
 
     def codex(self):
         return self.write('codex/archived_sessions/rollout-2026-01-02-codex-id.jsonl', [
-            {'type': 'session_meta', 'payload': {'id': 'codex-id', 'cwd': 'C:/Projects/example'}},
+            {'type': 'session_meta', 'payload': {'id': 'codex-id', 'cwd': 'C:/workspace/example'}},
             {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'violet badger'}},
             {'type': 'response_item', 'timestamp': '2026-01-02T00:00:00Z', 'payload': {
                 'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': 'violet badger'}]}},
@@ -80,7 +80,7 @@ class SharedLookupTests(unittest.TestCase):
         self.codex()
         found = lookup.find_conversations('codex-i')
         self.assertEqual(found[0]['uuid'], 'codex-id')
-        self.assertEqual(found[0]['project'], 'C:/Projects/example')
+        self.assertEqual(found[0]['project'], 'C:/workspace/example')
         self.assertEqual(found[0]['provider'], 'codex')
 
     def test_both_providers_searchable_incremental_replacement(self):

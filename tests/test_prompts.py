@@ -30,7 +30,7 @@ def only(monkeypatch, tmp_path_factory):
     Isolates BOTH roots. There are two since 0.3.3: the shipped library, and the
     user-owned overlay that holds generated architectures. Pinning only the first let a
     test resolve a real file out of the developer's own home directory - which is exactly
-    how test_does_not_resurrect_the_human_named_file started returning `sentinel` instead
+    how test_does_not_resurrect_the_human_named_file started returning `marker` instead
     of `default`. It was reading the box, not the code, and the assertion it broke was the
     fixture's own promise.
 
@@ -76,8 +76,8 @@ class TestSlugging:
         "raw,expected",
         [
             ("The Warden", "the-warden"),
-            ("SENTINEL", "sentinel"),
-            ("  Sentinel  ", "sentinel"),
+            ("HARBOR", "harbor"),
+            ("  Harbor  ", "harbor"),
             ("Iron_Rod", "iron-rod"),
             ("", "default"),
         ],
@@ -86,7 +86,7 @@ class TestSlugging:
         # THE REGRESSION THIS EXISTS FOR. A bare .lower() maps "The Warden" to
         # "the warden.md", which never exists, so it falls through to the tier default
         # - and a fallback that always succeeds is indistinguishable from a hit.
-        # Invisible for every single-word name, i.e. for "Sentinel", i.e. for the only
+        # Invisible for every single-word name, i.e. for "the orchestrator", i.e. for the only
         # name the author tested.
         assert prompts.orchestrator_slug(raw) == expected
 
@@ -110,12 +110,12 @@ class TestFallbackIsVisible:
         assert "skill" in detail.lower()
 
     def test_does_not_resurrect_the_human_named_file(self, tmp_path, only):
-        # The architecture was once generated as ryan.md - named after the HUMAN - while
+        # The architecture was once generated as the user.md - named after the HUMAN - while
         # resolution keys on the AGENT. Falling back to it would make every caller work
         # and permanently hide that the shipped tree is stale.
-        make_tree(tmp_path, stems=("default", "ryan"))
+        make_tree(tmp_path, stems=("default", "avery"))
         only(tmp_path)
-        got = prompts.resolve_cognitive_file("Sentinel", "orchestrator")
+        got = prompts.resolve_cognitive_file("Harbor", "orchestrator")
         assert got is not None
         assert got.stem == "default"
 
@@ -130,13 +130,13 @@ class TestDiagnose:
 
     def test_diagnose_reports_what_each_root_HOLDS(self, tmp_path, only):
         # A single resolved path cannot reveal that two trees DISAGREE, and disagreeing
-        # trees were the actual defect: repo carried sentinel.md while the installed
-        # plugin still carried ryan.md, so the same call answered differently per machine.
-        make_tree(tmp_path, stems=("default", "ryan"))
+        # trees were the actual defect: repo carried marker.md while the installed
+        # plugin still carried the user.md, so the same call answered differently per machine.
+        make_tree(tmp_path, stems=("default", "avery"))
         only(tmp_path)
-        out = prompts.diagnose("Sentinel")
+        out = prompts.diagnose("Harbor")
         assert "holds:" in out
-        assert "ryan" in out
+        assert "avery" in out
 
 
 class TestModeDetection:
@@ -167,3 +167,33 @@ class TestComposeNeverReturnsNothing:
         only(tmp_path / "nothing-here")
         out = prompts.compose("worker", "standalone")
         assert isinstance(out, str) and out.strip()
+
+
+@pytest.mark.parametrize("mode", ["litesuite", "standalone"])
+@pytest.mark.parametrize("tier", list(prompts.TIER_FILES))
+def test_hook_tiers_get_canvas_text_only_inside_litesuite(tmp_path, only, mode, tier):
+    only(tmp_path)
+    tier_file = tmp_path / prompts.TIER_FILES[tier]
+    tier_file.parent.mkdir(parents=True, exist_ok=True)
+    tier_file.write_text("# Role\n", encoding="utf-8")
+    (tmp_path / "bootstrap-harness.md").write_text("# Harness\n", encoding="utf-8")
+    shared = "Canvas RESULT: present/center/background/state/clear; canvas action=help."
+    (tmp_path / "canvas-display.md").write_text(shared, encoding="utf-8")
+    out = prompts.compose(tier, mode)
+    assert out.count(shared) == (1 if mode == "litesuite" else 0)
+    if mode == "standalone":
+        assert "canvas-display.md" not in out
+
+
+@pytest.mark.parametrize("mode", ["litesuite", "standalone"])
+def test_missing_canvas_file_warns_only_inside_litesuite(tmp_path, only, mode):
+    only(tmp_path)
+    (tmp_path / "preambles").mkdir()
+    (tmp_path / "preambles/thinker-preamble.md").write_text("# Role\n", encoding="utf-8")
+    (tmp_path / "bootstrap-harness.md").write_text("# Harness\n", encoding="utf-8")
+    out = prompts.compose("thinker", mode)
+    if mode == "litesuite":
+        assert "MISSING from the library and NOT delivered: canvas-display.md" in out
+    else:
+        assert "canvas-display.md" not in out
+        assert "MISSING from the library" not in out

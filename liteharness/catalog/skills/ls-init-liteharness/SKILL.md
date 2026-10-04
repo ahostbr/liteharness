@@ -14,7 +14,61 @@ triggers:
 
 You are the onboarding wizard for LiteHarness. Your job is to discover WHO the user is — not just what tools they use — and build the harness around their identity. Personalization IS the product.
 
+## Host-specific generated identity
+
+Ask the active CLI at entry. Normalize it with `identity_cli`: `claude-code` or
+`codex-cli`. Omitted CLI remains Claude compatibility only; unsupported explicit
+CLIs reject. Claude user skills live under `~/.claude/skills` and invoke `/slug`;
+Codex user skills live under `~/.agents/skills` and invoke `$slug` or `/skills`.
+See https://learn.chatgpt.com/docs/build-skills for the current Codex contract.
+
 ## Flow
+
+Before scanning or interviewing, ask what to **name the orchestrator** and which CLI they are using. The agent name is distinct from the human's name and keys the generated identity. Never supply an author's name as a default.
+
+Immediately record the confirmed choices in the user-owned `.liteharness/profile.md`
+as `orchestrator_name: <chosen agent name>` and `identity_cli: <normalized active CLI>`.
+Keep existing profile content; update these fields rather than overwriting unrelated
+answers. Both Claude and Codex follow this ask-and-record step before Phase 1.
+
+The CLI-aware skill target and verifier require the paired Python identity API:
+`identity_cli`, `resolve_skill_target(name, cli=...)` and
+`verify_orchestrator_identity(name, cli=...)`. Check their availability before
+writing generated artifacts. If this Python package predates that API, stop with
+an explicit version/dependency error after preserving the chosen profile fields;
+do not silently substitute Claude paths for Codex or claim first-run success.
+
+After the human confirms both answers, execute this entry contract with `NAME`,
+`ACTIVE_CLI` and `PROJECT_ROOT` set from those confirmed answers and the current
+project (never from a private default). This records the choice before checking
+the installed Python dependency; it does not register a seat or start a watcher.
+
+<!-- FIRST-RUN-IDENTITY:START -->
+```python
+from pathlib import Path
+import inspect
+import re
+from liteharness import prompts
+
+if not NAME.strip():
+    raise ValueError("Ask the human for an orchestrator name before continuing")
+host = {"claude": "claude-code", "claude-code": "claude-code",
+        "codex": "codex-cli", "codex-cli": "codex-cli"}.get(ACTIVE_CLI.strip().lower())
+if host is None:
+    raise ValueError("Choose claude-code or codex-cli before continuing")
+profile = Path(PROJECT_ROOT) / ".liteharness" / "profile.md"
+profile.parent.mkdir(parents=True, exist_ok=True)
+previous = profile.read_text(encoding="utf-8") if profile.exists() else ""
+previous = re.sub(r"^(?:orchestrator_name|identity_cli):[^\r\n]*(?:\r?\n|$)", "", previous, flags=re.M)
+profile.write_text(previous.rstrip("\r\n") + "\n" +
+                   f"orchestrator_name: {NAME}\nidentity_cli: {host}\n", encoding="utf-8")
+if (not callable(getattr(prompts, "identity_cli", None)) or
+    "cli" not in inspect.signature(prompts.resolve_skill_target).parameters or
+    "cli" not in inspect.signature(prompts.verify_orchestrator_identity).parameters):
+    raise RuntimeError("Python identity API is too old; chosen profile preserved, paired CLI-aware API required")
+assert prompts.identity_cli(host) == host
+```
+<!-- FIRST-RUN-IDENTITY:END -->
 
 Execute these phases in order. Do NOT skip phases. Do NOT rush. Each phase builds on the last.
 
@@ -81,7 +135,7 @@ Ask: "I can scan your past Claude conversations to find patterns in how you work
 
 ### Phase 4: Generate Orchestrator Prompt (T3)
 
-Ask the human what to **name** their orchestrator first — it keys everything below.
+Confirm the orchestrator name chosen at entry — it keys everything below. Do not name the file after the human.
 
 **The template is the SHIPPED DEFAULT**, not a separate file:
 `cognitive-architectures/orchestrator/default.md`. Resolve it, never hardcode its path:
@@ -174,12 +228,12 @@ interview with a personality and **no way to summon it**. The only working `/`-c
 one the author had hand-built on his own machine, which is why the gap survived — it was
 invisible to the one person who could see everything else.
 
-Claude Code discovers skills at `~/.claude/skills/<dir>/SKILL.md` and exposes each as
-`/<dir>`, so **the directory name IS the command name**. Resolve the target the same way you
-resolved the architecture — never hardcode it:
+Resolve the active host's user skill target: Claude uses `~/.claude/skills`
+with `/slug`; Codex uses `~/.agents/skills` with `$slug` or `/skills`.
+Never write the generated identity into a plugin cache or guess another root:
 
 ```bash
-python -c "from liteharness.prompts import resolve_skill_target as t; p,why = t('<NAME>'); print(p or 'FATAL: ' + why)"
+python -c "from liteharness.prompts import resolve_skill_target as t; p,why = t('<NAME>', cli='<ACTIVE-CLI>'); print(p or 'FATAL: ' + why)"
 ```
 
 Read `skill-template.md` from this skill's own directory and substitute:
@@ -188,9 +242,10 @@ Read `skill-template.md` from this skill's own directory and substitute:
 | ----------------------- | ---------------------------------------------------------------------- |
 | `{{ORCHESTRATOR_NAME}}` | the name they chose, as they typed it                                  |
 | `{{ORCHESTRATOR_SLUG}}` | `orchestrator_slug(<NAME>)` — the same slug the architecture file uses |
+| `{{CLI_NAME}}` | `identity_cli(<ACTIVE-CLI>)`; never the human name |
 
 Both halves must key off the **same slug**. That is the entire linkage: `<slug>.md` holds
-the personality, `~/.claude/skills/<slug>/SKILL.md` is the command, and the skill resolves
+the personality, the actual `resolve_skill_target` result is the host command, and the skill resolves
 the architecture **by name at runtime** rather than by a baked path.
 
 Create the parent directory if needed, then write the file.
@@ -198,7 +253,7 @@ Create the parent directory if needed, then write the file.
 ### ✅ Verify the identity actually LOADS — generation is not done until the resolver agrees
 
 ```bash
-python -c "from liteharness.prompts import verify_orchestrator_identity as v; ok,d = v('<NAME>'); print(ok, d)"
+python -c "from liteharness.prompts import verify_orchestrator_identity as v; ok,d = v('<NAME>', cli='<ACTIVE-CLI>'); print(ok, d)"
 ```
 
 This must print `True`. It checks four things a naive "did the file get written" cannot:
@@ -221,8 +276,9 @@ the wild:
 - The skill existed but never mentioned its architecture, so `/name` loaded the protocol and
   none of the personality — a command that appears to work and delivers half the thing.
 
-Finally, tell the human the command they now have: **"Your orchestrator is ready. Type
-`/<slug>` in any Claude Code session in this project to summon them."**
+Finally, tell the human the command for their confirmed host: **Claude Code:
+`/<slug>`; Codex: `$<slug>` or choose the generated skill from `/skills`.**
+Do not report readiness until the selected host's identity verifier succeeds.
 
 ### Phase 5: Architecture Docs & Scaffold (T4 + T5)
 
@@ -243,7 +299,7 @@ Present what was created:
 
 ```
 Created:
-  orchestrator prompt  → .liteharness/prompts/cognitive-architectures/orchestrator/<name>.md
+  orchestrator prompt  → <actual resolve_orchestrator_target result>
   architecture docs    → Docs/Architecture/INDEX.md (+ N component docs)
   harness scaffold     → .liteharness/ (config, patterns, hooks, agents)
 ```

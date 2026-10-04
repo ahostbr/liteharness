@@ -144,7 +144,7 @@ class PatternRankingTests(unittest.TestCase):
                     "type": "verification",
                     "pattern_id": "0f0e0d0c-0b0a-4a09-8807-060504030201",
                     "level": "human",
-                    "actor": "ryan",
+                    "actor": "avery",
                     "timestamp": "2026-08-24T00:00:00+00:00",
                 },
             ],

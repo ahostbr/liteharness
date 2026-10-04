@@ -1,6 +1,6 @@
 """A seat that registers or takes a name tells every live orchestrator by inbox.
 
-Ryan 2026-09-12: a Codex Desktop task worked in LiteSuite for an hour before the
+the user 2026-09-12: a Codex Desktop task worked in LiteSuite for an hour before the
 orchestrator knew it existed. `discover` only answers when asked.
 
 The arms that would have caught the original gap: a NEW presence file produces
@@ -34,7 +34,7 @@ class AnnounceRegistrationTests(unittest.TestCase):
         (self.root / "agents").mkdir(parents=True)
 
     def orchestrator(self, agent_id="orch-1", **extra):
-        row = {"agent_id": agent_id, "tier": "orchestrator", "name": "Sentinel",
+        row = {"agent_id": agent_id, "tier": "orchestrator", "name": "Harbor",
                "last_seen": datetime.now(timezone.utc).isoformat(),
                "session_pid": os.getpid()}
         row.update(extra)
@@ -83,7 +83,7 @@ class AnnounceRegistrationTests(unittest.TestCase):
         self.assertEqual(self.messages(), [])
 
     def test_orchestrator_does_not_announce_to_itself(self):
-        cli.cmd_register("orch-1", cli="claude-code", tier="orchestrator", name="Sentinel")
+        cli.cmd_register("orch-1", cli="claude-code", tier="orchestrator", name="Harbor")
         self.assertEqual(self.messages(), [])
 
     def test_no_announce_env_keeps_test_children_quiet(self):

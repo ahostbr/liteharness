@@ -34,7 +34,7 @@ source, deploy using python -m liteharness.cli update-scripts --cli codex-cli.
    Prove idle wake with a nonce in the recipient's NEW turn and its ack, without a human
    prompt or stdout poll. Process liveness and app acceptance alone are not that proof.
 
-4. Use discover, then send <full-target-UUID> "message"; resolve Sentinel from fresh
+4. Use discover, then send <full-target-UUID> "message"; resolve the orchestrator from fresh
    presence. Read the attached terminal for diagnostics. Manual check and Codex hooks
    leave wake-owned mail alone. Missing transport retries before submission. An ambiguous
    submission remains uncertain (or submitting after a crash); never blindly resend.

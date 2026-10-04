@@ -18,7 +18,7 @@ the same note, else (3) nothing — absent or ambiguous repo means the claim is
 Behavioral parts are `attested` only when a pattern with effective verified
 state `human` (the WS3 attestation fold — imported from liteharness.cli, ONE
 implementation) mentions the claim's sha. Everything else is
-`awaiting-human`: Ryan's confirmation mints the attestation, which promotes it
+`awaiting-human`: the user's confirmation mints the attestation, which promotes it
 the NEXT night.
 
 Usage:

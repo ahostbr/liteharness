@@ -82,7 +82,7 @@ Read the file `.claude/consult-config.json` to get the model panel configuration
 }
 ```
 
-> **Note.** Ryan, 2026-09-10: *"i only want claude / codex / lmstudio or our litesuite
+> **Note.** the user, 2026-09-10: *"i only want claude / codex / lmstudio or our litesuite
 > lamma.cpp and everything but claude can go threw litetui now."* The shipped panel is
 > Claude through the CLI (your subscription) plus everything else through a headless
 > LiteTUI child. There are no HTTP provider entries and no API keys: `cliproxy`,
@@ -125,7 +125,7 @@ HTTP: `"type": "cli"` and `"type": "litetui"` each have their own invocation pat
 
 ### The loading rule for `litetui` models (read this before Step 4)
 
-**A consult NEVER causes a model to be loaded into VRAM.** Ryan, 2026-09-10, after a
+**A consult NEVER causes a model to be loaded into VRAM.** the user, 2026-09-10, after a
 seat's probe put a second 27B beside the one he was running: *"no model is loaded into
 VRAM without first confirming none is loaded and getting explicit approval."*
 
@@ -188,6 +188,10 @@ Report which providers are up/down. Remove models whose provider is down, but co
 
 **This is critical: fire ALL curl calls as parallel Bash tool calls in a single message.**
 
+**`litetui` children are the exception (T1049): launch them DETACHED**, as in "Running a litetui
+child" below. A foreground call blocks you, and you cannot see or answer the child's
+`[APPROVAL]` until it ends, so a tool-asking consult would stall its whole window.
+
 Use the resolved temperature (from `--temp` or `config.defaults.temperature`) and max tokens from `config.defaults.maxTokens`. Use `config.defaults.timeoutSeconds` as the curl `--max-time`.
 
 ### Default system prompt (used when `--system` is not provided):
@@ -220,9 +224,13 @@ One child per consulted model. **The shape below is MEASURED** (2026-09-10, Lite
 before changing the parser.
 
 ```bash
+env -u LITEHARNESS_AGENT_ID -u LITEHARNESS_AGENT_NAME -u LITEHARNESS_TIER -u LITETUI_SEAT_NAME \
+LITETUI_SPAWN_IDENTITY=1 \
+LITEHARNESS_SPAWNED_BY="<YOUR agent id>" \
+LITEHARNESS_AGENT_NAME="consult-<model key>" \
 LITETUI_BACKEND=lmstudio \
 litetui --rpc \
-  --tool-profile scheduled \
+  --tool-profile interactive \
   --model "<the id lms ps reported just now>" \
   --cwd "<a scratch dir, NOT the project>" \
   --prompt "<the consult question>"
@@ -238,30 +246,119 @@ gated on "LM Studio is up, model resident" launched a child that went to llama.c
 "the child is pointed at it" are two conditions**; checking only the first produces
 confident findings about a backend nobody was talking to.
 
-`--tool-profile scheduled` is REQUIRED and is not a style choice. Scheduled is the only
-profile with an EMPTY confirm set that still refuses: `allow={READ_ONLY, SELF_STORE}`,
-and its own source says *"every other authority is refused rather than opening a modal
-nobody is present to answer."* Without it a consulted model can reach the tool-approval
-branch and the consult parks forever waiting for a human who is not watching.
+`--tool-profile interactive` (T1065). **`scheduled` is not a profile any more** (T1027), and
+argparse rejects it before the child starts. Measured 2026-09-27 on LiteTUI main `c0220ba`
+plus T1049:
+- `litetui --rpc --tool-profile scheduled ...` exits 2 with "invalid choice: 'scheduled'
+  (choose from 'strict', 'interactive', 'autonomous')".
+- So the command this skill documented before never ran a child at all.
+`interactive` asks before destructive actions. A consult child is locked anyway (T1049-A:
+a LiteTUI an agent launched never runs autonomous), and every ask it makes comes to YOU
+(next sections). Since T1027 the launch flag is a ceiling on every turn source (LiteTUI
+`seat_authority` module), so the 0.22.2 overwrite measured on 2026-09-10 no longer applies.
 
-⚠️ **AND AS OF LiteTUI 0.22.2 THE FLAG DOES NOT REACH THE TURN. PASS IT ANYWAY, BUT
-DO NOT RELY ON IT.** Measured 2026-09-10 23:1x: the profile is installed at construction
-(`app.py:1209-1215`) and then `_submit_text` overwrites it with
-`settings.tool_policy_profile` (`app.py:4272` → `:4296`) before the turn streams — so the
-turn runs tools under whatever the install's settings say, `interactive` or
-`autonomous`, never `scheduled`. The `ready` line is no witness either: the same
-`--tool-profile scheduled` reported `"scheduled"` under lmstudio and `"interactive"`
-under codex, depending on which side of that overwrite won the startup race below.
+**The timeout is still a guard.** Bound every child and kill it on expiry. A consult that
+asks for a tool asks YOU (next section): answer it, or let it stop.
 
-Until that is fixed, **the timeout is the real guard**, not the profile. Bound every
-child, kill it on expiry, and treat a consult that asks for a tool as a SKIP rather
-than something to wait out. Reported for triage; not a reason to omit the flag, which
-is correct and will start working.
+#### 🔴 The four env lines above make YOU the child's leader (T1049)
+
+LiteTUI ruling (the user): *"whatever agent spawned the light qi instance should be
+babysitting it"*. A LiteTUI child an agent launched never runs autonomous, and every
+tool approval it needs goes to the agent that launched it, by inbox.
+
+- `LITETUI_SPAWN_IDENTITY=1` + `LITEHARNESS_SPAWNED_BY` is the **marker envelope**. It
+  is the ONLY way the child records who launched it. An ambient `LITEHARNESS_SPAWNED_BY`
+  without the marker is ignored: it names your OWN leader, or a dead id.
+- `LITEHARNESS_SPAWNED_BY` = **the id your SessionStart hook resolved, the one you pass to
+  `--from`**. `$CLAUDE_CODE_SESSION_ID` is only the default. A seat that came back on its
+  OLD id through the protected-takeover path has a registered id that differs from its
+  session id. Naming the session id then makes the child's approval `send` fail
+  ("absent"), and its turn stops.
+- The `env -u` line keeps YOUR harness identity out of the envelope. Under the marker, the
+  child ADOPTS `LITEHARNESS_AGENT_ID/_NAME/_TIER` and `LITETUI_SEAT_NAME` from its
+  environment, so without it the child registers under your own id or tier.
+- Without the envelope the child still runs, but EVERY approval it asks for stops its turn
+  at once (`turn_end` with `stopReason: "approval"`, error "...launched this LiteTUI
+  without naming itself..."). It never waits on nobody.
+- The envelope is only as trustworthy as whoever wrote it. Any launcher can name any
+  agent here, and inbox replies are not authenticated. It stops accidents, not a
+  malicious local agent.
+
+#### A consulted model may ask YOU to approve a tool
+
+The child's request arrives in your inbox, from the child's own seat id
+(`consult-<model key>`):
+
+```text
+[APPROVAL appr-<12 hex>] consult-<model key> (<id8>) asks to run <tool> during a rpc turn
+Danger: <class>; why: <reason>
+Input: <the call, truncated to 2 KB>
+Answer by inbox with exactly one line: APPROVE appr-<id>  or  DENY appr-<id>
+No answer within <N> s = the turn stops and this is logged.
+```
+
+Answer through the inbox, never the child's terminal. Use the MCP inbox tool
+(`action=send`, `from_id` = your id), or `liteharness.cli send <child id> --body-file <file>
+--from <your id>`. The body is exactly `APPROVE appr-<id>` or `DENY appr-<id>`.
+
+- Only a reply FROM the id the request went to, naming a pending `appr-` id, is taken as
+  the answer. Anything else reaches the child's model as ordinary mail.
+- APPROVE: the tool runs and the turn continues. DENY, or no answer within `<N>` seconds
+  (the child's `relay_approval_timeout_s`, 600 by default): the turn STOPS with
+  `stopReason: "approval"` and the reason in `error`, and the child logs it.
+- A consult is an opinion, not a task. DENY is the normal answer unless the tool is
+  harmless and the opinion needs it.
+
+#### Running a litetui child: detached, bounded by YOU, with your inbox open
+
+The Bash tool caps a FOREGROUND call at 600 s. A child may wait up to its relay timeout
+(600 s) for your answer, so the bound is yours to enforce, not the tool's: **660 s per
+child** (relay + 60). The sequence, per consulted `litetui` model `KEY`:
+
+1. **Launch it detached.** One Bash call with `run_in_background: true` per child, all in
+   the same message. The `sleep` keeps stdin OPEN (parsing rule 2: a closed stdin makes the
+   child exit having said nothing). 700 s is just past the 660 s bound, so stdin stays open
+   for the whole bound and the `sleep` ends on its own soon after (see step 4):
+   ```bash
+   OUT="$TEMP/consult-lt-KEY.jsonl"; : > "$OUT"
+   sleep 700 | env -u LITEHARNESS_AGENT_ID -u LITEHARNESS_AGENT_NAME -u LITEHARNESS_TIER -u LITETUI_SEAT_NAME \
+     LITETUI_SPAWN_IDENTITY=1 LITEHARNESS_SPAWNED_BY="<YOUR agent id>" LITEHARNESS_AGENT_NAME="consult-KEY" \
+     LITETUI_BACKEND=<backend> litetui --rpc --tool-profile interactive \
+     --model "<the id lms ps reported just now>" --cwd "<a scratch dir, NOT the project>" \
+     --prompt "<the consult question>" > "$OUT" 2> "$OUT.err"
+   ```
+   Note each call's background task id: you stop it in step 4.
+2. **Watch for its end, bounded at 660 s.** One more `run_in_background: true` call per child.
+   It exits at the child's `turn_end`, or at 660 s:
+   ```bash
+   OUT="$TEMP/consult-lt-KEY.jsonl"
+   for i in $(seq 1 330); do grep -q '"type": *"turn_end"' "$OUT" && { echo "KEY turn_end"; exit 0; }; sleep 2; done
+   echo "KEY bound 660s"
+   ```
+3. **While they run, answer approvals.** Your inbox watcher delivers each `[APPROVAL appr-...]`
+   from `consult-KEY`. Answer it by inbox as in the section above: DENY by default, APPROVE
+   only if the consult genuinely needs that tool. Do not sit in a foreground wait meanwhile.
+4. **When a step-2 watcher reports**, stop that child's step-1 task (`TaskStop <its id>`).
+   MEASURED on Windows 2026-09-27 (Git Bash, venv python), with a stand-in: python reading
+   stdin plus one sleeping python grandchild, no litetui.
+   - `TaskStop` killed the WHOLE right side: the grandchild, the interpreter, the venv shim
+     and the bash layers above them. So no child is left registered and polling.
+   - It did NOT kill the left side: `sleep` survived, orphaned. That is why step 1 uses
+     `sleep 700`, not an hour: the orphan ends by itself within ~700 s and holds nothing.
+   Then read `$OUT`:
+   - `KEY turn_end`: the answer is the `text_delta` texts joined. If the `turn_end` has
+     `stopReason: "approval"` or `"error"`, it is a SKIP: print its `error`.
+   - `KEY bound 660s`: a SKIP ("no turn_end within 660 s"); print the tail of `$OUT.err`.
+   - If the step-1 task ended on its own first (a crash), with no `turn_end` in `$OUT`: a
+     SKIP; print the tail of `$OUT.err`.
+5. Delete `$TEMP/consult-lt-*.jsonl*` with the other temp files at cleanup.
+
+The other providers (curl, `claude` CLI windows) stay as they are: foreground and parallel.
 
 #### The lines it emits
 
 ```json
-{"type": "ready", "version": "0.22.2", "model": "...", "cwd": "...", "tool_profile": "scheduled"}
+{"type": "ready", "version": "0.22.2", "model": "...", "cwd": "...", "tool_profile": "interactive"}
 {"type": "turn_start", "model": "...", "thinking_level": "xhigh"}
 {"type": "reasoning_delta", "text": "The"}
 {"type": "text_delta", "text": "ok"}
@@ -303,6 +400,11 @@ Answer = `"".join(e["text"] for e in events if e["type"] == "text_delta")`.
 
 A child that has not reached `turn_end` within the timeout is a SKIP with the reason
 printed, and the process is killed. Never report a partial turn as an opinion.
+
+**The bound must outlast the approval window.** A child waiting on your APPROVE is not
+hung. YOU bound every `litetui` child at 660 s (relay + 60), as in "Running a litetui child"
+steps 2 and 4, never with a foreground Bash timeout (capped at 600 s). A `turn_end` with
+`stopReason: "approval"` is a stopped turn: SKIP, and print its `error`.
 
 ### Command pattern for `claude-cli` providers (Visible Window Process):
 

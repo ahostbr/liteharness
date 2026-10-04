@@ -2,7 +2,7 @@
 material to judge WHY.
 
 🔴 A SEAT THAT STOPS LOOKS EXACTLY LIKE A SEAT THAT IS WAITING. Both are silent.
-The orchestrator finds out by noticing, and on 2026-09-11 only Ryan did: OpenBolt
+The orchestrator finds out by noticing, and on 2026-09-11 only the user did: OpenBolt
 stopped at a prompt after message `dec63aaa`, and the work sat until a human
 happened to look at the pane. There is no signal to miss, which is why nobody
 missed it.
@@ -12,7 +12,7 @@ judgement would need — the seat's last words, whether its last act was to send
 message and to whom, how long since anyone wrote to it, and the branch. "Clean
 stop that needs a nudge" and "waiting between inbox messages" are the same event
 from the hook's vantage point; they differ only in context the orchestrator has
-and the hook does not. Ryan's framing, and the reason there is no verdict field.
+and the hook does not. the user's framing, and the reason there is no verdict field.
 
 ⚠️ AND NO DEDUPE SUPPRESSION, DELIBERATELY. The obvious optimisation is to stop
 re-reporting a seat that already reported. It is wrong here: a seat that stops

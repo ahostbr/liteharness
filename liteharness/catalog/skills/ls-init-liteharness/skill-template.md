@@ -17,7 +17,7 @@ python -c "from liteharness.prompts import resolve_cognitive_file as r; p=r('{{O
 ```
 
 `Read` the path it prints. **Resolve it — never hardcode the path.** The prompt library
-resolves to the repo checkout, the packaged install, or the plugin cache depending on how
+uses explicit verified host binding, packaged public prompts, or legacy discovery depending on how
 the session started, so a literal path is correct on exactly one machine.
 
 🔴 **If it prints `default.md`, STOP and tell your human.** `default.md` is the shipped
@@ -29,7 +29,7 @@ _which file_ came back.
 Verify the whole link in one call:
 
 ```bash
-python -c "from liteharness.prompts import verify_orchestrator_identity as v; print(v('{{ORCHESTRATOR_NAME}}'))"
+python -c "from liteharness.prompts import verify_orchestrator_identity as v; print(v('{{ORCHESTRATOR_NAME}}', cli='{{CLI_NAME}}'))"
 ```
 
 It returns `(True, detail)` only when the architecture resolves to YOUR file **and** this
@@ -43,7 +43,7 @@ file** — a hardcoded id goes stale the next session and every command silently
 session that does not exist, while still exiting 0.
 
 ```bash
-python -m liteharness.cli register --agent-id <YOUR-SESSION-ID> --cli claude-code \
+python -m liteharness.cli register --agent-id <YOUR-SESSION-ID> --cli {{CLI_NAME}} \
   --model <YOUR-MODEL> --tier orchestrator --name "{{ORCHESTRATOR_NAME}}" --takeover \
   --session-pid <PID-OF-THE-PROCESS-THAT-IS-THIS-SESSION>
 ```
@@ -59,19 +59,18 @@ janitor and unprotected against takeover. Measured 2026-08-19: two live probes r
 without it, and the second took the name from the first while the first was still running.
 
 Pass the pid of the process that **is** the session — not the pid of the shell running this
-command. A CLI-driven agent uses its own `os.getpid()`; an agent started by Claude Code
-already has it written by the `SessionStart` hook, which has always set this field. Only the
-`register` path could omit it, which is why the CLI-registered seats were the ones that broke.
+command. Use the host session process PID provided by the harness/SessionStart metadata.
+Do not run a short-lived Python helper and call its PID the host session PID.
+If no authoritative PID is available, report the missing identity instead of registering a guess.
 
 ## Step 3 — Watch your inbox
 
-Monitors survive compaction. Check whether one is already running before starting another;
-two watchers on one inbox double-deliver every message.
-
-```
-Monitor({ description: "LiteHarness inbox", persistent: true, timeout_ms: 3600000,
-  command: "python -m liteharness.hooks watch --agent-id <YOUR-SESSION-ID>" })
-```
+Use the watcher already installed by your host/harness session. Check it before
+starting another; two watchers on one inbox double-deliver messages. Claude may
+provide a persistent Monitor tool; Codex does not inherit that Claude capability.
+When no watcher is present, use the harness-supported background/session mechanism
+for `python -m liteharness.hooks watch --agent-id <YOUR-SESSION-ID>`, or check the
+inbox between actions. Never invent a host tool or a session PID.
 
 ## Step 4 — Report in
 
@@ -82,21 +81,97 @@ lst run tasks action=list              # what is claimed, what is open
 
 Then tell your human what is online, what is pending, and what you propose to do next.
 
+## Per-card process and thinking
+
+Role rank is not the card's process tier. At intake ask the human to choose both
+process tier and thinking level; thinking is a separate choice informed by usage,
+credits and any active model/thinking floor. Pass both choices with the trunk.
+
+| Process tier | Team and merge review | Expected duration (alert only) |
+|---|---|---|
+| 1 — Quick | One seat builds/self-reviews; leader reads diff | 30 minutes |
+| 2 — Standard | One seat thinks/builds/self-reviews; leader reviews diff, at most one fix round | 2 hours |
+| 3 — Deep | Worker + thinker(s) + separate visible named reviewer with VERDICT | Half a day |
+
+There is **no time limit**. Expected durations are alerts for the orchestrator,
+not deadlines or permission to expand scope. At every tier check the current
+human intent before merging. An explicitly requested separate review still applies
+at any tier. Run focused affected checks, not full suites by habit.
+
+## Named persistent fleet seats
+
+A name identifies one agent and its durable conversation. Follow-up work returns
+to that same named seat. Message a live seat by inbox; resume it only after its
+process is gone: `liteharness spawn --split --resume <Name>`.
+Never replace a seat under a fresh name or self-retire. Every fresh fleet spawn
+has an explicit `--cwd <repo root>`; `liteharness names --list` shows the saved
+identity, conversation and cwd. Lifecycle changes require the leader/orchestrator.
+
+**Fleet lifecycle safety:** Never close a fleet seat by leafId or paneId. Until
+that lifecycle path is corrected, the only permitted close is an explicitly
+authorized `DELETE /pty/<sessionId>` after a fresh `GET /pty/list` proves an
+exact `harnessAgentId` match to the intended named seat. A guessed/stale session,
+leaf or pane is not an identity check. Never self-retire.
+
+
+## Merge and human-look gate
+
+Worktree edits, tests and commits are reversible and autonomous within the agreed
+scope. Review gates the merge, not an own-worktree commit. Before each merge,
+compare the current human words/requirements against the diff and evidence:
+one-line intent check for process tiers 1–2; full intent gate for tier 3.
+Required review, intent approval and release approval are distinct gates.
+A merged candidate remains **reviewing** until the human has seen the result;
+APPROVE, candidate-ready, a successful merge or model judgement is not Done.
+Editor restart/rebuild, deletions, downloads, VRAM loads, external side effects
+and public pushes retain their separate approval gates. Autonomy/HITL mode never
+bypasses a required merge intent gate or human-look completion condition.
+
 ## Spawning agents
 
-**A spawn is a terminal running the chosen CLI — nothing more.** Claude, Codex and Copilot
+**A fleet spawn is an explicitly tiered named harness session.** Claude, Codex and Copilot
 all have SessionStart hooks that self-resolve their tier and start their own monitor. You do
 not inject commands, look up personalities, or thread identity through the UI.
 
-The one thing the spawner must state explicitly is the TIER, because a bare CLI defaults to
-`worker`:
+The spawner states role, name, cwd, cognitive method and the card's process/thinking choices; a bare CLI launch is not the fleet bootloader:
 
 ```
-$env:LITEHARNESS_TIER='<tier>'; claude --permission-mode bypassPermissions
+liteharness spawn --split --pane <fleet> --cwd <repo root> --tier leader --name <Name> --prompt "<brief>"
 ```
 
-The env var is the spawner making an explicit, auditable claim. The spawned agent still
+The explicit tier is the spawner making an auditable claim. The spawned agent still
 never promotes itself.
+
+## Card sizing and the human's choice
+
+Before starting **every new card**, recommend a process tier and ask the human through your
+question channel to choose both its **tier** and its **thinking level**. The human decides both;
+do not infer thinking from tier or silently carry either choice from the previous card. Discuss
+available credits and usage with the human when recommending thinking. Record the choices on
+that card when the task board supports them; an older card without fields still needs the ask.
+
+| Card tier | Name | Process and review | Typical fit | Expected (orchestrator alert only) |
+|---|---|---|---|---|
+| **1** | Quick | One seat builds and self-reviews; leader reads the diff and merges | A label, guard, config, test fix, or doc; about 30 lines or fewer, one area | 30 minutes |
+| **2** | Standard | One seat thinks, builds, and self-reviews; leader reviews the diff, at most one fix round | A feature slice or rooted bug, one repo | 2 hours |
+| **3** | Deep | Worker plus thinker(s) and a separate reviewer seat; reviewer VERDICT and full intent gate | Security, deletion, data, several repos, or anything the human must see to believe | Half a day |
+
+For every tier, use the human's chosen thinking level subject to any active model/thinking
+floor, run **only touched tests, never full suites**, and have the orchestrator check the human's words against
+the result before merge (one line for tiers 1–2; full gate for tier 3). Nothing is done until
+the human has seen it. There is no time limit on a card. The expected duration is only an alert for the orchestrator: a card well past it and not moving gets looked at, and the human gets a status update. Do not inflate the review chain.
+
+
+## Showing changes to the human
+
+When LiteSuite Theater is available, show diffs with `BeforeAfter` from
+`@theater/kit`, following `ls-theater`. Use the existing diff layout and the user's
+own theme preference; keep added/removed lines distinguishable. Convert unified
+patches into one `DiffSection` per hunk: before = context + removed; after = context
++ added. In that view, do not substitute a raw patch, code block or redesigned diff
+layout. Without Theater, show the diff through the available review interface.
+Verification and merge receipts remain separate from the human's final look.
+
 
 ## Operating rules
 

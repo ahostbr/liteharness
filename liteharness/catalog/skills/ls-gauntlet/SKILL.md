@@ -7,7 +7,7 @@ description: A specialization of the orchestrator protocol - turns any goal into
 
 The user gives a goal. You hand back ONE short paste-ready prompt plus ONE `/goal` line, and offer to run it. You are not doing the work — you are writing the prompt that makes another agent grind until the work beats a real reference.
 
-**This is a SPECIALIZATION of the orchestrator protocol, not a parallel doctrine.** Ryan's flowchart maps ~1:1 onto the orchestrator flow — 21 of 23 nodes (mapping table: `docs/plans/2026-08-22-gauntlet-loop/flow.md`; doctrine: `prompts/orchestrator-role.md` Phases 1–6, which ships in the same plugin artifact as this skill, so the pointers resolve for end users). This file therefore carries ONLY what genuinely diverges, plus the LiteSuite wiring. For everything else, follow the doctrine — cite it, never requote it; a second copy is how it drifts.
+**This is a SPECIALIZATION of the orchestrator protocol, not a parallel doctrine.** the user's flowchart maps ~1:1 onto the orchestrator flow — 21 of 23 nodes (mapping table: `docs/plans/2026-08-22-gauntlet-loop/flow.md`; doctrine: `prompts/orchestrator-role.md` Phases 1–6, which ships in the same plugin artifact as this skill, so the pointers resolve for end users). This file therefore carries ONLY what genuinely diverges, plus the LiteSuite wiring. For everything else, follow the doctrine — cite it, never requote it; a second copy is how it drifts.
 
 **The three divergences — the gauntlet's actual content:**
 
@@ -26,9 +26,9 @@ Modeled originally on `robonuggets/gauntlet-loop`; its blind critics are rejecte
 3. **Emit three things, nothing else:** the `/goal` line to type first, the prompt block, and one flat line: "I can run this here."
 4. If they say run it, you are the lead agent and you follow the prompt you wrote.
 
-## The canonical flow (Ryan's diagram, 2026-08-22 — the authority)
+## The canonical flow (the user's diagram, 2026-08-22 — the authority)
 
-`<projects>/docs/plans/2026-08-22-gauntlet-loop/ryan-flowchart.png` — *"thats how this should work in a nutshell."* Two nested gauntlets, four exits:
+The flow is reproduced below so it does not depend on a local diagram file. Two nested gauntlets, four exits:
 
 ```
 goal + examples + rules -> figure out what GREAT actually looks like    <- re-plan re-entry
@@ -84,7 +84,7 @@ Prefer the hardest bar the agent can genuinely reach — a soft bar exits the lo
 
 ## 🔴 Critics get EVERYTHING — blindness is not independence
 
-**RULING (Ryan, 2026-08-21): "no blind critics by design thats my call, with proper prompting they will not be sympatheic."**
+**RULING (the user, 2026-08-21): "no blind critics by design thats my call, with proper prompting they will not be sympatheic."**
 
 The original skill blinds its critics — output only, labels stripped, never the code or the builder's reasoning — on the theory that a critic who watches the builder starts sympathising. This house runs the counter-example daily: fleet reviewers read the commits, the evidence, and the reasoning, and are MORE adversarial for it. Context is what catches a 4/4 claim whose gate never stamped the ledger.
 
@@ -317,7 +317,7 @@ The `litesuite-tools` registry holds **36 tools** (count derived from `NAME` exp
 - **Available to builders as ordinary tools (12):** `shell` `file_io` `sandbox` `web_fetch` `web_search` `youtube` `rag` `repo_intel` `project_state` `lens` (summarise long outputs) `memory` `lcm`.
 - **Deliberately NOT used (12):** `pccontrol` (armed-flag desktop automation — a gauntlet must never need the human's desktop), `halt`/`reassign`/`inject` (orchestrator-tier interventions, not loop mechanics), `evolution` `bench` `credit` `agent` `chronicle` `vault` `youtube`-adjacent `prompt_widget` (blocks on human input — the gauntlet's human gate is `/goal`, not a modal), `ui_render` (harness-MCP compat path; `render_widget` is the current surface).
 
-### Fullest-potential adjudication (Ryan's bar, 2026-08-22) — adopt with wiring, or reject with reasons from code
+### Fullest-potential adjudication (the user's bar, 2026-08-22) — adopt with wiring, or reject with reasons from code
 
 | System | Disposition | Wiring / reason |
 |---|---|---|
@@ -348,7 +348,7 @@ Branching, trailers, worker/leader commit discipline, and the kanban contract ar
 
 ## Does this skill use ALL of LiteSuite / LiteHarness? — the honest coverage audit
 
-**Ryan's question, 2026-08-22, and the answer is NO.** Recorded here so no reader mistakes the
+**the user's question, 2026-08-22, and the answer is NO.** Recorded here so no reader mistakes the
 wiring table above for coverage. Naming a system is not driving one, and the table above is a map
 of what is *reachable*, not a claim about what has been *exercised*.
 

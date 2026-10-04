@@ -13,7 +13,7 @@ Run the full Quizmaster interrogation autonomously: **Opus asks the questions, a
 User: "sonnet plan: rebuild the auth system"
   |
   v
-Opus (Quizmaster) ──harness msg──> Developer Agent (visible WT tab)
+Opus (Quizmaster) ──harness msg──> Developer Agent (visible WT window)
   ^                                     |
   |──────────harness msg────────────────|  ← inbox: codebase Q&A
   |                                     |
@@ -40,7 +40,7 @@ python -m liteharness.cli send <AGENT-UUID> "question" --from <YOUR-UUID>
 
 ### Channel 2: UIAutomation (AskUserQuestion Prompts)
 
-When the Developer agent runs a Quizmaster skill internally (e.g., `/plan-w-quizmaster`), it will present **AskUserQuestion** prompts in its terminal. These are interactive selection UIs that require keyboard input — NOT inbox messages. Sentinel must:
+When the Developer agent runs a Quizmaster skill internally (e.g., `/plan-w-quizmaster`), it will present **AskUserQuestion** prompts in its terminal. These are interactive selection UIs that require keyboard input — NOT inbox messages. the orchestrator must:
 
 1. **Detect** when a question appears via terminal buffer reading
 2. **Answer** by sending keyboard input to navigate and select options
@@ -67,17 +67,22 @@ Internalize the methodology. You ARE the Quizmaster now.
 
 ## STEP 3: Spawn the Developer Agent
 
-Spawn a **headed** agent using `liteharness spawn`:
+Spawn a visible agent using `liteharness spawn`:
 
 ```bash
-python -m liteharness.cli spawn --headed --model <opus|sonnet> --name "DevPlanner" --cwd <PROJECT_CWD> --permission-mode bypassPermissions --prompt "<DEVELOPER_PROMPT>"
+python -m liteharness.cli spawn --model <opus|sonnet> --name "DevPlanner" --cwd <PROJECT_CWD> --permission-mode bypassPermissions --prompt "<DEVELOPER_PROMPT>"
 ```
 
-**MUST be `--headed`** (not `--pty`) so UIAutomation can read/write the terminal buffer.
+`spawn` has no `--headed` flag: it refuses any flag it does not know, exits 2 and spawns nothing
+(`spawn --help` lists what it accepts). `--headed` belongs to `read-output` and `send-input` only.
+With no mode flag, `spawn` opens a Windows Terminal window when run outside LiteSuite, which
+`read-output --headed` / `send-input --headed` can drive. Inside a LiteSuite pane it opens a canvas
+pane instead, where the `--headed` read/write steps below have no WT handle.
+**OPEN QUESTION (not settled by this doc):** how this skill drives DevPlanner from inside LiteSuite.
 
 ### After Spawn
 
-1. Wait for the agent's inbox ping (it will message Sentinel when ready)
+1. Wait for the agent's inbox ping (it will message the orchestrator when ready)
 2. Note the agent ID from the inbox notification
 3. **Find the WT pane handle** for UIAutomation:
    ```bash

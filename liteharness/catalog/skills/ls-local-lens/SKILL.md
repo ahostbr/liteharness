@@ -20,7 +20,7 @@ bulk reading; keep your own context for reasoning.
 ## 🔴 THE ONE RULE: DISCOVER, THEN ASK. NEVER ASSUME A LINEUP.
 
 **This file names no model as "the best", "the default", or "the heavy tier", and it
-must never start.** Ruling, Ryan 2026-08-23:
+must never start.** Ruling, the user 2026-08-23:
 
 > _"keep it open ended ... just ask me what model and context i want at the time ...
 > dont hardcode models"_

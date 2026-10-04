@@ -4,7 +4,7 @@
 Run before `python -m build` to vendor the latest catalog into `liteharness/catalog/`.
 The catalog is shipped as package_data via pyproject.toml.
 
-Source-of-truth: C:/Projects/LiteSuite/resources/liteharness-plugin/
+Source-of-truth: the explicitly selected liteharness-plugin checkout (--source).
 Destination:     ./liteharness/catalog/
 """
 from __future__ import annotations
@@ -18,7 +18,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_SOURCE = Path("C:/Projects/LiteSuite/resources/liteharness-plugin")
 THIS_PKG_ROOT = Path(__file__).resolve().parents[1]
 DEST_ROOT = THIS_PKG_ROOT / "liteharness" / "catalog"
 
@@ -54,17 +53,17 @@ PRIVATE_SKILLS: tuple[str, ...] = (
     "ls-streaming-sl-obs",
     "streaming-sl-obs",
     "ls-release-litesuite",
-    # Ryan, 2026-08-16: never ship. Removed from PUBLIC_SKILLS in the same edit —
+    # the user, 2026-08-16: never ship. Removed from PUBLIC_SKILLS in the same edit —
     # naming a skill in BOTH sets makes the sync ABORT by design, so a one-sided
     # move here would have looked like a denylist working and been a broken gate.
-    # Ryan, 2026-08-16: the WHOLE ls-arch* family is private, not just -opus.
+    # the user, 2026-08-16: the WHOLE ls-arch* family is private, not just -opus.
     # These read LiteSuite's own docs/architecture/ tree — ports, panel names,
     # doc filenames — so shipping them hands every end user a reference to a
     # codebase that is not theirs. The replacement is end-user arch docs
-    # generated per project by that user's own Sentinel after assistant setup.
+    # generated per project by that user's own the orchestrator after assistant setup.
     # Removed until that exists.
     #
-    # 🔴 AMENDED by Ryan, 2026-08-16 (later the same day): "only arch-gen should ship",
+    # 🔴 AMENDED by the user, 2026-08-16 (later the same day): "only arch-gen should ship",
     # and "ls-arch-gen and ls-init-liteharness go together, they ship". So ls-arch-gen is
     # now PUBLIC and the sentence that used to sit here — "ls-arch-gen goes too, by
     # explicit ruling" — is WITHDRAWN. Do not re-apply it from the commit message of
@@ -97,7 +96,7 @@ PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-conversation-lookup", "ls-debug", "ls-design-huashu",
     "ls-devstral", "ls-eva",
     "ls-eval-gate", "ls-find-skills", "ls-gen-image-or-video",
-    # ls-arch-gen: PUBLIC by Ryan's amendment 2026-08-16 — it GENERATES arch docs for the
+    # ls-arch-gen: PUBLIC by the user's amendment 2026-08-16 — it GENERATES arch docs for the
     # user's own project rather than hardcoding LiteSuite's. Ships together with
     # ls-init-liteharness; the pair is the end-user setup path the ls-arch* ban deferred to.
     "ls-arch-gen",
@@ -105,7 +104,7 @@ PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-k-find-app", "ls-leader", "ls-librarian",
     "ls-library", "ls-liteharness", "ls-litetui",
     "ls-litewatch", "ls-local-lens", "ls-max-parallel",
-    "ls-max-swarm", "ls-mockup", "ls-pdf",
+    "ls-max-swarm", "ls-pdf",
     "ls-plan-w-quizmaster", "ls-plan-w-quizmaster-sonnet", "ls-playwright-e2e-screenshots",
     "ls-rebuild-release", "ls-repo-rank", "ls-reviewer",
     "ls-scout", "ls-self-improve", "ls-sentinel",
@@ -115,9 +114,33 @@ PUBLIC_SKILLS: frozenset[str] = frozenset({
     "ls-typescript-react-reviewer", "ls-vault", "ls-video-download",
     "ls-video-lens", "ls-watch", "ls-worker",
     "ls-youtube",
-    # Ryan, 2026-09-23 (liteask a-1fa60460): "Public, scrub gauntlet's paths".
+    # the user, 2026-09-23 (liteask a-1fa60460): "Public, scrub gauntlet's paths".
     "ls-gauntlet", "ls-mark", "ls-local-batch-agent",
+    # the user, 2026-09-25 (T916-H, via the orchestrator fce49c8c): theater is PUBLIC. It is
+    # ls-mockup renamed upstream (LiteSuite 92c6a48d0), so ls-mockup left this set.
+    # the user, 2026-09-26 (T947): "all shipped skills are prefixed with ls-" -> ls-theater.
+    "ls-theater",
+    # Legacy compatibility alias delegates to ls-theater, not a competing implementation.
+    "ls-mockup",
 })
+
+# Skills whose version in THIS catalog wins over the source, kept across the wipe so the
+# sync neither deletes nor reverts them, and named in PROVENANCE.json so the stamp says
+# which skills did NOT come from source_commit. the orchestrator's ruling 6aa9feed (T916-H plan b).
+# Drop a hold once the sync prints "upstream now identical" (the port is card T916-J).
+# ls-draw: never in LiteSuite's plugin. If it lands there it is UNCLASSIFIED and the gate
+# aborts, which is the cue to move it to PUBLIC_SKILLS and delete it from here.
+# The other six: edited in this repo after the 2026-08-18 sync and never upstreamed; every
+# LiteSuite blob in them is an EARLIER state of this repo (git log --all --find-object).
+KEEP_FROM_CATALOG: dict[str, str] = {
+    "ls-draw": "catalog-only, e9cd75b",
+    "ls-consult": "ahead of source, 90410bf 20fe0e7",
+    "ls-conversation-lookup": "ahead of source, 1173e8e",
+    "ls-gen-image-or-video": "ahead of source, dbaf186 f38e0d9",
+    "ls-liteharness": "ahead of source, 1380f18 ecb3488",
+    "ls-mark": "ahead of source, ad8456e c9ee13e",
+    "ls-youtube": "ahead of source, 3f49aef",
+}
 
 
 def gate_skill_classification(src_root: Path) -> None:
@@ -188,6 +211,19 @@ def capture_catalog_init(dest_root: Path) -> str | None:
     if init.is_file():
         return init.read_text(encoding="utf-8")
     return None
+
+
+def capture_kept_skills(dest_root: Path) -> dict[str, bytes]:
+    """Read every KEEP_FROM_CATALOG skill's files before the wipe. Call BEFORE the wipe."""
+    kept: dict[str, bytes] = {}
+    for name in KEEP_FROM_CATALOG:
+        d = dest_root / "skills" / name
+        if not d.is_dir():
+            raise SystemExit(f"[catalog] FATAL: kept skill {name} is not at {d} — nothing to keep")
+        for f in d.rglob("*"):
+            if f.is_file() and "__pycache__" not in f.parts:
+                kept[f.relative_to(dest_root).as_posix()] = f.read_bytes()
+    return kept
 
 
 def restore_catalog_init(dest_root: Path, preserved: str | None) -> None:
@@ -269,18 +305,68 @@ def assert_catalog_imports(pkg_root: Path) -> None:
     print(r.stdout.strip())
 
 
+# Files in the catalog dir that are not vendored content. The hash skips them so it can be
+# recomputed on an installed or checked-out catalog (tests/test_catalog_provenance.py does).
+UNHASHED = {"__init__.py", "PROVENANCE.json"}
+
+
+def is_runtime_catalog_path(relative: str | Path) -> bool:
+    """Precise runtime families, folding ASCII A-Z only on every platform.
+
+    Unicode near misses remain content. Release acceptance separately verifies
+    actual artifacts; this predicate is not a universal setuptools guarantee.
+    """
+    ascii_fold = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+    parts = tuple(part.translate(ascii_fold) for part in Path(relative).parts)
+    name = parts[-1] if parts else ""
+    if "__pycache__" in parts or name in {".last_indexed", "index.lock"}:
+        return True
+    extensions = (".db", ".sqlite", ".sqlite3")
+    sidecars = tuple(extension + suffix for extension in extensions
+                     for suffix in ("-wal", "-shm", "-journal"))
+    return name.endswith((".pyc", *extensions, *sidecars))
+
+
+def hashed_files(path: Path) -> dict[str, Path]:
+    """Release-content projection, keyed by POSIX path relative to `path`.
+
+    The historical UNHASHED basenames are excluded at every depth. Payload
+    verification must separately compare their presence and bytes. Kept-skill
+    equality notes compare this same release-content domain, not runtime state;
+    capture/copy/restore still preserves the original files independently.
+    """
+    return {f.relative_to(path).as_posix(): f for f in path.rglob("*")
+            if f.is_file() and f.name not in UNHASHED
+            and not is_runtime_catalog_path(f.relative_to(path))}
+
+
 def short_sha(path: Path) -> str:
+    """Hash what ships, identically on every copy of it, with no git in the loop.
+
+    🔴 0.4.x main went RED on its own stamp: this used to hash raw working-tree bytes.
+    A Windows checkout holds CRLF for files whose git blob is LF (7 of them on main at
+    ed102a9, `git ls-files --eol`: i/lf w/crlf), so the same catalog hashed two ways.
+    It also ignored names, so a rename never moved the hash, and it hashed an empty or
+    missing directory to sha256("") = e3b0c44298fc instead of refusing.
+
+    Per file, in sorted relpath order: relpath, NUL, sha256(content). EOL rule: a file
+    with no NUL byte is text and is hashed with CRLF -> LF (git's canonical form here:
+    every text blob in the index is LF); a file with a NUL byte is hashed raw.
+    """
+    files = hashed_files(path)
+    if not files:
+        raise SystemExit(f"[catalog] FATAL: no files to hash under {path} — wrong path?")
     h = hashlib.sha256()
-    if path.is_file():
-        h.update(path.read_bytes())
-    else:
-        for f in sorted(path.rglob("*")):
-            if f.is_file():
-                h.update(f.read_bytes())
+    for rel in sorted(files):
+        data = files[rel].read_bytes()
+        if b"\0" not in data:
+            data = data.replace(b"\r\n", b"\n")
+        h.update(rel.encode("utf-8") + b"\0" + hashlib.sha256(data).digest())
     return h.hexdigest()[:12]
 
 
-def sync(src_root: Path, dest_root: Path, clean: bool) -> dict[str, str | int]:
+def sync(src_root: Path, dest_root: Path, clean: bool,
+         source_commit: str | None = None) -> dict[str, str | int]:
     if not src_root.exists():
         raise SystemExit(f"Source repo not found: {src_root}")
 
@@ -293,12 +379,12 @@ def sync(src_root: Path, dest_root: Path, clean: bool) -> dict[str, str | int]:
     # Read the real catalog module BEFORE anything deletes it. `--clean` rmtree's
     # dest_root itself, which is how the 57-line module became a 1-line stub on 0.3.1.
     preserved_init = capture_catalog_init(dest_root)
+    kept = capture_kept_skills(dest_root)
 
     if clean and dest_root.exists():
         shutil.rmtree(dest_root)
     dest_root.mkdir(parents=True, exist_ok=True)
 
-    file_count = 0
     for rel_src, rel_dest in SUBTREES:
         s = src_root / rel_src
         d = dest_root / rel_dest
@@ -313,12 +399,30 @@ def sync(src_root: Path, dest_root: Path, clean: bool) -> dict[str, str | int]:
             ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", *PRIVATE_SKILLS),
         )
         n = sum(1 for _ in d.rglob("*") if _.is_file())
-        file_count += n
         print(f"[copy] {rel_src} -> {d.relative_to(THIS_PKG_ROOT)} ({n} files)")
 
+    # Replace each kept skill WHOLE: rmtree first, or the source's stale files would
+    # survive beside the kept ones (ls-gen-image-or-video's chatgpt_*.py, deleted in dbaf186).
+    for name in KEEP_FROM_CATALOG:
+        d = dest_root / "skills" / name
+        upstream = short_sha(d) if d.is_dir() else None
+        if d.is_dir():
+            shutil.rmtree(d)
+        for rel, data in kept.items():
+            if rel.startswith(f"skills/{name}/"):
+                (dest_root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (dest_root / rel).write_bytes(data)
+        note = " — upstream now identical, drop this hold" if upstream == short_sha(d) else ""
+        print(f"[keep] {name}: {KEEP_FROM_CATALOG[name]}{note}")
+    file_count = len(hashed_files(dest_root))
+
+    # With a commit, the source is a `git archive` export whose temp path means nothing
+    # (and would be a home path), so stamp the repo, commit and in-repo path instead.
     manifest = {
-        "source_repo": "ahostbr/liteharness-plugin",
-        "source_path": str(src_root),
+        "source_repo": "ahostbr/LiteSuite" if source_commit else "ahostbr/liteharness-plugin",
+        "source_commit": source_commit,
+        "source_path": "resources/liteharness-plugin" if source_commit else str(src_root),
+        "kept_from_catalog": KEEP_FROM_CATALOG,
         "synced_at": datetime.now(timezone.utc).isoformat(),
         "subtrees": [rel_dest for _, rel_dest in SUBTREES if (dest_root / rel_dest).exists()],
         "file_count": file_count,
@@ -337,8 +441,8 @@ def main() -> None:
     p.add_argument(
         "--source",
         type=Path,
-        default=DEFAULT_SOURCE,
-        help="Path to liteharness-plugin checkout (default: %(default)s)",
+        required=True,
+        help="Required path to the reviewed liteharness-plugin checkout",
     )
     p.add_argument(
         "--dest",
@@ -351,9 +455,13 @@ def main() -> None:
         action="store_true",
         help="Skip cleaning the destination dir before sync",
     )
+    p.add_argument(
+        "--source-commit",
+        help="LiteSuite commit that --source was `git archive`d from; stamped into PROVENANCE.json",
+    )
     args = p.parse_args()
     try:
-        sync(args.source, args.dest, clean=not args.no_clean)
+        sync(args.source, args.dest, clean=not args.no_clean, source_commit=args.source_commit)
     except SystemExit:
         raise
     except Exception as exc:

@@ -231,7 +231,7 @@ def release(
     re-acquirable. Owner-matched and never-completed only: a completed
     occurrence is history and stays forever.
 
-    For LIFETIME LOCKS (e.g. the scheduler-config sentinel slot): complete()
+    For LIFETIME LOCKS (e.g. the scheduler-config marker slot): complete()
     would BURN the slot permanently (takeover requires completed_at IS NULL
     and nothing clears it), so a lock holder releases on clean shutdown and
     lets TTL lapse cover crashes. For EXECUTED WORK this is the WRONG verb:

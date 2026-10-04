@@ -55,7 +55,7 @@ With `PYTHONUTF8=1` inherited:
   explicit CLI and environment takeovers, banner accuracy, legacy unknown
   provenance, and another CLI sharing a backend PID.
 
-This is isolated test/replay evidence, not a live restart of Sentinel. Deployment
+This is isolated test/replay evidence, not a live restart of the orchestrator. Deployment
 and a real resumed-seat acceptance remain separate. Existing intentional overrides
 without provenance should be explicitly registered once after cutover; do not
 infer takeover history merely from a name or UUID. Shared-runtime cutover is T376.

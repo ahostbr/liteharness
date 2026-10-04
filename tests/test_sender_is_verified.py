@@ -1,9 +1,9 @@
 """T841 — `--from` is checked, because the id that says WHO SPOKE was not.
 
-🔴 THE SPECIMEN. On 2026-09-17 message `874dd34b` reached Sentinel
+🔴 THE SPECIMEN. On 2026-09-17 message `874dd34b` reached the orchestrator
 `--from c8f7ae56-4748-41e4-abba-d977ea56e7ec` — NeonRack's own id with the last
 twelve characters wrong. The send printed a normal "Sent message …" and nothing
-else. Sentinel asked whether an unknown sender was using a near-copy of a live
+else. the orchestrator asked whether an unknown sender was using a near-copy of a live
 seat's id, which is exactly the right question and one the channel could not
 answer.
 
@@ -14,7 +14,7 @@ answer.
 
 ⚠️ AND THE FIX IS DELIBERATELY NOT SYMMETRIC. A seat that has not registered yet
 really does send under an unknown id, so refusing every unknown `--from` would
-close a live path to shut a typo hole. Two tiers instead (Sentinel 716463bb):
+close a live path to shut a typo hole. Two tiers instead (the orchestrator 716463bb):
 far id warns and sends; near miss refuses and names its neighbour.
 """
 

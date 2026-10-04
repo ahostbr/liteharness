@@ -25,14 +25,18 @@ class TestNormalizeModelId:
 
 class TestValidateModelId:
     @pytest.mark.parametrize("alias,expected", [
-        ("opus", "claude-opus-5[1m]"),
+        ("opus", "claude-opus-5-5[1m]"),
+        ("opus-5", "claude-opus-5[1m]"),
         ("opus-4.6", "claude-opus-4-6[1m]"),
         ("opus-4.6-1m", "claude-opus-4-6[1m]"),
         ("opus-4.6-200k", "claude-opus-4-6"),
         ("opus-4.8", "claude-opus-4-8[1m]"),
-        ("sonnet", "claude-sonnet-5"),
+        ("sonnet", "claude-sonnet-5-5"),
+        ("sonnet-5.5", "claude-sonnet-5-5"),
+        ("sonnet-5", "claude-sonnet-5"),
         ("haiku", "claude-haiku-4-5-20251001"),
-        ("fable", "claude-fable-5"),
+        ("fable", "claude-fable-5-1"),
+        ("fable-5", "claude-fable-5"),
         ("fable-5.1", "claude-fable-5-1"),
     ])
     def test_alias_resolves(self, alias, expected):

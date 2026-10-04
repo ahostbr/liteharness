@@ -2,6 +2,12 @@
 
 This document is the agent's reference for conducting the identity interview. It is NOT shown to the user. The agent reads this to calibrate question depth, follow-up strategy, and synthesis patterns.
 
+## Entry identity
+
+Ask the orchestrator's chosen name and active CLI before the interview. Human
+identity and agent identity are separate; never derive the agent name from git
+author metadata. Confirm process tier and thinking independently for each card.
+
 ## Question Bank
 
 ### Core Questions (always ask)
@@ -79,7 +85,7 @@ If the user doesn't want to share a trunk, respect that. Use "to be discovered" 
 
 | Risk tolerance answers        | HITL default | Per-task behavior                        |
 | ----------------------------- | ------------ | ---------------------------------------- |
-| Both "yes, auto-merge"        | OFF          | Override to ON for security/migrations   |
+| Both prefer autonomous work | OFF | Reversible preparation only; merge intent/review and human-look gates remain |
 | Bug fix = yes, migration = no | Per-task     | Reversibility test decides               |
 | Both "no, always ask me"      | ON           | Only override to OFF for trivial changes |
 

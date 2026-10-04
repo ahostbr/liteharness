@@ -1,6 +1,6 @@
 """A re-registration must never lower an agent's tier, model or name.
 
-🔴 THE DEFECT, MEASURED 2026-09-02 ON THE LIVE FLEET. Sentinel's own registry row
+🔴 THE DEFECT, MEASURED 2026-09-02 ON THE LIVE FLEET. the orchestrator's own registry row
 went `orchestrator` -> `worker` and `claude-fable-5-1` -> `unknown` between
 14:05:16Z and 14:06:07Z, and the heartbeat then carried the demoted values
 onward. `liteharness discover` printed him as a worker; the JSON on disk agreed
@@ -31,7 +31,7 @@ from liteharness.hooks import _read_presence, _write_json_atomic
 
 ORCHESTRATOR = {
     "agent_id": "bfc5e812-ec7b-4588-b74f-769e7bbe2eb1",
-    "name": "Sentinel",
+    "name": "Harbor",
     "tier": "orchestrator",
     "model": "claude-fable-5-1",
     "cli": "claude-code",
@@ -65,7 +65,7 @@ class TestReadPresence:
         got = _read_presence(path)
         assert got.get("tier") == "orchestrator"
         assert got.get("model") == "claude-fable-5-1"
-        assert got.get("name") == "Sentinel"
+        assert got.get("name") == "Harbor"
 
     def test_garbage_with_no_agent_id_is_not_salvaged(self, tmp_path):
         # A salvage that accepts anything would invent a row. The prefix must
@@ -106,7 +106,7 @@ class TestHookReRegisterPreservesIdentity:
         merged = self._row_after_hook_style_merge(_read_presence(path), env_tier=None)
         assert merged["tier"] == "orchestrator"
         assert merged["model"] == "claude-fable-5-1"
-        assert merged["name"] == "Sentinel"
+        assert merged["name"] == "Harbor"
 
     def test_orchestrator_survives_even_when_the_row_is_torn(self, tmp_path):
         """The same, through the corruption that actually caused it."""

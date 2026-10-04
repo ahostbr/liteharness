@@ -41,7 +41,7 @@ from typing import Callable
 from . import occurrences
 
 #: The well-known ledger row that stands for "somebody owns schedules.json".
-#: A real cron slot is an ISO minute; this sentinel cannot collide with one.
+#: A real cron slot is an ISO minute; this marker cannot collide with one.
 CONFIG_LOCK_JOB_ID = "__scheduler_config__"
 CONFIG_LOCK_SLOT = "lock"
 

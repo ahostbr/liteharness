@@ -3,7 +3,7 @@
 MEASURED FIRST, NOT ASSUMED, AND THE FIRST MEASUREMENT WAS WRONG. The card's
 stated mechanism — the hook writing the per-resume payload `session_id` into the
 OVERRIDE slot — was already fixed on 2026-08-29 (`b6e39a3`), so I first keyed the
-guard to that path: fire only when the id came from the payload DEFAULT. Sentinel
+guard to that path: fire only when the id came from the payload DEFAULT. the orchestrator
 refuted it from his own seat, measured: at 16:2x on 2026-09-03 his hook registered
 `99dd8b40` on pid 23100 while his shell's `CLAUDE_CODE_SESSION_ID` read — and
 still reads — `bfc5e812`. Either the var was absent from the hook subprocess, or
@@ -17,7 +17,7 @@ same collision, so the guard is keyed to the COLLISION and both are armed here.
 
     SUPERSESSION BY TIMESTAMP ALONE CANNOT TELL A SUCCESSOR FROM AN IMPOSTOR.
 
-The end-to-end acceptance Sentinel carded — resume a real seat, take over its
+The end-to-end acceptance the orchestrator carded — resume a real seat, take over its
 name, three prompts, `discover` still lists it — was NOT driven. Doing so means
 resuming a live fleet seat, and these arms encode the same property at the unit
 level against a tmp root.
@@ -68,7 +68,7 @@ class ResumeEvictionTests(unittest.TestCase):
     def _seed_takeover(self) -> None:
         """The record `register --takeover` leaves: authoritative id, named."""
         self._register({"LITEHARNESS_AGENT_ID": TAKEOVER_ID})
-        naming.set_override(TAKEOVER_ID, "Sentinel")
+        naming.set_override(TAKEOVER_ID, "Harbor")
 
     def _resume_hook(self, env_session_id: str | None) -> None:
         """A SessionStart after `--resume`, with the payload carrying a NEW id.
@@ -97,7 +97,7 @@ class ResumeEvictionTests(unittest.TestCase):
             cli._superseded_by_later_registration(TAKEOVER_ID, data),
             "a resume's generated identity retired the record a takeover had claimed",
         )
-        self.assertEqual(naming.get_name(TAKEOVER_ID), "Sentinel")
+        self.assertEqual(naming.get_name(TAKEOVER_ID), "Harbor")
 
     def test_hypothesis_a_env_id_absent_from_the_hook(self) -> None:
         self._seed_takeover()
@@ -105,7 +105,7 @@ class ResumeEvictionTests(unittest.TestCase):
         self._assert_takeover_intact()
 
     def test_hypothesis_b_env_id_present_but_already_rewritten(self) -> None:
-        """Sentinel's case. The deferral HONOURS the var and still collides."""
+        """the orchestrator's case. The deferral HONOURS the var and still collides."""
         self._seed_takeover()
         self._resume_hook(env_session_id=RESUME_PAYLOAD_ID)
         self._assert_takeover_intact()
@@ -167,7 +167,7 @@ class ResumeEvictionTests(unittest.TestCase):
             self._register({}, pid=pid)
 
     def test_both_ids_are_logged_from_the_one_process_that_decided(self) -> None:
-        """The instrumentation Sentinel asked for, and why it exists.
+        """The instrumentation the orchestrator asked for, and why it exists.
 
         The 09-03 phantom was diagnosed from a shell's env and a hook's payload —
         two processes, two moments — leaving hypotheses (a) and (b) impossible to

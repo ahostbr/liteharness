@@ -3,7 +3,7 @@
 
 This is the SPEAK-ONCE path and it is deliberately INDEPENDENT of TTS mode.
 It never reads the mode flag and never writes it. An agent that wants to tell
-Ryan one thing calls this; whether "speak every response" mode happens to be on
+the user one thing calls this; whether "speak every response" mode happens to be on
 is a different question with a different owner (ttsmode.py).
 
     python speak.py "the build finished"

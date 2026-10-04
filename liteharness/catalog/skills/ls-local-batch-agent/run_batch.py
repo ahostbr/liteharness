@@ -168,7 +168,7 @@ def run(manifest_path: Path, output: Path, model: str | None, exe: str, timeout:
         raise ValueError(f"repo does not exist: {repo}")
     models = resident_models()
     if not models:
-        raise RuntimeError("No LM Studio model is resident. Ask Sentinel via inbox before loading; this runner will not load one.")
+        raise RuntimeError("No LM Studio model is resident. Ask your orchestrator via inbox before loading; this runner will not load one.")
     chosen = model or (models[0] if len(models) == 1 else None)
     if chosen is None or chosen not in models:
         raise ValueError(f"choose an already-resident model with --model; resident: {models}")

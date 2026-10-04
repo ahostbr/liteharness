@@ -148,7 +148,7 @@ def _find_claude_session_id() -> Optional[str]:
         return None
 
     cwd = os.getcwd()
-    # Claude encodes project paths: C:\Projects\MyApp -> C--Projects-MyApp
+    # Claude encodes project paths: C:\workspace\MyApp -> C--workspace-MyApp
     # or D:\Work\benchmark -> D--Work-benchmark
     cwd_encoded = cwd.replace(":\\", "--").replace("\\", "-").replace("/", "-")
 

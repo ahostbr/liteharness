@@ -53,6 +53,22 @@ python -m liteharness.cli send <requester-id> "REVIEW: <verdict>
 - **REQUEST_CHANGES**: Blocking issues that must be fixed
 - **COMMENT**: Non-blocking suggestions
 
+## Source-backed intent review (when ledger clauses are supplied)
+
+The product intent gate is distinct from a mission's code-review assignment.
+For a blind intent review consume ONLY numbered clauses with exact quote IDs/text
+and the diff, never the builder's brief, report, self-review or evidence map.
+Record current revision, diff SHA-256 and actual reviewer identity/model/family.
+The ledger requires an independent DIFFERENT-family reviewer from the recorded
+builder; a same-family mission review does not satisfy that product gate.
+
+For EVERY clause return its ID, one of MET / PARTIAL / MISSING / CONTRADICTED,
+and independently located file:line/test evidence. Missing source or unconfirmed
+clauses remain pending; never average away a constraint. Only all MET with the
+builder's explicit per-clause agreement can be candidate-ready. the user's separate
+confirmation/ticks come only from explicit UI clicks, labeled 'confirmed in UI',
+not authentication proof. Agents never confirm or tick on his behalf.
+
 ## Review Checklist
 
 1. Correctness — does it do what it claims?

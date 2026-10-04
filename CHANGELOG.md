@@ -5,6 +5,33 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`liteharness index --check --project ROOT`**: exits 0 when `ROOT/AGENT_INDEX.md` exists, is at
+  most 12,000 chars, and every markdown link in it resolves (relative to the index file,
+  URL-decoded, `#fragment` ignored; http/https/mailto and pure anchors skipped). Exits 1
+  printing `AGENT_INDEX.md:<line>: dead link -> <target>` per dead link, for a missing index,
+  or for an oversize one (counted in raw characters, CRLF as two). Links inside fenced code
+  blocks (``` or ~~~) are examples and are not checked.
+- SessionStart prints the repo's `AGENT_INDEX.md` path and first screen right after the spawn
+  brief (a pointer only after compaction).
+- **Named persistent agents.** `~/.liteharness/names.json` maps one name to one agent and one
+  LiteTUI conversation (plus cwd/backend/model). `liteharness spawn --split --resume <Name>`
+  resumes by name (cwd and conversation come from the index), `liteharness names --list [--json]`
+  prints the index, and a fresh LiteTUI spawn under a name already in the index is refused
+  unless `--takeover` is passed.
+- `liteharness spawn` refuses a fresh worker/leader spawn without `--cwd` (exit 2) instead of
+  inheriting the caller's cwd.
+
+### Changed
+- The stale-agent sweep and SessionEnd no longer delete a presence file whose agent owns a
+  conversation (named in the index, or a conversation's `seat_id`): it is marked
+  `status: offline` with `exited_at`, so resume still resolves it. `discover --all` shows it
+  as `offline`; re-registering clears the mark.
+- Resuming a NAMED agent never closes a live seat: it is refused with `live: message <Name> by
+  inbox instead`, and `--kill-old` is not available to a named resume.
+
 ## [0.4.3] — 2026-09-23
 
 ### Added

@@ -280,7 +280,7 @@ def test_a_genuine_first_run_still_arms_on_its_own_env_id(identity_root, capsys)
 # ---------------------------------------------------------------------------
 #
 # 🔴 MEASURED on SilverBolt's own seat, 2026-09-13 01:15, coming back from a PC
-# restart Ryan ordered. One claude.exe (pid 32844):
+# restart the user ordered. One claude.exe (pid 32844):
 #
 #     SessionStart resolved 1ccbc1d5-… from the CLI environment and wrote a
 #         presence file with registration_source "resume".
@@ -488,7 +488,7 @@ def test_an_exited_owner_is_not_followed(identity_root, capsys):
 # T563 — the guard was never wrong, it was asked TOO EARLY.
 # ---------------------------------------------------------------------------
 #
-# 🔴 MEASURED on Ryan's seat, 2026-09-10: claude.exe 29436 started 08:58:42, the
+# 🔴 MEASURED on the user's seat, 2026-09-10: claude.exe 29436 started 08:58:42, the
 # watcher armed 08:58:46 on the STARTUP uuid, and the seat's real presence
 # registered 08:59:07 — TWENTY-ONE SECONDS AFTER THE WATCHER. Every arm above
 # passes in that scenario, because at the moment they run the successor record
