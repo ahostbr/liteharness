@@ -52,8 +52,8 @@ def load_gate():
         path = Path(source) / "liteharness" / "deny_gate.py"
     import hashlib
     expected = {"deny_gate.py": "15e98aea4ac8154d028aadc2e375e18892d202a95794b9fbe82ef59706d3cd79",
-                "deny_floor.py": "063f2197eaca6ab765a7dbf384db76a6ab33b9175b70f611645f9c510f259f47"}
-    # Corrected same-release packet: OSS 93148ae69e8b8a28334f075c4b1fcdd7c1ce79ff.
+                "deny_floor.py": "7703738d2d6b1919a440e45543b4016e099eb8b136ef939a7014cfe07315d60e"}
+    # Policy source: OSS 9940abe59abb643c6d3181171c9c898e2eef51d7; package version 0.4.4.
     if distribution.version != "0.4.4":
         raise ValueError("Unverified installed policy version")
     from types import ModuleType
