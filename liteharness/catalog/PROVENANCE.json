@@ -20,5 +20,5 @@
   ],
   "file_count": 415,
   "hash": "fed86859f06e",
-  "release_overlay": "Identity-portable runtime/doctrine, reconciled onboarding and reviewed catalog/plugin payload parity, including paste project-root fix. Base source and retained catalog origins recorded above. Hash covers tracked release resources only (CRLF-normalized text), not untracked tool locks or an untouched base archive."
+  "release_overlay": "Identity-portable runtime/doctrine, reconciled onboarding and reviewed catalog/plugin payload parity, including paste project-root fix and the approved bounded branch/merge-base read exemptions in the canonical 0.4.4 floor. Base source and retained catalog origins recorded above. Hash covers tracked release resources only (CRLF-normalized text), not untracked tool locks or an untouched base archive."
 }
