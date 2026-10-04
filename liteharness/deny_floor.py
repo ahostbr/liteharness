@@ -706,9 +706,14 @@ def _git_read_words(args: list[str], redirects=()) -> bool:
         return (operands[:1] == ["list"]
                 and all(word in {"--porcelain", "-z", "-v", "--verbose"}
                         for word in operands[1:]))
+    if verb == "merge-base":
+        return (len(operands) == 3 and operands[0] == "--is-ancestor"
+                and all(re.fullmatch(r"[0-9a-fA-F]{40}", oid) for oid in operands[1:]))
     if verb == "branch":
-        # --list is required. Other branch operations write refs/config even
-        # when mixed with it; do not infer a read from one option in argv.
+        if operands == ["--show-current"]:
+            return True
+        # Otherwise --list is required. Other operations write refs/config;
+        # do not infer a read from one option mixed with a write.
         return ("--list" in operands and all(
             not word.startswith("-") or word in {
                 "--list", "-l", "--all", "-a", "--remotes", "-r", "--verbose", "-v", "-vv"

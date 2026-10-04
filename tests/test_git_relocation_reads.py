@@ -6,7 +6,8 @@ from liteharness import deny_floor, deny_gate
 READS = ['worktree list', 'worktree list --porcelain', 'worktree list --porcelain -z',
          'status', 'log -- jobs.json', 'show HEAD:jobs.json', 'diff -- jobs.json',
          'rev-parse --show-toplevel', 'branch --list', 'branch --list feature*',
-         'branch --all --list', 'branch --list --verbose']
+         'branch --all --list', 'branch --list --verbose', 'branch --show-current',
+         'merge-base --is-ancestor ' + 'a' * 40 + ' ' + 'B' * 40]
 RELOCATIONS = ['-C {root}', '-C{root}', '--git-dir={root}/.git',
                '--git-dir {root}/.git', '--git-dir={root}/.git --work-tree={root}',
                '--no-pager -C {root} --git-dir {root}/.git']
@@ -56,6 +57,13 @@ def test_relocated_writes_do_not_gain_reader_waiver(roots, relocation, writer):
     'branch --list --delete old', 'branch --list --create-reflog',
     'status; git -C {root} checkout -- jobs.json',
     'status && git --git-dir={root}/.git push',
+    'branch --show-current --delete old',
+    'branch --show-current > {root}/jobs.json',
+    'branch --show-current; git -C {root} checkout -- jobs.json',
+    'merge-base --is-ancestor ' + 'a' * 40 + ' ' + 'b' * 40 + ' > {root}/jobs.json',
+    'merge-base --is-ancestor ' + 'a' * 40 + ' ' + 'b' * 40 + '; Remove-Item {root}/jobs.json',
+    'merge-base --is-ancestor HEAD other',
+    'merge-base --is-ancestor ' + 'a' * 40 + ' ' + 'b' * 40 + ' --octopus',
 ])
 def test_output_and_compound_writers_remain_refused(roots, tail):
     protected, plain = roots

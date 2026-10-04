@@ -19,6 +19,6 @@
     "hooks"
   ],
   "file_count": 415,
-  "hash": "2846e8dba912",
+  "hash": "fed86859f06e",
   "release_overlay": "Identity-portable runtime/doctrine, reconciled onboarding and reviewed catalog/plugin payload parity, including paste project-root fix. Base source and retained catalog origins recorded above. Hash covers tracked release resources only (CRLF-normalized text), not untracked tool locks or an untouched base archive."
 }
