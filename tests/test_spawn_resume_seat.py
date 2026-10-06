@@ -57,87 +57,28 @@ def test_lookup_explicit_convo_wins_ambiguous_agent_search(seat, tmp_path):
     assert resume_seat.lookup(AID, CID)[0] == CID
 
 
-def test_resolve_edits_native_request_and_preserves_three_reads(seat, monkeypatch):
-    root, original, registry, project = seat
-    calls = []
-
-    def bridge(method, path, body=None):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        calls.append((method, path, body))
-        if path == "/pty/list":
-            return {"sessions": [{"id": "pty-old", "pid": 123, "cwd": str(project)}]}
-        if path == "/harness/spawn/resolve":
-            return {"ok": True, "request": {"args": ["--model", "gpt-6-sol", "--system-prompt-file", "worker.md"],
-                                             "env": {"LITEHARNESS_AGENT_ID": "new-id"},
-                                             "harnessAgentId": "new-id"}}
-        return {"newSessionId": "pty-new"}
-
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    cli.cmd_spawn(split_mode=True, split_pane="canvas-pane-1", resume_agent_id=AID)
-    resolve = calls[1][2]
-    assert resolve == {"cli": "litetui", "name": "Old", "tier": "worker", "model": "gpt-6-sol",
-                       "backend": "codex", "thinkingLevel": "high", "cwd": str(project), "spawnedBy": "parent-id"}
-    split = calls[2][2]
-    assert split["paneId"] == "canvas-pane-1"
-    assert split["cwd"] == str(project)
-    assert split["launch"]["args"] == ["--model", "gpt-6-sol", "--convo", CID]
-    assert split["launch"]["env"]["LITEHARNESS_AGENT_ID"] == AID
-    assert split["launch"]["harnessAgentId"] == AID
-    assert json.loads((root / "agents" / f"{AID}.json").read_text())["thinking_level"] == "high"
-    assert json.loads((project.parent / "data" / ".convos" / CID / "settings.json").read_text()) == original
+def test_legacy_archive_refused_resolve_edits_native_request_and_preserves_three_reads(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID)
 
 
-def test_alive_refuses_before_resolve_and_does_not_kill(seat, monkeypatch, capsys):
-    _, _, _, project = seat
-    calls = []
-    monkeypatch.setattr(cli, "_live_owner_pid", lambda _: 123)
-    monkeypatch.setattr(cli, "_bridge_request", lambda method, path, body=None: (
-        calls.append((method, path)) or {"sessions": [{"id": "pty-old", "cwd": str(project), "pid": 123}]}
-    ))
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_spawn(split_mode=True, resume_agent_id=AID)
-    assert exc.value.code == 2
-    assert "still running" in capsys.readouterr().out
-    assert calls == [("GET", "/pty/list")]
+def test_legacy_archive_refused_alive_refuses_before_resolve_and_does_not_kill(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID)
 
 
-def test_kill_waits_for_pid_to_exit_before_launch(seat, monkeypatch):
-    _, _, _, project = seat
-    calls = []
-    monkeypatch.setattr(cli, "_live_owner_pid", lambda _: 123)
-    from liteharness import hooks
-    monkeypatch.setattr(hooks, "_pid_alive", lambda _: True)
-    monkeypatch.setattr(resume_seat.time, "sleep", lambda _: None)
-    def bridge(method, path, body=None, **kwargs):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        if method == "DELETE":
-            assert kwargs["lifecycle_origin"] == "liteharness-resume:kill-old"
-        calls.append((method, path))
-        if path == "/pty/list":
-            return {"sessions": [{"id": "pty-old", "cwd": str(project), "pid": 123}]}
-        if path == "/harness/spawn/resolve":
-            return {"ok": True, "request": {"args": ["--system-prompt-file", "worker.md"], "env": {}}}
-        return {"ok": True}
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    with pytest.raises(ValueError, match="still alive after PTY close"):
-        resume_seat.spawn_resume(agent_id=AID, convo_id=None, pane=None, direction=None,
-                                 cwd=None, name=None, tier=None, model=None, backend=None,
-                                 thinking_level=None, spawned_by=None, kill_old=True, prompt=None)
-    assert calls == [("GET", "/pty/list"), ("POST", "/harness/spawn/resolve"),
-                     ("DELETE", "/pty/pty-old")]
+def test_legacy_archive_refused_kill_waits_for_pid_to_exit_before_launch(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID, kill_old=True)
 
 
-def test_unknown_cwd_refuses_instead_of_guessing_data_root(seat, monkeypatch):
-    calls = []
-    monkeypatch.setattr(cli, "_bridge_request", lambda method, path, body=None: (
-        calls.append(path) or {"sessions": []}))
-    with pytest.raises(ValueError, match="cwd unknown: pass --cwd"):
-        resume_seat.spawn_resume(agent_id=AID, convo_id=None, pane=None, direction=None,
-                                 cwd=None, name=None, tier=None, model=None, backend=None,
-                                 thinking_level=None, spawned_by=None, kill_old=False, prompt=None)
-    assert calls == ["/pty/list", "/session/list"]
+def test_legacy_archive_refused_unknown_cwd_refuses_instead_of_guessing_data_root(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID)
 
 
 def test_claude_extra_resume_is_unchanged_and_native_flag_is_distinct():
@@ -147,122 +88,34 @@ def test_claude_extra_resume_is_unchanged_and_native_flag_is_distinct():
         "split_mode": True, "resume_agent_id": AID}
 
 
-def test_session_launch_record_links_old_agent_to_pty_cwd(seat, monkeypatch):
-    _, _, _, project = seat
-    calls = []
-    def bridge(method, path, body=None):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        calls.append(path)
-        if path == "/pty/list":
-            return {"sessions": [{"id": "another-pty", "cwd": str(project), "pid": 999}]}
-        if path == "/session/list":
-            return {"sessions": [{"sessionId": "another-pty", "agentId": AID}]}
-        if path == "/harness/spawn/resolve":
-            assert body["cwd"] == str(project)
-            return {"ok": True, "request": {"args": ["--system-prompt-file", "worker.md"],
-                                             "env": {}, "harnessAgentId": "new"}}
-        return {"newSessionId": "pty-new"}
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    cli.cmd_spawn(split_mode=True, resume_agent_id=AID)
-    assert calls == ["/pty/list", "/session/list", "/harness/spawn/resolve", "/canvas/split"]
+def test_legacy_archive_refused_session_launch_record_links_old_agent_to_pty_cwd(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID)
 
 
-def test_explicit_cwd_and_flags_override_disk_values(seat, monkeypatch, tmp_path):
-    _, _, _, _ = seat
-    project = tmp_path / "different-project"
-    project.mkdir()
-    seen = []
-    def bridge(method, path, body=None):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        if path == "/pty/list":
-            return {"sessions": []}
-        if path == "/session/list":
-            return {"sessions": []}
-        if path == "/harness/spawn/resolve":
-            seen.append(body)
-            return {"ok": True, "request": {"args": ["--system-prompt-file", "worker.md"], "env": {}}}
-        return {"newSessionId": "pty-new"}
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    cli.cmd_spawn(split_mode=True, resume_agent_id=AID, resume_convo_id=CID, cwd=str(project),
-                  name="New", tier="leader", model="gpt-6-sol", backend="codex",
-                  thinking_level="high", spawned_by="new-parent")
-    assert seen[0] == {"cli": "litetui", "name": "New", "tier": "leader",
-                       "model": "gpt-6-sol", "backend": "codex", "thinkingLevel": "high",
-                       "cwd": str(project), "spawnedBy": "new-parent"}
+def test_legacy_archive_refused_explicit_cwd_and_flags_override_disk_values(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID, model='wrong', thinking_level='low')
 
 
-def test_convo_alone_uses_its_seat_id_and_registry(seat, monkeypatch):
-    _, _, _, project = seat
-    seen = []
-
-    def bridge(method, path, body=None):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        if path == "/pty/list":
-            return {"sessions": []}
-        if path == "/session/list":
-            return {"sessions": []}
-        if path == "/harness/spawn/resolve":
-            seen.append(body)
-            return {"ok": True, "request": {"args": [], "env": {}}}
-        seen.append(body)
-        return {"newSessionId": "pty-new"}
-
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    cli.cmd_spawn(split_mode=True, resume_convo_id=CID, cwd=str(project))
-    assert seen[0]["name"] == "Old"
-    assert seen[1]["launch"]["harnessAgentId"] == AID
-    assert seen[1]["launch"]["args"] == ["--convo", CID]
+def test_legacy_archive_refused_convo_alone_uses_its_seat_id_and_registry(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_convo_id=CID)
 
 
-def test_kill_closes_old_pty_then_launches_when_owner_exits(seat, monkeypatch):
-    _, _, _, project = seat
-    calls = []
-    monkeypatch.setattr(cli, "_live_owner_pid", lambda _: 123)
-    from liteharness import hooks
-    monkeypatch.setattr(hooks, "_pid_alive", lambda _: False)
-
-    def bridge(method, path, body=None, **kwargs):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        if method == "DELETE":
-            assert kwargs["lifecycle_origin"] == "liteharness-resume:kill-old"
-        calls.append((method, path))
-        if path == "/pty/list":
-            return {"sessions": [{"id": "pty-old", "cwd": str(project), "pid": 123}]}
-        if path == "/harness/spawn/resolve":
-            return {"ok": True, "request": {"args": ["--system-prompt-file", "worker.md"], "env": {}}}
-        if path.startswith("/pty/"):
-            return {"success": True}
-        return {"newSessionId": "pty-new"}
-
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    cli.cmd_spawn(split_mode=True, resume_agent_id=AID, kill_old=True)
-    assert calls == [("GET", "/pty/list"), ("POST", "/harness/spawn/resolve"),
-                     ("DELETE", "/pty/pty-old"), ("POST", "/canvas/split")]
+def test_legacy_archive_refused_kill_closes_old_pty_then_launches_when_owner_exits(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID, kill_old=True)
 
 
-def test_below_floor_thinking_refuses_before_resolver_or_split(seat, monkeypatch, tmp_path):
-    _, _, _, project = seat
-    from liteharness import fleet_policy
-    # Exercise the real policy gate against an isolated floor and model cache.
-    policy = tmp_path / "policy.json"
-    policy.write_text(json.dumps({"floors": {"codex": {"models": ["gpt-6-sol"],
-                                                    "min_model": "gpt-6-sol",
-                                                    "thinking_levels": ["low", "medium", "high"],
-                                                    "min_thinking_level": "medium"}}}))
-    monkeypatch.setattr(fleet_policy, "gate", lambda backend, model, thinking:
-                        fleet_policy.check(backend, model, thinking, path=policy))
-    calls = []
-    monkeypatch.setattr(cli, "_bridge_request", lambda method, path, body=None:
-                        calls.append(path) or {"sessions": [{"id": "pty-old", "pid": 123,
-                                                              "cwd": str(project)}]})
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_spawn(split_mode=True, resume_agent_id=AID, thinking_level="low")
-    assert exc.value.code == 2
-    assert calls == ["/pty/list"]
+def test_legacy_archive_refused_below_floor_thinking_refuses_before_resolver_or_split(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID, thinking_level='low')
 
 
 def test_old_pty_matches_litetui_launcher_through_python_parent(monkeypatch):
@@ -288,88 +141,22 @@ def test_old_pty_matches_litetui_launcher_through_python_parent(monkeypatch):
     assert resume_seat._old_pty({**registry, "canvas_session_id": "other"}, sessions) == sessions[0]
 
 
-def test_missing_psutil_refuses_unknown_cwd_without_crashing(seat, monkeypatch, capsys):
-    _, _, registry, project = seat
-    registry["canvas_session_id"] = None
-    monkeypatch.setitem(sys.modules, "psutil", None)
-    calls = []
-
-    def bridge(method, path, body=None):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        calls.append(path)
-        if path == "/pty/list":
-            return {"sessions": [{"id": "pty-13", "pid": 133900, "cwd": str(project)}]}
-        return {"sessions": []}
-
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_spawn(split_mode=True, resume_agent_id=AID)
-    assert exc.value.code == 2
-    assert "cwd unknown: pass --cwd" in capsys.readouterr().out
-    assert calls == ["/pty/list", "/session/list"]
+def test_legacy_archive_refused_missing_psutil_refuses_unknown_cwd_without_crashing(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID)
 
 
-def test_ancestor_pty_supplies_cwd_and_kill_target(seat, monkeypatch):
-    _, _, registry, project = seat
-    registry["canvas_session_id"] = None
-    registry["session_pid"] = 48832
-    monkeypatch.setattr(resume_seat, "_ancestor_pids", lambda _pid: [48832, 115132, 133900])
-    monkeypatch.setattr(cli, "_live_owner_pid", lambda _: 48832)
-    from liteharness import hooks
-    monkeypatch.setattr(hooks, "_pid_alive", lambda _: False)
-    calls = []
-
-    def bridge(method, path, body=None, **kwargs):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        if method == "DELETE":
-            assert kwargs["lifecycle_origin"] == "liteharness-resume:kill-old"
-        calls.append((method, path, body))
-        if path == "/pty/list":
-            return {"sessions": [{"id": "pty-13", "pid": 133900, "cwd": str(project)}]}
-        if path == "/harness/spawn/resolve":
-            assert body["cwd"] == str(project)
-            return {"ok": True, "request": {"args": ["--system-prompt-file", "worker.md"], "env": {}}}
-        if path == "/pty/pty-13":
-            return {"success": True}
-        return {"newSessionId": "pty-new"}
-
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    cli.cmd_spawn(split_mode=True, resume_agent_id=AID, kill_old=True)
-    assert [(method, path) for method, path, _ in calls] == [
-        ("GET", "/pty/list"), ("POST", "/harness/spawn/resolve"),
-        ("DELETE", "/pty/pty-13"), ("POST", "/canvas/split")]
+def test_legacy_archive_refused_ancestor_pty_supplies_cwd_and_kill_target(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID, kill_old=True)
 
 
-def test_no_ancestor_match_keeps_unknown_cwd_and_alive_kill_refusals(seat, monkeypatch):
-    _, _, _, project = seat
-    monkeypatch.setattr(resume_seat, "_ancestor_pids", lambda _pid: [48832, 115132, 133900])
-    monkeypatch.setattr(cli, "_bridge_request", lambda method, path, body=None: (
-        {"sessions": [{"id": "other", "pid": 42, "cwd": str(project)}]}
-        if path == "/pty/list" else {"sessions": []}))
-    assert resume_seat._old_pty({"session_pid": 48832}, [{"id": "other", "pid": 42}]) is None
-    with pytest.raises(ValueError, match="cwd unknown: pass --cwd"):
-        resume_seat.spawn_resume(agent_id=AID, convo_id=None, pane=None, direction=None,
-                                 cwd=None, name=None, tier=None, model=None, backend=None,
-                                 thinking_level=None, spawned_by=None, kill_old=True, prompt=None)
-    monkeypatch.setattr(cli, "_live_owner_pid", lambda _: 48832)
-    def bridge(method, path, body=None):
-        if path.startswith("/context?"):
-            return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
-        if path == "/pty/list":
-            return {"sessions": [{"id": "other", "pid": 42, "cwd": str(project)}]}
-        if path == "/session/list":
-            return {"sessions": []}
-        if path == "/harness/spawn/resolve":
-            return {"ok": True, "request": {"args": [], "env": {}}}
-        raise AssertionError(f"unexpected bridge call: {path}")
-
-    monkeypatch.setattr(cli, "_bridge_request", bridge)
-    with pytest.raises(ValueError, match="no matching PTY session to close"):
-        resume_seat.spawn_resume(agent_id=AID, convo_id=None, pane=None, direction=None,
-                                 cwd=str(project), name=None, tier=None, model=None, backend=None,
-                                 thinking_level=None, spawned_by=None, kill_old=True, prompt=None)
+def test_legacy_archive_refused_no_ancestor_match_keeps_unknown_cwd_and_alive_kill_refusals(seat, monkeypatch):
+    # Retired contract: registry/archive-derived mutable resume. Replaced by
+    # authoritative owned home; refuse before resolve/close/write, even with flags.
+    _assert_archive_resume_refused(seat, monkeypatch, resume_agent_id=AID, kill_old=True)
 
 
 def test_missing_litetui_root_refuses_instead_of_using_a_machine_path(monkeypatch):
@@ -461,3 +248,17 @@ def test_relative_env_indexer_warns_and_sweep_treats_ownership_as_unknown(seat, 
     # UNKNOWN must retain a LiteTUI record, but not an unrelated CLI record.
     assert agent_names.owns_conversation("another-id", {"cli": "litetui"}) is True
     assert agent_names.owns_conversation("another-id", {"cli": "claude-code"}) is False
+
+
+def _assert_archive_resume_refused(seat, monkeypatch, **flags):
+    root, original, registry, project = seat
+    source = project.parent / 'data' / '.convos' / CID
+    before = {p.name: p.read_bytes() for p in source.iterdir()}
+    calls = []
+    monkeypatch.setattr(cli, '_bridge_request', lambda *a, **kw: calls.append(a) or {})
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_spawn(split_mode=True, cwd=str(project), tier='worker', **flags)
+    assert exc.value.code == 2
+    assert calls == []
+    assert {p.name: p.read_bytes() for p in source.iterdir()} == before
+    assert json.loads((root / 'agents' / f'{AID}.json').read_text()) == registry

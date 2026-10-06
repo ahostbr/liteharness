@@ -36,7 +36,8 @@ def main(argv: list[str] | None = None) -> None:
             if manifest.get('root') != str(root):
                 raise StoreError('Approved manifest root disagrees with --root')
         else:
-            manifest = named_plan(root, names=_object(registry / 'names.json'))
+            manifest = named_plan(root, names=_object(registry / 'names.json'),
+                                  selected_agent=args.copy_agent)
         agents = manifest.get('agents')
         if not isinstance(agents, list) or any(not isinstance(row, dict) for row in agents):
             raise StoreError('Invalid named-policy agents')

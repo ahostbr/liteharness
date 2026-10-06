@@ -228,7 +228,8 @@ def _bridge_token_file() -> str:
 
 
 def _bridge_request(method: str, path: str, body: dict | None = None,
-                    *, lifecycle_origin: str | None = None) -> dict:
+                    *, lifecycle_origin: str | None = None,
+                    retry_stale_token: bool = True) -> dict:
     """Send an authenticated request to the LiteSuite Agent Bridge HTTP server."""
     import urllib.request
     import urllib.error
@@ -266,7 +267,7 @@ def _bridge_request(method: str, path: str, body: dict | None = None,
     # bridge uses, so canvas ops work from any terminal.
     env_token = os.environ.get("LITESUITE_BRIDGE_TOKEN", "")
     status, result = send(env_token or _bridge_token_file())
-    if status == 401 and env_token:
+    if retry_stale_token and status == 401 and env_token:
         # T916-D: a relaunched LiteSuite mints a new token and writes it to
         # disk, but a seat's env still holds the old one. A 401 did nothing
         # on the bridge, so retrying ONCE with the file's token is safe.
@@ -274,6 +275,11 @@ def _bridge_request(method: str, path: str, body: dict | None = None,
         if file_token and file_token != env_token:
             status, result = send(file_token)
     return result
+
+
+def _retirement_bridge_request(method: str, path: str, body: dict | None = None) -> dict:
+    """One HTTP attempt, including stale-credential refusal; never token retry."""
+    return _bridge_request(method, path, body, retry_stale_token=False)
 
 
 def _rename_canvas_seat(session_id: str, name: str) -> str | None:
@@ -3965,7 +3971,16 @@ def _spawn_litetui_agent(
     if not resolved.get("ok"):
         print(f"SPAWN REFUSED: {resolved.get('message') or resolved.get('error', 'spawn resolution failed')}")
         sys.exit(2)
-    launch = resolved["request"]
+    from . import owned_launch
+    from .agent_store import StoreError
+    try:
+        root = owned_launch.data_root(resolved)
+        launch = owned_launch.request(resolved, root=root, name=name,
+                                      agent_id=resolved.get('agentId'), backend=backend,
+                                      model=model, thinking_level=thinking_level, fresh=True)
+    except (StoreError, OSError, TypeError) as exc:
+        print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
+        sys.exit(2)
     try:
         if pty_mode:
             created = _bridge_request("POST", "/pty/create", {
@@ -4020,9 +4035,9 @@ def _spawn_litetui_agent(
         rename_error = _rename_canvas_seat(str(session), name)
         if rename_error:
             print(f"Warning: canvas title not updated: {rename_error}; registration will retry", file=sys.stderr)
-    _record_fresh_name(name, resolved["agentId"], str(target_dir), backend, model, takeover,
-                       data_root=resolved.get("liteTuiDataRoot"))
-    print(json.dumps({"agent_id": resolved["agentId"], **created}, ensure_ascii=False))
+    # Folder is authoritative. No legacy .convos scan/index write on fresh birth.
+    print(json.dumps({"agent_id": resolved["agentId"], "agent_home": str(root / '.agents' / name),
+                      **created}, ensure_ascii=False))
 
 
 #: How long a fresh LiteTUI spawn waits for the seat's born conversation to appear on disk.
@@ -5828,6 +5843,8 @@ def main() -> None:
         print("  inbox [N] [--all] [--agent ID]  (--agent-id is an accepted alias; an UNKNOWN flag is rejected,")
         print("                                 never ignored) Read-only inbox view: full bodies, new+cur+done, newest N")
         print("  discover [count]               Discover active agents")
+        print("  ack-idle [--handoff PATH]       Verify your own existing handoff, acknowledge idle, then wait")
+        print("  retire <agent-id> [--force]     Ask and retire only a seat you spawned; explicit force only")
         print("  handoffs --audit [--format table|json|both] [--out FILE] [--writable-legacy]")
         print("                                 Read-only inventory of legacy handoff files + owner resolution")
         print("  index --check --project ROOT   Check ROOT/AGENT_INDEX.md: exit 1 on a missing index, >12000 chars,")
@@ -5952,6 +5969,12 @@ def main() -> None:
         print("Done.")
     elif cmd == "status":
         cmd_status()
+    elif cmd == "ack-idle":
+        from .retirement_cli import command_ack_idle
+        sys.exit(command_ack_idle(sys.argv[2:], _retirement_bridge_request))
+    elif cmd == "retire":
+        from .retirement_leader import command_retire
+        sys.exit(command_retire(sys.argv[2:], _retirement_bridge_request))
     elif cmd == "send":
         if len(sys.argv) < 4:
             print(

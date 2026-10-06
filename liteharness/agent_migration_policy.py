@@ -66,9 +66,13 @@ def _last_event(path: Path) -> dict:
             'transcript_fact': before, 'meta': meta or {}}
 
 
-def named_plan(root: Path | str, *, names: dict) -> dict:
+def named_plan(root: Path | str, *, names: dict, selected_agent: str | None = None) -> dict:
     if not isinstance(names, dict):
         raise StoreError('Name catalog must be an object')
+    if selected_agent is not None:
+        valid_name(selected_agent)
+        if selected_agent not in names:
+            raise StoreError('Selected name absent from catalog')
     root = _unlinked(Path(root))
     if not root.is_absolute() or '..' in root.parts:
         raise StoreError('Absolute unlinked root required')
@@ -84,7 +88,8 @@ def named_plan(root: Path | str, *, names: dict) -> dict:
     for name, row in names.items():
         item = {'name': name, 'agent_id': None, 'conversations': [], 'index_selection': {},
                 'reasons': [], 'disposition': 'archive-only'}
-        result['agents'].append(item)
+        if selected_agent is None or name == selected_agent:
+            result['agents'].append(item)
         # Independently record valid associations even in malformed rows: a
         # bad name or missing pointer cannot hide a shared identity/conversation.
         try:
@@ -108,26 +113,32 @@ def named_plan(root: Path | str, *, names: dict) -> dict:
             except StoreError as exc:
                 item['reasons'].append(str(exc))
         if not item['reasons']:
-            indexed.append(item)
-        else:
+            if selected_agent is None or name == selected_agent:
+                indexed.append(item)
+        elif selected_agent is None or name == selected_agent:
             result['catalog_conflicts'].extend({'name': name, 'reason': reason}
                                                 for reason in item['reasons'])
     # Validate readable metadata for identity collisions, but never assign an
     # unselected archive or let unknown ownership block another selected source.
     observed_names = defaultdict(set)
+    selected_convo = (names[selected_agent].get('convo_id')
+                      if selected_agent is not None and isinstance(names[selected_agent], dict) else None)
     entries = sorted(source.iterdir(), key=lambda p: p.name)
     folders = {}
     for directory in entries:
         folder = {'source': directory.name, 'disposition': 'archive-only', 'reasons': [],
                   'files': {}, 'directories': [], 'ownership_observed': False,
                   'migration_status': LEFT_LEGACY}
-        result['folders'].append(folder)
+        selected = selected_agent is None or directory.name == selected_convo
+        if selected:
+            result['folders'].append(folder)
         folders[directory.name] = folder
         try:
             _unlinked(directory)
             if not directory.is_dir():
                 folder['ownership_observed'] = True
-                result['root_companions'].append(directory.name)
+                if selected:
+                    result['root_companions'].append(directory.name)
                 raise StoreError('Root companion retained archive-only')
             valid_id(directory.name)
             settings = _object(directory / 'settings.json')
@@ -219,5 +230,9 @@ def named_plan(root: Path | str, *, names: dict) -> dict:
         'left_in_legacy_records': len(result['left_in_legacy']),
         'actual_copy_eligible': 0, 'mtime_selection_differences': 0}
     result['reason_counts'] = dict(Counter(reason for f in result['left_in_legacy'] for reason in f['reasons']))
+    if selected_agent is not None:
+        # Selection is digest-bound; sibling settings were inspected only for
+        # historical identity collisions. No sibling payload/facts enter report.
+        result['selection'] = {'agent_name': selected_agent}
     result['plan_digest'] = digest(result)
     return result

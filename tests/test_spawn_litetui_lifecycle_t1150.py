@@ -15,6 +15,7 @@ def world(monkeypatch, tmp_path):
     state = {"pre": None, "verify": None, "create": None, "delete": {"success": True}}
     monkeypatch.setenv("LITEHARNESS_AGENT_ID", "caller-1")
     monkeypatch.setattr(cli.config, "get_root", lambda: tmp_path)
+    monkeypatch.setenv('LITETUI_DATA_ROOT', str(tmp_path))
 
     def gate(backend, model, thinking):
         calls.append(("gate", backend, model, thinking))
@@ -31,8 +32,8 @@ def world(monkeypatch, tmp_path):
         if path.startswith("/context?"):
             return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
         if path == "/harness/spawn/resolve":
-            return {"ok": True, "agentId": "seat-1", "request": {
-                "shell": "litetui.exe", "args": [], "env": {}, "harnessAgentId": "seat-1"}}
+            return {"ok": True, "agentId": "11111111-1111-4111-8111-111111111111", "request": {
+                "shell": "litetui.exe", "args": [], "env": {}, "harnessAgentId": "11111111-1111-4111-8111-111111111111"}}
         if path in ("/pty/create", "/canvas/split"):
             if isinstance(state["create"], Exception):
                 raise state["create"]
@@ -86,7 +87,7 @@ def test_mismatch_or_verification_exception_deletes_only_new_session(world, caps
     assert ops(calls, "DELETE") == [("DELETE", f"/pty/{session}", None)]
     assert len(ops(calls, "verify")) == 1
     _, agent, verified_root, kw = ops(calls, "verify")[0]
-    assert agent == "seat-1" and verified_root == root
+    assert agent == "11111111-1111-4111-8111-111111111111" and verified_root == root
     assert kw["wait"] == 90 and kw["backend"] == "codex"
     assert kw["expect_model"] == "gpt-6-sol" and kw["expect_thinking"] == "high"
     assert f"kill requested for session {session}; process reap pending" in capsys.readouterr().out
@@ -97,13 +98,13 @@ def test_verified_seat_kept_and_reported(world, capsys, split, session):
     calls, _, _ = world
     assert spawn(split=split, split_mode=split) == 0
     assert ops(calls, "DELETE") == []
-    assert json.loads(capsys.readouterr().out)["agent_id"] == "seat-1"
+    assert json.loads(capsys.readouterr().out)["agent_id"] == "11111111-1111-4111-8111-111111111111"
     assert len(ops(calls, "verify")) == 1
 
 
 def test_ungoverned_request_allows_silent_but_checks_model(world):
     calls, _, _ = world
-    assert spawn(backend="local", model="qwen-x", thinking_level=None) == 0
+    assert spawn(backend="local", model="qwen-x", thinking_level='off') == 0
     kw = ops(calls, "verify")[0][3]
     assert kw["allow_silent"] is True and kw["expect_model"] == "qwen-x"
 
@@ -111,9 +112,9 @@ def test_ungoverned_request_allows_silent_but_checks_model(world):
 @pytest.mark.parametrize("model", [None, "local-auto"])
 def test_implicit_codex_preflight_and_no_implicit_verify_backend(world, model):
     calls, _, _ = world
-    assert spawn(backend=None, model=model, thinking_level=None) == 0
+    assert spawn(backend=None, model=model, thinking_level=None) == 2
     assert calls[0] == ("gate", "codex", None, None)
-    assert ops(calls, "verify")[0][3]["backend"] is None
+    assert ops(calls, "verify") == []  # fresh owned homes require settled execution
 
 
 @pytest.mark.parametrize("model", ["qwen-x", "gpt-oss-120b"])
@@ -121,7 +122,7 @@ def test_implicit_codex_preflight_and_no_implicit_verify_backend(world, model):
 def test_ungoverned_request_resolved_to_codex_pin_fails_and_deletes_exact_session(world, split, model):
     calls, state, _ = world
     state["verify"] = "SEAT FAILED FLOOR: seat reported codex gpt-5.6-sol/medium"
-    assert spawn(split=split, split_mode=split, backend=None, model=model, thinking_level=None) == 2
+    assert spawn(split=split, split_mode=split, backend='local', model=model, thinking_level='off') == 2
     expected = "pty-9" if split else "pty-7"
     assert ops(calls, "DELETE") == [("DELETE", f"/pty/{expected}", None)]
     verify = ops(calls, "verify")[0][3]

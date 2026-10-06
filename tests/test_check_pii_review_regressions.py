@@ -1,5 +1,6 @@
 """R1/R2/R3 detector regressions; fixtures are temporary and synthetic."""
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -79,8 +80,20 @@ def test_toml_ambiguity_other_contexts_raw_scan(text):
 
 
 @pytest.fixture
-def repo(tmp_path):
+def repo(tmp_path, monkeypatch):
+    # Fresh inert repos do not inherit machine/global hooks or identity.
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', os.devnull)
+    # Command-line config can otherwise override the isolated global config.
+    monkeypatch.delenv('GIT_CONFIG_COUNT', raising=False)
+    monkeypatch.delenv('GIT_CONFIG_PARAMETERS', raising=False)
+    for key in tuple(os.environ):
+        if key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_')):
+            monkeypatch.delenv(key, raising=False)
     git(tmp_path, 'init', '-q')
+    configured = subprocess.run(['git', 'config', '--get', 'core.hooksPath'],
+                                cwd=tmp_path, capture_output=True)
+    assert configured.returncode == 1 and not configured.stdout
     git(tmp_path, 'config', 'user.name', 'Public Fixture')
     git(tmp_path, 'config', 'user.email', 'fixture@example.invalid')
     return tmp_path
@@ -99,7 +112,7 @@ def run(repo):
 def seed(repo, name, data):
     (repo/name).write_bytes(data)
     git(repo, 'add', '--', name)
-    git(repo, '-c', 'core.hooksPath=', 'commit', '-qm', 'fixture baseline')
+    git(repo, 'commit', '-qm', 'fixture baseline')
 
 
 def test_mixed_benign_and_dirty_rename_destination_index(repo):

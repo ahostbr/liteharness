@@ -372,7 +372,7 @@ def test_stdlib_contract_and_canonical_mirror_parity():
     modules.update(alias.name.split('.')[0] for node in ast.walk(tree)
                    if isinstance(node, ast.Import) for alias in node.names)
     assert modules <= {'__future__', 'dataclasses', 'json', 'os', 'pathlib', 'sys',
-                       'typing', 'msvcrt', 'fcntl', 'agent_store'}
+                       'typing', 'msvcrt', 'fcntl', 'agent_store', 'uuid', 'copy'}
     counterpart = os.environ.get('T0308_COUNTERPART_AGENT_OWNERSHIP')
     if not counterpart:
         pytest.skip('paired checkout not provided; package contract tested above')

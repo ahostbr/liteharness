@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "liteharness"
-version = "0.4.4"
+version = "0.4.5"
 description = "Portable cross-CLI agent orchestration. Hook-polled inbox, conversation discovery, task tracking."
 readme = "README.md"
 license = { text = "MIT" }
@@ -49,6 +49,8 @@ include = ["liteharness*"]
 [tool.setuptools.package-data]
 liteharness = [
   "hooks_configs/*.json",
+  "hooks_configs/CLAUDE_INSTALL_CONTRACT.md",
+  "nudge_bot_default.yaml",
   "tier_cards.json",
   "hooks_configs/*.ts",
   "cli_scripts/**/*.py",

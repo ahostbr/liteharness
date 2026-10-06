@@ -104,21 +104,24 @@ curl -X POST http://127.0.0.1:7423/canvas/focus \
   -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)" \
   -d '{"paneId": "'$LITESUITE_PANE_ID'", "leafId": "<leafId>"}'
 
-# Authorized lifecycle close ONLY after a fresh GET /pty/list
-# proves the exact harnessAgentId for the intended named seat
-curl -X DELETE http://127.0.0.1:7423/pty/<sessionId> \
-  -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)"
+# Request retirement only as the leader that spawned this seat
+liteharness retire <agent-id>
 
 # Follow-up work: inbox the same live named seat; do not clear/replace it
 liteharness send <agent-id> "<follow-up task>" --from <your-agent-id>
+# Resume the same named seat only after its process is gone
+liteharness spawn --split --resume <Name>
 ```
 
 
-**Fleet lifecycle safety:** Never close a fleet seat by leafId or paneId. Until
-that lifecycle path is corrected, the only permitted close is an explicitly
-authorized `DELETE /pty/<sessionId>` after a fresh `GET /pty/list` proves an
-exact `harnessAgentId` match to the intended named seat. A guessed/stale session,
-leaf or pane is not an identity check. Never self-retire.
+**Fleet lifecycle safety:**
+Only the leader that spawned a seat may retire it; never self-retire.
+Use `liteharness retire <agent-id>`: fresh identity check, retirement request, then validated ACK before closing.
+The seat writes its handoff and runs `liteharness ack-idle --handoff <path>`; the command resolves its own identity and sends the receipt.
+Never close a named seat by leafId or paneId; the command reports returned-leaf confirmation or "terminal closed; canvas leaf could not be confirmed (terminal list unavailable)", not full success.
+`liteharness retire <agent-id> --force` is explicit spawner-only authority for a dead, hung or throwaway seat, not an automatic fallback.
+Plain `DELETE /pty/<sessionId>` is cleanup only after the agent process is already gone, with fresh exact identity checks.
+A refusal stops retirement; report its exact reason, do not bypass the guard.
 
 **Spatial observation:** A hidden pane is retained layout, not a missing or dead seat.
 Multiple leaves can display the same session; a view is not an agent identity.

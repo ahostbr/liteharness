@@ -147,7 +147,7 @@ def _verify_destination(directory: Path, agent: dict, folders: list[dict], setti
 
 
 def _verify_policy(root: Path, names: dict, agent: dict, folders: list[dict]) -> None:
-    current = named_plan(root, names=names)
+    current = named_plan(root, names=names, selected_agent=agent['name'])
     matches = [row for row in current['agents'] if row['agent_id'] == agent['agent_id']]
     if len(matches) != 1:
         raise StoreError('Current policy no longer proves candidate')
@@ -166,14 +166,18 @@ def _verify_policy(root: Path, names: dict, agent: dict, folders: list[dict]) ->
 
 
 def copy_named_agent(manifest: dict, *, agent_id: str, registry_root: Path,
-                     merge_receipt: dict) -> dict:
+                     merge_receipt: dict, existing_only: bool = False) -> dict:
     """Copy ONE independently offline candidate, after approved code merge.
 
     Receipt requires explicit authority, merged commit, review evidence and exact
     policy plan digest. These values are audit evidence, not a magic boolean.
     Callers must validate actual merge authority externally before invoking. The
     tool itself rechecks registry/exact bridge PTY/source hashes before staging/publication.
+    existing_only verifies an existing inactive copy; a missing destination fails
+    at the actual creation branch before any write, never implicitly copying.
     """
+    if type(existing_only) is not bool:
+        raise StoreError('existing_only must be a boolean')
     if not isinstance(manifest, dict):
         raise StoreError('Named-policy manifest must be an object')
     if (not isinstance(merge_receipt, dict) or merge_receipt.get('plan_digest') != manifest.get('plan_digest')
@@ -241,6 +245,8 @@ def copy_named_agent(manifest: dict, *, agent_id: str, registry_root: Path,
             raise StoreError('Existing destination is not this publication; no overwrite')
         _verify_destination(target, agent, folders, settings, receipt)
     else:
+        if existing_only:
+            raise StoreError('Existing COPY destination required; verification cannot create a copy')
         staging = _unlinked(root / '.agents-migration-staging' / manifest['plan_digest'] / name)
         staging.mkdir(parents=True, exist_ok=True)
         marker = _unlinked(staging / INITIALIZING_NAME)

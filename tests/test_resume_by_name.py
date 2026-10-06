@@ -55,29 +55,28 @@ def _bridge(calls):
     return bridge
 
 
-def test_resume_by_name_defaults_cwd_and_convo_from_the_index(world, monkeypatch):
+def test_legacy_archive_refused_resume_by_name_defaults_cwd_and_convo_from_the_index(world, monkeypatch):
     root, project = world
+    # Registry/index pointers do not authorize a mutable legacy LiteTUI thread.
+    before = (root / 'names.json').read_bytes()
     calls = []
-    monkeypatch.setattr(cli, "_bridge_request", _bridge(calls))
-    before = agent_names.resolve_name(NAME)["last_active_at"]
-    cli.cmd_spawn(split_mode=True, resume_agent_id=NAME.lower(), tier="worker")   # no --cwd
-    resolve = next(b for _, p, b in calls if p == "/harness/spawn/resolve")
-    assert resolve["cwd"] == str(project) and resolve["name"] == NAME
-    split = next(b for _, p, b in calls if p == "/canvas/split")
-    assert split["cwd"] == str(project)
-    assert split["launch"]["args"][-2:] == ["--convo", CID]
-    assert split["launch"]["env"]["LITEHARNESS_AGENT_ID"] == AID
-    assert agent_names.resolve_name(NAME)["last_active_at"] >= before
-    assert [m for m, _, _ in calls if m == "DELETE"] == []
+    monkeypatch.setattr(cli, '_bridge_request', lambda *a, **kw: calls.append(a) or {})
+    with pytest.raises(SystemExit):
+        cli.cmd_spawn(split_mode=True, resume_agent_id=NAME.lower(), cwd=str(project), tier='worker')
+    assert calls == []
+    assert (root / 'names.json').read_bytes() == before
 
 
-def test_explicit_cwd_beats_the_index_cwd(world, monkeypatch, tmp_path):
-    other = tmp_path / "other"
-    other.mkdir()
+def test_legacy_archive_refused_explicit_cwd_beats_the_index_cwd(world, monkeypatch):
+    root, project = world
+    # Registry/index pointers do not authorize a mutable legacy LiteTUI thread.
+    before = (root / 'names.json').read_bytes()
     calls = []
-    monkeypatch.setattr(cli, "_bridge_request", _bridge(calls))
-    cli.cmd_spawn(split_mode=True, resume_agent_id=NAME, cwd=str(other))
-    assert next(b for _, p, b in calls if p == "/harness/spawn/resolve")["cwd"] == str(other)
+    monkeypatch.setattr(cli, '_bridge_request', lambda *a, **kw: calls.append(a) or {})
+    with pytest.raises(SystemExit):
+        cli.cmd_spawn(split_mode=True, resume_agent_id=NAME, cwd=str(project), tier='worker')
+    assert calls == []
+    assert (root / 'names.json').read_bytes() == before
 
 
 def test_unknown_name_exits_nonzero_naming_the_name(world, monkeypatch, capsys):
@@ -91,15 +90,16 @@ def test_unknown_name_exits_nonzero_naming_the_name(world, monkeypatch, capsys):
     assert calls == []
 
 
-def test_a_live_named_seat_is_refused_with_an_inbox_hint_and_never_closed(world, monkeypatch, capsys):
+def test_legacy_archive_refused_a_live_named_seat_is_refused_with_an_inbox_hint_and_never_closed(world, monkeypatch):
+    root, project = world
+    # Registry/index pointers do not authorize a mutable legacy LiteTUI thread.
+    before = (root / 'names.json').read_bytes()
     calls = []
-    monkeypatch.setattr(cli, "_bridge_request", _bridge(calls))
-    monkeypatch.setattr(cli, "_live_owner_pid", lambda _r: 4242)
-    with pytest.raises(SystemExit) as exc:
-        cli.cmd_spawn(split_mode=True, resume_agent_id=NAME)
-    assert exc.value.code == 2
-    assert f"live: message {NAME} by inbox instead" in capsys.readouterr().out
-    assert not [c for c in calls if c[0] == "DELETE" or c[1] in ("/harness/spawn/resolve", "/canvas/split")]
+    monkeypatch.setattr(cli, '_bridge_request', lambda *a, **kw: calls.append(a) or {})
+    with pytest.raises(SystemExit):
+        cli.cmd_spawn(split_mode=True, resume_agent_id=NAME, cwd=str(project), tier='worker')
+    assert calls == []
+    assert (root / 'names.json').read_bytes() == before
 
 
 def test_kill_old_is_not_available_to_a_named_resume(world, monkeypatch, capsys):
@@ -111,14 +111,16 @@ def test_kill_old_is_not_available_to_a_named_resume(world, monkeypatch, capsys)
     assert "never closes a seat" in capsys.readouterr().out
 
 
-def test_raw_agent_id_resume_still_works_and_records_the_name(world, monkeypatch):
+def test_legacy_archive_refused_raw_agent_id_resume_still_works_and_records_the_name(world, monkeypatch):
     root, project = world
-    (root / "names.json").unlink()            # an agent resumed by id before it was indexed
+    # Registry/index pointers do not authorize a mutable legacy LiteTUI thread.
+    before = (root / 'names.json').read_bytes()
     calls = []
-    monkeypatch.setattr(cli, "_bridge_request", _bridge(calls))
-    cli.cmd_spawn(split_mode=True, resume_agent_id=AID, cwd=str(project))
-    assert agent_names.resolve_name("Mason")["convo_id"] == CID
-    assert agent_names.resolve_name("Mason")["cwd"] == str(project)
+    monkeypatch.setattr(cli, '_bridge_request', lambda *a, **kw: calls.append(a) or {})
+    with pytest.raises(SystemExit):
+        cli.cmd_spawn(split_mode=True, resume_agent_id=AID, cwd=str(project), tier='worker')
+    assert calls == []
+    assert (root / 'names.json').read_bytes() == before
 
 
 def test_a_registry_id_is_an_id_and_anything_else_is_a_name(world):
@@ -140,8 +142,8 @@ def fresh(world, monkeypatch):
             return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
         calls.append((method, path, body))
         if path == "/harness/spawn/resolve":
-            return {"ok": True, "agentId": "new-seat-1", "request": {
-                "shell": "litetui.exe", "args": [], "env": {}, "harnessAgentId": "new-seat-1"}}
+            return {"ok": True, "agentId": "33333333-3333-4333-8333-333333333333", "request": {
+                "shell": "litetui.exe", "args": [], "env": {}, "harnessAgentId": "33333333-3333-4333-8333-333333333333"}}
         return {"ok": True, "newSessionId": "pty-9"}
 
     monkeypatch.setattr(cli, "_bridge_request", bridge)
@@ -158,7 +160,7 @@ def _fresh(project, **kw):
     return cli.cmd_spawn(**base)
 
 
-def _born(tmp_path, seat_id="new-seat-1"):
+def _born(tmp_path, seat_id="33333333-3333-4333-8333-333333333333"):
     born = tmp_path / "data" / ".convos" / "born-convo"
     born.mkdir(parents=True)
     (born / "settings.json").write_text(json.dumps({"seat_id": seat_id}))
@@ -174,38 +176,38 @@ def test_fresh_spawn_under_a_taken_name_is_refused_and_points_at_resume(fresh, c
     assert calls == []
 
 
-def test_fresh_spawn_with_a_new_name_records_it_against_its_born_conversation(fresh, tmp_path):
+def test_legacy_index_diagnostic_fresh_spawn_with_a_new_name_records_it_against_its_born_conversation(fresh, tmp_path):
     calls, project = fresh
     _born(tmp_path)
-    _fresh(project, name="Brand-New")
+    _index_diagnostic(project, name="Brand-New")
     entry = agent_names.resolve_name("Brand-New")
     assert (entry["agent_id"], entry["convo_id"], entry["cwd"]) == (
-        "new-seat-1", "born-convo", str(project.resolve()))
+        "33333333-3333-4333-8333-333333333333", "born-convo", str(project.resolve()))
 
 
-def test_fresh_spawn_takeover_rebinds_the_name(fresh, tmp_path):
+def test_legacy_index_diagnostic_fresh_spawn_takeover_rebinds_the_name(fresh, tmp_path):
     calls, project = fresh
     _born(tmp_path)
-    _fresh(project, name=NAME, takeover=True)
-    assert agent_names.resolve_name(NAME)["agent_id"] == "new-seat-1"
+    _index_diagnostic(project, name=NAME, takeover=True)
+    assert agent_names.resolve_name(NAME)["agent_id"] == "33333333-3333-4333-8333-333333333333"
 
 
-def test_fresh_spawn_without_a_born_conversation_still_succeeds_and_warns(fresh, monkeypatch, capsys):
+def test_legacy_index_diagnostic_fresh_spawn_without_a_born_conversation_still_succeeds_and_warns(fresh, monkeypatch, capsys):
     calls, project = fresh
     monkeypatch.setattr(cli.time, "sleep", lambda _s: None)
     ticks = iter(range(0, 1000))
     monkeypatch.setattr(cli.time, "monotonic", lambda: next(ticks) * 6.0)
-    _fresh(project, name="No-Convo-Yet")
+    _index_diagnostic(project, name="No-Convo-Yet")
     assert agent_names.resolve_name("No-Convo-Yet") is None
     assert "name index not updated" in capsys.readouterr().err
 
 
-def test_fresh_spawn_uses_bridge_data_root_instead_of_callers_root(fresh, monkeypatch, tmp_path):
+def test_legacy_index_diagnostic_fresh_spawn_uses_bridge_data_root_instead_of_callers_root(fresh, monkeypatch, tmp_path):
     calls, project = fresh
     authoritative = tmp_path / "bridge-data"
     born = authoritative / ".convos" / "bridge-convo"
     born.mkdir(parents=True)
-    (born / "settings.json").write_text(json.dumps({"seat_id": "new-seat-1"}), encoding="utf-8")
+    (born / "settings.json").write_text(json.dumps({"seat_id": "33333333-3333-4333-8333-333333333333"}), encoding="utf-8")
     _born(tmp_path)  # A different root can even contain the same seat id.
     bridge = cli._bridge_request
 
@@ -216,68 +218,68 @@ def test_fresh_spawn_uses_bridge_data_root_instead_of_callers_root(fresh, monkey
         return response
 
     monkeypatch.setattr(cli, "_bridge_request", with_root)
-    _fresh(project, name="Bridge-Root")
+    _index_diagnostic(project, name="Bridge-Root")
     assert agent_names.resolve_name("Bridge-Root")["convo_id"] == "bridge-convo"
 
 
-def test_old_bridge_without_root_or_env_warns_unresolved_without_waiting(fresh, monkeypatch, capsys):
+def test_legacy_index_diagnostic_old_bridge_without_root_or_env_warns_unresolved_without_waiting(fresh, monkeypatch, capsys):
     calls, project = fresh
     monkeypatch.delenv("LITETUI_DATA_ROOT", raising=False)
     monkeypatch.setitem(sys.modules, "litetui.paths", None)
     monkeypatch.setattr(cli.time, "sleep", lambda _: pytest.fail("an unresolved root cannot improve by waiting"))
-    _fresh(project, name="Unresolved")
+    _index_diagnostic(project, name="Unresolved")
     captured = capsys.readouterr()
     assert "root unresolved" in captured.err
     assert "LITETUI_DATA_ROOT" in captured.err and "liteTuiDataRoot" in captured.err
-    assert "new-seat-1" in captured.out  # Launch still succeeds on an old bridge.
+    assert "33333333-3333-4333-8333-333333333333" in captured.out  # Launch still succeeds on an old bridge.
     assert agent_names.resolve_name("Unresolved") is None
 
 
-def test_known_root_without_conversation_warns_timeout_not_unresolved(fresh, capsys):
+def test_legacy_index_diagnostic_known_root_without_conversation_warns_timeout_not_unresolved(fresh, capsys):
     calls, project = fresh
-    _fresh(project, name="Not-Born")
+    _index_diagnostic(project, name="Not-Born")
     err = capsys.readouterr().err
     assert "no matching conversation after 0" in err
     assert "root unresolved" not in err
-    assert "new-seat-1" in err and ".convos" in err
+    assert "33333333-3333-4333-8333-333333333333" in err and ".convos" in err
 
 
-def test_duplicate_conversations_warn_ambiguous_without_binding(fresh, tmp_path, capsys):
+def test_legacy_index_diagnostic_duplicate_conversations_warn_ambiguous_without_binding(fresh, tmp_path, capsys):
     calls, project = fresh
     _born(tmp_path)
     other = tmp_path / "data" / ".convos" / "other-convo"
     other.mkdir()
-    (other / "settings.json").write_text(json.dumps({"seat_id": "new-seat-1"}), encoding="utf-8")
-    _fresh(project, name="Ambiguous")
+    (other / "settings.json").write_text(json.dumps({"seat_id": "33333333-3333-4333-8333-333333333333"}), encoding="utf-8")
+    _index_diagnostic(project, name="Ambiguous")
     err = capsys.readouterr().err
     assert "ambiguous" in err and "born-convo" in err and "other-convo" in err
     assert "root unresolved" not in err and "no matching conversation" not in err
     assert agent_names.resolve_name("Ambiguous") is None
 
 
-def test_conversation_born_during_wait_is_recorded(fresh, tmp_path, monkeypatch):
+def test_legacy_index_diagnostic_conversation_born_during_wait_is_recorded(fresh, tmp_path, monkeypatch):
     calls, project = fresh
     monkeypatch.setattr(cli, "FRESH_NAME_WAIT_SECONDS", 2.0)
     ticks = iter([0.0, 0.0, 0.5])
     monkeypatch.setattr(cli.time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(cli.time, "sleep", lambda _: _born(tmp_path))
-    _fresh(project, name="Born-Later")
+    _index_diagnostic(project, name="Born-Later")
     assert agent_names.resolve_name("Born-Later")["convo_id"] == "born-convo"
 
 
-def test_old_bridge_can_use_importable_litetui_root(fresh, monkeypatch, tmp_path):
+def test_legacy_index_diagnostic_old_bridge_can_use_importable_litetui_root(fresh, monkeypatch, tmp_path):
     calls, project = fresh
     _born(tmp_path)
     monkeypatch.delenv("LITETUI_DATA_ROOT", raising=False)
     fake_paths = ModuleType("litetui.paths")
     fake_paths.data_root = lambda: tmp_path / "data"
     monkeypatch.setitem(sys.modules, "litetui.paths", fake_paths)
-    _fresh(project, name="Import-Root")
+    _index_diagnostic(project, name="Import-Root")
     assert agent_names.resolve_name("Import-Root")["convo_id"] == "born-convo"
 
 
 @pytest.mark.parametrize("blank", [None, "", "   "])
-def test_blank_bridge_root_falls_back_to_environment(fresh, monkeypatch, tmp_path, blank):
+def test_legacy_index_diagnostic_blank_bridge_root_falls_back_to_environment(fresh, monkeypatch, tmp_path, blank):
     calls, project = fresh
     _born(tmp_path)
     bridge = cli._bridge_request
@@ -289,11 +291,11 @@ def test_blank_bridge_root_falls_back_to_environment(fresh, monkeypatch, tmp_pat
         return response
 
     monkeypatch.setattr(cli, "_bridge_request", with_blank_root)
-    _fresh(project, name="Blank-Root")
+    _index_diagnostic(project, name="Blank-Root")
     assert agent_names.resolve_name("Blank-Root")["convo_id"] == "born-convo"
 
 
-def test_malformed_bridge_root_does_not_scan_environment(fresh, monkeypatch, tmp_path, capsys):
+def test_legacy_index_diagnostic_malformed_bridge_root_does_not_scan_environment(fresh, monkeypatch, tmp_path, capsys):
     calls, project = fresh
     _born(tmp_path)
     bridge = cli._bridge_request
@@ -305,20 +307,20 @@ def test_malformed_bridge_root_does_not_scan_environment(fresh, monkeypatch, tmp
         return response
 
     monkeypatch.setattr(cli, "_bridge_request", with_bad_root)
-    _fresh(project, name="Malformed-Root")
+    _index_diagnostic(project, name="Malformed-Root")
     assert "root unresolved" in capsys.readouterr().err
     assert agent_names.resolve_name("Malformed-Root") is None
 
 
 @pytest.mark.parametrize("relative", [".", "relative-data"] + (["C:foo", r"\foo"] if sys.platform == "win32" else []))
-def test_relative_bridge_root_never_binds_a_caller_local_conversation(
+def test_legacy_index_diagnostic_relative_bridge_root_never_binds_a_caller_local_conversation(
         fresh, monkeypatch, tmp_path, capsys, relative):
     calls, project = fresh
     _born(tmp_path)  # The actual conversation lives under the populated env root.
     caller_data = project if relative == "." else project / "relative-data"
     old = caller_data / ".convos" / "old-convo"
     old.mkdir(parents=True)
-    (old / "settings.json").write_text(json.dumps({"seat_id": "new-seat-1"}), encoding="utf-8")
+    (old / "settings.json").write_text(json.dumps({"seat_id": "33333333-3333-4333-8333-333333333333"}), encoding="utf-8")
     monkeypatch.chdir(project)
     bridge = cli._bridge_request
 
@@ -329,15 +331,15 @@ def test_relative_bridge_root_never_binds_a_caller_local_conversation(
         return response
 
     monkeypatch.setattr(cli, "_bridge_request", with_relative_root)
-    _fresh(project, name="Relative-Root")
+    _index_diagnostic(project, name="Relative-Root")
     captured = capsys.readouterr()
     assert agent_names.resolve_name("Relative-Root") is None
     assert "root unresolved" in captured.err
     assert "absolute" in captured.err
-    assert "new-seat-1" in captured.out
+    assert "33333333-3333-4333-8333-333333333333" in captured.out
 
 
-def test_nonexistent_absolute_bridge_root_never_falls_back_to_populated_env(
+def test_legacy_index_diagnostic_nonexistent_absolute_bridge_root_never_falls_back_to_populated_env(
         fresh, monkeypatch, tmp_path, capsys):
     calls, project = fresh
     _born(tmp_path)
@@ -352,12 +354,12 @@ def test_nonexistent_absolute_bridge_root_never_falls_back_to_populated_env(
         return response
 
     monkeypatch.setattr(cli, "_bridge_request", with_absent_root)
-    _fresh(project, name="Absent-Root")
+    _index_diagnostic(project, name="Absent-Root")
     captured = capsys.readouterr()
     assert agent_names.resolve_name("Absent-Root") is None
     assert "no matching conversation after 0" in captured.err
     assert str(absent) in captured.err and "root unresolved" not in captured.err
-    assert "new-seat-1" in captured.out
+    assert "33333333-3333-4333-8333-333333333333" in captured.out
 
 
 def test_takeover_is_refused_outside_a_fresh_litetui_spawn(world):
@@ -472,3 +474,11 @@ def test_claude_named_resume_never_kills_old_seat(claude_world, capsys):
         spawn(split_mode=True, resume_agent_id=NAME, kill_old=True)
     assert exc.value.code == 2
     assert "never closes a seat" in capsys.readouterr().out and launches == []
+
+
+def _index_diagnostic(project, **kw):
+    resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {})
+    cli._record_fresh_name(kw['name'], '33333333-3333-4333-8333-333333333333',
+        str(project.resolve()), 'codex', 'gpt-6-sol', kw.get('takeover', False),
+        data_root=resolution.get('liteTuiDataRoot'))
+    print('33333333-3333-4333-8333-333333333333')

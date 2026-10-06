@@ -178,6 +178,24 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
                  tier: str | None, model: str | None, backend: str | None,
                  thinking_level: str | None, spawned_by: str | None,
                  kill_old: bool, prompt: str | None) -> None:
+    from . import owned_launch, owned_resume
+    from .agent_store import AgentStore, StoreError
+    try:
+        root = owned_launch.data_root()
+    except owned_launch.RootUnknown:
+        root = None  # ONLY missing canonical resolver; corrupt/invalid roots still fail closed
+    if root is not None:
+        store = AgentStore(root)
+        agents = store.list_agents()  # strict even if selected folder is inactive/corrupt
+        selected = [a for a in agents if a.agent_id == agent_id or a.name.casefold() == (agent_id or '').casefold()]
+        membership = any(d.name == convo_id for a in agents for d in store.list_conversations(a)) if convo_id else False
+        if (selected or membership or (agent_id and not _UUID_SHAPE.fullmatch(agent_id)
+                                       and store.agent_directory(agent_id).exists())):
+            owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane,
+                               direction=direction, cwd=cwd, name=name, tier=tier,
+                               model=model, backend=backend, thinking_level=thinking_level,
+                               spawned_by=spawned_by, kill_old=kill_old, prompt=prompt)
+            return
     from . import agent_names, cli
     if kill_old and not agent_id:
         raise ValueError("--kill-old requires --resume <agent-id>")
@@ -192,106 +210,9 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
                              backend=backend, thinking_level=thinking_level,
                              spawned_by=spawned_by, prompt=prompt)
         return
-    convo_id, settings, registry = lookup(agent_id, convo_id)
-    agent_id = registry["agent_id"]
-    sessions_result = cli._bridge_request("GET", "/pty/list")
-    if not isinstance(sessions_result.get("sessions"), list):
-        raise ValueError(f"cannot inspect old PTY sessions: {sessions_result.get('error', sessions_result)}")
-    # Some registry rows have no canvas_session_id, and a PTY's pid may be its
-    # shell rather than the LiteTUI child. The bridge session registry can link
-    # an agent id to the PTY launch record; never pick an unrelated cwd.
-    old_pty = _old_pty(registry, sessions_result["sessions"])
-    if old_pty is None:
-        linked = cli._bridge_request("GET", "/session/list")
-        records = linked.get("sessions", [])
-        if isinstance(records, list):
-            ids = {r.get("sessionId") for r in records
-                   if isinstance(r, dict) and r.get("agentId") == agent_id}
-            matches = [s for s in sessions_result["sessions"] if s.get("id") in ids]
-            if len(matches) == 1:
-                old_pty = matches[0]
-    # The registry has no cwd; the old PTY is the only trustworthy implicit source.
-    working_dir = cwd or (entry or {}).get("cwd") or (old_pty or {}).get("cwd")
-    if not working_dir:
-        raise ValueError("cwd unknown: pass --cwd")
-    working_dir = os.path.abspath(working_dir)
-    if not os.path.isdir(working_dir):
-        raise ValueError(f"cwd does not exist: {working_dir}")
-    execution = settings.get("execution") or {}
-    chosen_name = name or (entry or {}).get("name") or registry.get("name")
-    chosen_tier = tier or registry.get("tier") or settings.get("seat_tier")
-    chosen_model = model or registry.get("model") or settings.get("model")
-    chosen_backend = backend or registry.get("backend") or execution.get("backend") or settings.get("backend")
-    chosen_thinking = (thinking_level or registry.get("thinking_level") or
-                       execution.get("thinking_level") or settings.get("thinking_level"))
-    chosen_parent = spawned_by if spawned_by is not None else registry.get("spawned_by")
-    if not chosen_name or not chosen_model or not chosen_backend or not chosen_thinking:
-        raise ValueError("missing name/model/backend/thinking level in registry or conversation; pass explicit flags")
-    from . import fleet_policy
-    refusal = fleet_policy.gate(chosen_backend, chosen_model, chosen_thinking)
-    if refusal:
-        raise ValueError(refusal)
-    # Never mutate settings merely to override a launch. LiteTUI owns the three
-    # readings after resume, and its launch flags select the live execution.
-    owner = cli._live_owner_pid(registry)
-    # An unreadable registration stamp cannot prove a live pid is *not* the old
-    # seat. Fail closed rather than launching a duplicate with the same id.
-    if not owner and registry.get("session_pid") and not registry.get("registered_at"):
-        from .hooks import _pid_alive
-        if _pid_alive(registry["session_pid"]):
-            raise ValueError("old seat pid is alive but its registration time is unknown")
-    if owner and entry is not None:
-        raise ValueError(f"live: message {entry['name']} by inbox instead")
-    if owner and not kill_old:
-        raise ValueError(f"old seat {agent_id} is still running (pid {owner}); pass --kill-old")
-    resolution = cli._bridge_request("POST", "/harness/spawn/resolve", {
-        "cli": "litetui", "name": chosen_name, "tier": chosen_tier,
-        "model": chosen_model, "backend": chosen_backend,
-        "thinkingLevel": chosen_thinking, "cwd": working_dir,
-        "spawnedBy": chosen_parent, **({"prompt": prompt} if prompt else {}),
-    })
-    if not resolution.get("ok") or not isinstance(resolution.get("request"), dict):
-        raise ValueError(f"spawn resolution refused: {resolution.get('error', resolution)}")
-    request = resolution["request"]
-    args = request.get("args")
-    if not isinstance(args, list) or not isinstance(request.get("env"), dict):
-        raise ValueError("spawn resolver returned malformed launch request")
-    for flag in ("--system-prompt-file", "--system-prompt"):
-        while flag in args:
-            index = args.index(flag)
-            if index + 1 >= len(args):
-                raise ValueError(f"resolver returned bare {flag}")
-            del args[index:index + 2]
-    args.extend(["--convo", convo_id])
-    request["env"]["LITEHARNESS_AGENT_ID"] = agent_id
-    request["harnessAgentId"] = agent_id
-    if owner:
-        if not old_pty or not old_pty.get("id"):
-            raise ValueError("old seat is alive but has no matching PTY session to close")
-        result = cli._bridge_request("DELETE", f"/pty/{old_pty['id']}",
-                                     lifecycle_origin="liteharness-resume:kill-old")
-        if not (result.get("ok") or result.get("success")):
-            raise ValueError(f"could not close old PTY: {result.get('error', result)}")
-        from .hooks import _pid_alive
-        for _ in range(20):
-            if not _pid_alive(owner):
-                break
-            time.sleep(0.5)
-        if _pid_alive(owner):
-            raise ValueError(f"old pid {owner} still alive after PTY close; not relaunching")
-    # Same placement as a fresh --split, preserving the native resume request.
-    caller = spawned_by or os.environ.get("LITEHARNESS_AGENT_ID") or config.get_agent_id() or chosen_parent or ""
-    result = cli._place_split(pane, caller, direction, cwd=working_dir, launch=request)
-    if not result.get("newSessionId") or result.get("error") or result.get("ok") is False:
-        raise ValueError(cli._split_refusal(result, pane))
-    from .seat_lifecycle import append
-    append({"event": "resume", "seat_id": agent_id,
-            "terminal_id": result["newSessionId"], "owner": "liteharness-resume",
-            "origin": {"source": "resume-launch", "actor_id": config.get_agent_id()},
-            "conversation_id": convo_id})
-    try:
-        agent_names.record_name(chosen_name, agent_id, convo_id, working_dir,
-                                backend=chosen_backend, model=chosen_model)
-    except agent_names.NameIndexError as exc:
-        print(f"Warning: name index not updated: {exc}", file=sys.stderr)
-    print(f"Launched resumed LiteTUI seat {chosen_name} ({agent_id}) in {result['newSessionId']}; conversation {convo_id}; cwd {working_dir}")
+    # Existing Claude route above is unchanged. LiteTUI archives never become
+    # writable resume targets: require the authoritative owned folder instead.
+    owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane,
+                       direction=direction, cwd=cwd, name=name, tier=tier,
+                       model=model, backend=backend, thinking_level=thinking_level,
+                       spawned_by=spawned_by, kill_old=kill_old, prompt=prompt)

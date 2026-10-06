@@ -4,20 +4,55 @@ A hand-vendored file (T916-G, 2e27e6e) changed the catalog without a sync, so th
 hash described content that no longer existed. Then ed102a9 went RED on a Windows checkout,
 because the hash read raw working-tree bytes and that checkout held CRLF where git holds LF.
 """
-import importlib.util
+import ast
+import hashlib
 import json
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "liteharness" / "catalog"
 
-_spec = importlib.util.spec_from_file_location("sync_catalog", ROOT / "scripts" / "sync_catalog.py")
-sync_catalog = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sync_catalog)
+def _read_projection_functions():
+    """Test only pure readers; never import or execute the catalog sync script.
+
+    No imports, module-level setup, sync/copy/delete routines or main entry point
+    are compiled. Constants are literal data, except the explicitly checked
+    frozenset constructor used for the public classification set.
+    """
+    tree = ast.parse((ROOT / 'scripts/sync_catalog.py').read_text(encoding='utf-8'))
+    constants = {'UNHASHED', 'PUBLIC_SKILLS', 'PRIVATE_SKILLS', 'KEEP_FROM_CATALOG'}
+    readers = {'is_runtime_catalog_path', 'hashed_files', 'short_sha',
+               'gate_skill_classification'}
+    namespace = {'Path': Path, 'hashlib': hashlib}
+    functions = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in readers:
+            functions.append(node)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+            if not isinstance(target, ast.Name) or target.id not in constants:
+                continue
+            value = node.value
+            if target.id == 'PUBLIC_SKILLS':
+                assert isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                assert value.func.id == 'frozenset' and len(value.args) == 1
+                assert not value.keywords
+                namespace[target.id] = frozenset(ast.literal_eval(value.args[0]))
+            else:
+                namespace[target.id] = ast.literal_eval(value)
+    assert constants <= namespace.keys()
+    assert {node.name for node in functions} == readers
+    exec(compile(ast.Module(body=functions, type_ignores=[]),
+                 '<catalog read-only projection>', 'exec'), namespace)
+    return SimpleNamespace(**namespace)
+
+
+projection = _read_projection_functions()
 
 
 def _release_catalog(destination):
@@ -42,10 +77,54 @@ def _release_catalog(destination):
 def test_provenance_hash_and_count_match_the_catalog(tmp_path):
     catalog = _release_catalog(tmp_path / 'tracked-catalog')
     stamp = json.loads((catalog / "PROVENANCE.json").read_text(encoding="utf-8"))
-    assert stamp["hash"] == sync_catalog.short_sha(catalog), "stale release stamp"
-    assert stamp["file_count"] == len(sync_catalog.hashed_files(catalog))
+    assert stamp["hash"] == projection.short_sha(catalog), "stale release stamp"
+    assert stamp["file_count"] == len(projection.hashed_files(catalog))
     # A partial stamp must name exactly the skills the script holds back from the source.
-    assert stamp.get("kept_from_catalog") == sync_catalog.KEEP_FROM_CATALOG
+    assert stamp.get("kept_from_catalog") == projection.KEEP_FROM_CATALOG
+
+
+def _payload_digest(catalog):
+    """Independent v1 payload oracle, including catalog module/resources."""
+    paths = sorted(p.relative_to(catalog).as_posix() for p in catalog.rglob('*')
+                   if p.is_file() and p.relative_to(catalog).as_posix() != 'PROVENANCE.json'
+                   and not projection.is_runtime_catalog_path(p.relative_to(catalog)))
+    digest = hashlib.sha256()
+    for relative in paths:
+        content = (catalog / relative).read_bytes()
+        if b'\0' not in content:
+            content = content.replace(b'\r\n', b'\n')
+        digest.update(relative.encode('utf-8') + b'\0' + hashlib.sha256(content).digest())
+    return paths, digest.hexdigest()
+
+
+def test_reconciliation_payload_inventory_and_digest(tmp_path):
+    catalog = _release_catalog(tmp_path / 'tracked-catalog')
+    stamp = json.loads((catalog / 'PROVENANCE.json').read_text(encoding='utf-8'))
+    current = stamp['reconciliation']
+    paths, digest = _payload_digest(catalog)
+    assert current['payload_algorithm'] == 'catalog-payload-sha256-v1'
+    assert current['payload_paths'] == paths
+    assert current['payload_file_count'] == len(paths)
+    assert current['payload_sha256'] == digest
+    assert '__init__.py' in paths and 'PROVENANCE.json' not in paths
+    assert 'historical' in stamp['upstream_provenance_status']
+    assert current['published_restoration_baseline'] == 'd3ba9a8f59fb7b10279be54980f2385d193273d1'
+    assert current['initial_target_commit'] == '9623e40fc0cfc051eae5861bdb2f18af7d53bc35'
+    assert current['package_version'] == '0.4.5'
+    assert current['tracked_runtime_exclusions'] == ['skills/ls-conversation-lookup/.last_indexed']
+    for name, expected in current['policy_sha256_lf'].items():
+        content = (ROOT / 'liteharness' / name).read_bytes().replace(b'\r\n', b'\n')
+        assert hashlib.sha256(content).hexdigest() == expected
+
+
+def test_payload_digest_covers_init_but_avoids_stamp_cycle(tmp_path):
+    root = _tree(tmp_path / 'catalog')
+    (root / '__init__.py').write_bytes(b'fixture module\n')
+    paths, before = _payload_digest(root)
+    (root / 'PROVENANCE.json').write_text('{"fixture": 1}', encoding='utf-8')
+    assert _payload_digest(root) == (paths, before)
+    (root / '__init__.py').write_bytes(b'changed module\n')
+    assert _payload_digest(root)[1] != before
 
 
 def _tree(root: Path) -> Path:
@@ -59,7 +138,7 @@ def test_crlf_checkout_hashes_the_same(tmp_path):
     lf = _tree(tmp_path / "lf")
     crlf = _tree(tmp_path / "crlf")
     (crlf / "skills" / "a" / "SKILL.md").write_bytes(b"line one\r\nline two\r\n")
-    assert sync_catalog.short_sha(crlf) == sync_catalog.short_sha(lf)
+    assert projection.short_sha(crlf) == projection.short_sha(lf)
 
 
 def test_eol_crlf_ps1_hashes_the_same_in_either_spelling(tmp_path):
@@ -69,7 +148,7 @@ def test_eol_crlf_ps1_hashes_the_same_in_either_spelling(tmp_path):
     b = _tree(tmp_path / "b")
     (a / "skills" / "a" / "run.ps1").write_bytes(b"Write-Host hi\r\nexit 0\r\n")
     (b / "skills" / "a" / "run.ps1").write_bytes(b"Write-Host hi\nexit 0\n")
-    assert sync_catalog.short_sha(a) == sync_catalog.short_sha(b)
+    assert projection.short_sha(a) == projection.short_sha(b)
 
 
 def test_binary_bytes_are_not_normalised(tmp_path):
@@ -78,27 +157,27 @@ def test_binary_bytes_are_not_normalised(tmp_path):
     a = _tree(tmp_path / "a")
     b = _tree(tmp_path / "b")
     (b / "skills" / "a" / "ring.png").write_bytes(b"\x89PNG\n\x1a\n\0\n")
-    assert sync_catalog.short_sha(a) != sync_catalog.short_sha(b)
+    assert projection.short_sha(a) != projection.short_sha(b)
 
 
 def test_rename_changes_the_hash(tmp_path):
     a = _tree(tmp_path / "a")
     b = _tree(tmp_path / "b")
     shutil.move(b / "skills" / "a", b / "skills" / "b")
-    assert sync_catalog.short_sha(a) != sync_catalog.short_sha(b)
+    assert projection.short_sha(a) != projection.short_sha(b)
 
 
 def test_one_byte_change_moves_the_hash(tmp_path):
     a = _tree(tmp_path / "a")
-    before = sync_catalog.short_sha(a)
+    before = projection.short_sha(a)
     (a / "skills" / "a" / "SKILL.md").write_bytes(b"line one\nline 2wo\n")
-    assert sync_catalog.short_sha(a) != before
+    assert projection.short_sha(a) != before
 
 
 def test_empty_or_missing_path_refuses(tmp_path):
     for p in (tmp_path, tmp_path / "missing"):
         with pytest.raises(SystemExit):
-            sync_catalog.short_sha(p)
+            projection.short_sha(p)
 
 
 def test_runtime_projection_preserves_release_resources(tmp_path):
@@ -110,8 +189,8 @@ def test_runtime_projection_preserves_release_resources(tmp_path):
                 'caf\u00e9.json': b'ordinary Unicode asset'}
     for name, data in positive.items():
         (skill / name).write_bytes(data)
-    before = sync_catalog.short_sha(root)
-    before_files = set(sync_catalog.hashed_files(root))
+    before = projection.short_sha(root)
+    before_files = set(projection.hashed_files(root))
     databases = ('convo_index.db', 'fixture.sqlite', 'fixture.sqlite3')
     runtime_names = ('.last_indexed', 'index.lock', 'loose.pyc', *databases,
                      *(database + suffix for database in databases
@@ -126,13 +205,13 @@ def test_runtime_projection_preserves_release_resources(tmp_path):
             cache = directory / cache_name
             cache.mkdir(exist_ok=True)
             (cache / 'fixture.pyc').write_bytes(b'synthetic cache')
-    assert set(sync_catalog.hashed_files(root)) == before_files
-    assert sync_catalog.short_sha(root) == before
+    assert set(projection.hashed_files(root)) == before_files
+    assert projection.short_sha(root) == before
     for name in positive:
         path = skill / name
         previous = path.read_bytes()
         path.write_bytes(previous + b'changed')
-        assert sync_catalog.short_sha(root) != before, f'{name} disappeared from projection'
+        assert projection.short_sha(root) != before, f'{name} disappeared from projection'
         path.write_bytes(previous)
 
 
@@ -144,10 +223,10 @@ def test_unicode_near_miss_is_content_without_reserved_name_collision(tmp_path, 
     root = _tree(tmp_path / 'catalog')
     target = root / 'skills/a' / name
     assert not target.exists()
-    before = sync_catalog.short_sha(root)
+    before = projection.short_sha(root)
     target.write_bytes(b'ordinary Unicode near miss')
-    assert target.relative_to(root).as_posix() in sync_catalog.hashed_files(root)
-    assert sync_catalog.short_sha(root) != before
+    assert target.relative_to(root).as_posix() in projection.hashed_files(root)
+    assert projection.short_sha(root) != before
 
 
 @pytest.mark.parametrize('relative', ['.last_indexed', 'INDEX.LOCK', 'UPPER.DB',
@@ -157,13 +236,13 @@ def test_runtime_only_catalog_refuses_empty_projection(tmp_path, relative):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b'synthetic runtime state')
     with pytest.raises(SystemExit):
-        sync_catalog.short_sha(tmp_path)
+        projection.short_sha(tmp_path)
 
 
 def test_compatibility_alias_is_classified_but_unknown_skill_still_refuses(tmp_path):
     for name in ('ls-theater', 'ls-mockup'):
         (tmp_path / 'skills' / name).mkdir(parents=True)
-    sync_catalog.gate_skill_classification(tmp_path)
+    projection.gate_skill_classification(tmp_path)
     (tmp_path / 'skills/unclassified-fixture').mkdir()
     with pytest.raises(SystemExit, match='unclassified'):
-        sync_catalog.gate_skill_classification(tmp_path)
+        projection.gate_skill_classification(tmp_path)

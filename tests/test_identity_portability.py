@@ -111,10 +111,18 @@ def test_nudge_rejects_invalid_presence(tmp_path, monkeypatch, presence):
         bot._validate_sender(sender)
 
 
-def test_sync_requires_explicit_source_before_any_copy(tmp_path):
-    import subprocess
-    result = subprocess.run([sys.executable, str(Path(prompts.__file__).parents[1] / 'scripts/sync_catalog.py')],
-                            cwd=tmp_path, capture_output=True, text=True, check=False)
-    assert result.returncode == 2
-    assert '--source' in result.stderr
-    assert list(tmp_path.iterdir()) == []
+def test_sync_requires_explicit_source_without_executing_sync():
+    # Release preparation forbids even an argument-error invocation of sync.
+    # Inspect syntax only; no import, execution, copying or store access.
+    import ast
+    path = Path(prompts.__file__).parents[1] / 'scripts/sync_catalog.py'
+    tree = ast.parse(path.read_text(encoding='utf-8'))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == 'add_argument'
+             and any(isinstance(arg, ast.Constant) and arg.value == '--source' for arg in node.args)]
+    assert len(calls) == 1
+    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
+    assert isinstance(keywords.get('required'), ast.Constant) and keywords['required'].value is True
+    assert 'default' not in keywords
+    assert not any(isinstance(node, ast.Name) and node.id == 'DEFAULT_SOURCE'
+                   for node in ast.walk(tree))

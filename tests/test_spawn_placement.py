@@ -27,6 +27,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.config, "get_root", lambda: tmp_path)
     monkeypatch.setattr(cli.config, "get_agent_id", lambda: "caller")
     monkeypatch.setenv("LITEHARNESS_AGENT_ID", "caller")
+    monkeypatch.setenv('LITETUI_DATA_ROOT', str(tmp_path))
     for key in ("LITESUITE_PANE_ID", "LITESUITE_CANVAS_SESSION", "LITEHARNESS_SPAWNED_BY"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
@@ -44,9 +45,9 @@ def world(tmp_path, monkeypatch):
             return state.get("context", {"activePanes": state["panes"],
                                          "hiddenPanes": [pane("hidden")]})
         if path == "/harness/spawn/resolve":
-            return {"ok": True, "agentId": "child", "request": {
-                "shell": "litetui.exe", "args": ["--model", "fake"], "env": {},
-                "cwd": str(tmp_path), "harnessAgentId": "child"}}
+            return {"ok": True, "agentId": "33333333-3333-4333-8333-333333333333", "request": {
+                "shell": "litetui.exe", "args": [], "env": {},
+                "cwd": str(tmp_path), "harnessAgentId": "33333333-3333-4333-8333-333333333333"}}
         if path == "/canvas/split":
             ident = body["paneId"]
             if ident in state["refusals"]:
@@ -82,6 +83,10 @@ def world(tmp_path, monkeypatch):
 
 
 def spawn(world, **kw):
+    if kw.get('spawn_cli') == 'litetui':
+        kw.setdefault('backend', 'codex')
+        kw.setdefault('model', 'fixture')
+        kw.setdefault('thinking_level', 'high')
     cli.cmd_spawn(split_mode=True, cwd=str(world["root"]), **kw)
 
 
@@ -119,7 +124,7 @@ def test_no_room_opens_one_terminal_only(world, backend):
     body = placements(world)[0][1]
     assert body["cwd"] == str(world["root"])
     if backend == "litetui":
-        assert body["shell"] == "litetui.exe" and body["harnessAgentId"] == "child"
+        assert body["shell"] == "litetui.exe" and body["harnessAgentId"] == "33333333-3333-4333-8333-333333333333"
 
 
 def test_explicit_pane_with_room_wins_and_direction_is_preserved(world):
@@ -195,16 +200,17 @@ def test_codex_without_pane_uses_exact_discovered_pane(world, monkeypatch, reque
 
 
 def test_resume_stale_no_terminals_pane_lands_in_fleet(world, monkeypatch):
-    from liteharness import resume_seat
     agent, convo = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
-    monkeypatch.setattr(resume_seat, "resolve_target", lambda *a: (agent, convo, None))
-    monkeypatch.setattr(resume_seat, "lookup", lambda *a: (convo, {}, {
-        "agent_id": agent, "name": "Old", "tier": "worker", "model": "model",
-        "backend": "codex", "thinking_level": "high", "spawned_by": "caller"}))
-    monkeypatch.setattr(cli, "_live_owner_pid", lambda _: None)
+    from liteharness.agent_store import AgentStore
+    from liteharness.agent_ownership import AgentSession
+    with AgentSession.create_fresh(AgentStore(world['root']), name='Old', agent_id=agent,
+                                  backend='codex', model='fixture', thinking_level='high') as session:
+        target = session.conversation_directory(convo) / 'convo.jsonl'
+        target.parent.mkdir()
+        target.write_text('{"type":"meta"}\n')
     world["panes"][-1] = pane("own", 0)
     world["refusals"]["other"] = {"error": "no_terminals", "ok": False}
-    spawn(world, resume_agent_id=agent, split_pane="other")
+    spawn(world, resume_agent_id=agent, resume_convo_id=convo, tier='worker', split_pane="other")
     assert [body["paneId"] for _, body in placements(world)] == ["other", "fleet"]
     launch = placements(world)[-1][1]["launch"]
     assert launch["harnessAgentId"] == agent and launch["args"][-2:] == ["--convo", convo]
