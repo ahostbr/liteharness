@@ -148,7 +148,7 @@ liteharness send-input <agent-id> "fix the auth bug" # send prompts
 liteharness send-input <agent-id> "/compact"         # send slash commands
 liteharness read-output <agent-id>                   # read agent's terminal output
 liteharness pty-list                                 # list all PTY sessions
-liteharness retire <agent-id>                        # verified spawner requests retirement
+liteharness pty-kill <agent-id>                      # close only when the human asks
 ```
 
 The daemon auto-starts if needed. Token-authenticated — only processes that can read `~/.liteharness/pty_daemon.lock` can connect. Executable whitelist: only `claude`, `codex`, `python` can be spawned.
@@ -259,14 +259,7 @@ ls ~/.claude/projects/<project-slug>/<session-id>.jsonl
 
 A directory at that id instead of a file means the transcript is not being written.
 
-**Fleet lifecycle safety:**
-Only the leader that spawned a seat may retire it; never self-retire.
-Use `liteharness retire <agent-id>`: fresh identity check, retirement request, then validated ACK before closing.
-The seat writes its handoff and runs `liteharness ack-idle --handoff <path>`; the command resolves its own identity and sends the receipt.
-Never close a named seat by leafId or paneId; the command reports returned-leaf confirmation or "terminal closed; canvas leaf could not be confirmed (terminal list unavailable)", not full success.
-`liteharness retire <agent-id> --force` is explicit spawner-only authority for a dead, hung or throwaway seat, not an automatic fallback.
-Plain `DELETE /pty/<sessionId>` is cleanup only after the agent process is already gone, with fresh exact identity checks.
-A refusal stops retirement; report its exact reason, do not bypass the guard.
+**Closing terminals:** Close a terminal only when the human explicitly asks.
 
 ## Agent Lifecycle: persistent named seats
 
@@ -283,8 +276,7 @@ Only the leader resumes the same named seat after its process is gone:
 liteharness spawn --split --resume <Name>
 ```
 
-Never self-retire or replace a seat under a fresh name. `/exit` is blocked via
-`send-input`; do not bypass this guard with `pty-kill`, raw DELETE, or pane/leaf close.
+Never replace a seat under a fresh name.
 
 ## UIAutomation Rules
 
@@ -413,6 +405,6 @@ Include the polymathic cognitive architecture in the `--prompt` flag. Match the 
 | "send /compact to Recon"            | `liteharness send-input <id> "/compact"` (PTY) or `--headed` (UIAutomation)                                    |
 | "what's Recon doing?"               | `liteharness read-output <id>` (PTY) or `--headed <handle:pane>`                                               |
 | "follow up with that agent" | Inbox the same live named seat with `liteharness send <agent-id> "<follow-up task>" --from <your-agent-id>`; resume only after its process is gone |
-| "retire that agent" | `liteharness retire <agent-id>` only as the leader that spawned it; no automatic force fallback |
+| "close that terminal" | `liteharness pty-kill <id>` when the human explicitly asks |
 | "list terminals"                    | `liteharness wt-list-panes`                                                                                    |
 | "start liteharness"                 | `python -m liteharness.hooks register`                                                                         |

@@ -60,6 +60,7 @@ curl -X POST http://127.0.0.1:7423/canvas/split \
 #   split L1 bottom -> L2;           split R1 bottom -> R2
 # Move an existing leaf: POST /canvas/move-leaf {leafId, targetLeafId, mode}
 #   mode left|right|top|bottom|tabs|swap; leaf ids from GET /canvas/leaves?paneId=
+# Close a leaf when the human asks: POST /canvas/close-leaf {leafId}
 
 # Send command to the new PTY
 curl -X POST http://127.0.0.1:7423/pty/talk \
@@ -104,8 +105,9 @@ curl -X POST http://127.0.0.1:7423/canvas/focus \
   -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)" \
   -d '{"paneId": "'$LITESUITE_PANE_ID'", "leafId": "<leafId>"}'
 
-# Request retirement only as the leader that spawned this seat
-liteharness retire <agent-id>
+# Close the terminal only when the human explicitly asks
+curl -X DELETE http://127.0.0.1:7423/pty/<sessionId> \
+  -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)"
 
 # Follow-up work: inbox the same live named seat; do not clear/replace it
 liteharness send <agent-id> "<follow-up task>" --from <your-agent-id>
@@ -114,14 +116,7 @@ liteharness spawn --split --resume <Name>
 ```
 
 
-**Fleet lifecycle safety:**
-Only the leader that spawned a seat may retire it; never self-retire.
-Use `liteharness retire <agent-id>`: fresh identity check, retirement request, then validated ACK before closing.
-The seat writes its handoff and runs `liteharness ack-idle --handoff <path>`; the command resolves its own identity and sends the receipt.
-Never close a named seat by leafId or paneId; the command reports returned-leaf confirmation or "terminal closed; canvas leaf could not be confirmed (terminal list unavailable)", not full success.
-`liteharness retire <agent-id> --force` is explicit spawner-only authority for a dead, hung or throwaway seat, not an automatic fallback.
-Plain `DELETE /pty/<sessionId>` is cleanup only after the agent process is already gone, with fresh exact identity checks.
-A refusal stops retirement; report its exact reason, do not bypass the guard.
+**Closing terminals:** Close a terminal only when the human explicitly asks.
 
 **Spatial observation:** A hidden pane is retained layout, not a missing or dead seat.
 Multiple leaves can display the same session; a view is not an agent identity.
@@ -139,7 +134,7 @@ In plain words —
 | **un-fullscreen / minimize it** | `POST /canvas/unmaximize` `{paneId}` | the user: *"unfullscreen = minimize essentially is what makes sense on the infinite canvas"*. Omit `paneId` to restore ALL |
 | **move the viewport to a pane** | `POST /canvas/focus-pane` `{paneId}` | the camera bounce; the pane does not move, you do |
 | **move a pane** | `POST /canvas/move-pane` `{paneId, x, y}` | |
-| **close a non-fleet pane** | `POST /canvas/remove-pane` `{paneId}` | Never use this to retire a fleet seat |
+| **close a pane** | `POST /canvas/remove-pane` `{paneId}` | Only when the human explicitly asks |
 | **see what is open** | `GET /context` | `activeThread` → `paneCount` → `activePanes[]`, each with `maximized` and `inViewport` |
 
 ```bash

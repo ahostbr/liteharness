@@ -17,7 +17,7 @@ def backend():
 
 
 class Distribution:
-    def __init__(self, root, version="0.4.5"):
+    def __init__(self, root, version="0.4.6"):
         self.root = root
         self.version = version
 
@@ -56,7 +56,7 @@ def test_candidate_version_and_exact_policy_load(tmp_path, monkeypatch, backend)
     assert gate.decide(payload) is None
 
 
-@pytest.mark.parametrize("version", ["0.4.4", "0.4.6", "0.4.5.dev1", ""])
+@pytest.mark.parametrize("version", ["0.4.4", "0.4.5", "0.4.7", "0.4.6.dev1", ""])
 def test_unverified_version_is_refused(tmp_path, monkeypatch, backend, version):
     root = installed_policy(tmp_path)
     bind(monkeypatch, backend, Distribution(root, version))

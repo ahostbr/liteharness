@@ -12,16 +12,19 @@ answer.
 
     A RECIPIENT TYPO FAILS LOUDLY; A SENDER TYPO SUCCEEDS AND CREATES A GHOST.
 
-⚠️ AND THE FIX IS DELIBERATELY NOT SYMMETRIC. A seat that has not registered yet
-really does send under an unknown id, so refusing every unknown `--from` would
-close a live path to shut a typo hole. Two tiers instead (the orchestrator 716463bb):
-far id warns and sends; near miss refuses and names its neighbour.
+T0285 supersedes T841's warning-only distant-id exception: every unregistered
+sender is refused, with actionable recovery and no maildir write. Explicit
+--force remains the escape hatch; registered senders continue to work.
 """
 
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+from liteharness import cli, config, inbox
 
 LIVE = "c8f7ae56-4748-41e4-abba-d977ea61a70e"
 TYPO = "c8f7ae56-4748-41e4-abba-d977ea56e7ec"  # the real specimen: 12 chars off
@@ -66,18 +69,21 @@ def test_registered_sender_is_silent(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_unregistered_far_sender_warns_and_still_sends(tmp_path: Path) -> None:
-    """(b) 🔴 THE NOT-YET-REGISTERED SEAT MUST STILL GET ITS MESSAGE OUT.
-
-    This is the case that makes refusing every unknown `--from` wrong, and it is
-    asserted BEFORE the refusal arm below so the refusal can never be widened
-    into it without this going red.
-    """
+@pytest.mark.parametrize("sender", [FAR, "my-script"])
+@pytest.mark.parametrize("recipient", [PEER, "broadcast"])
+def test_unregistered_far_sender_is_refused_without_writing_mail(
+    tmp_path: Path, sender: str, recipient: str,
+) -> None:
+    """T0285 causal control: a valid recipient cannot excuse an unknown sender."""
     _register(tmp_path, PEER)
-    result = _run(tmp_path, ["send", PEER, "hello", "--from", FAR])
-    assert result.returncode == 0, result.stderr
-    assert "Sent message" in result.stdout, result.stdout
-    assert "not registered" in result.stderr, "the warning is the whole point"
+    result = _run(tmp_path, ["send", recipient, "hello", "--from", sender])
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Sent message" not in result.stdout, result.stdout
+    assert "not registered" in result.stderr, result.stderr
+    assert "NOTHING WAS SENT" in result.stderr, result.stderr
+    assert "register" in result.stderr and "--agent-id" in result.stderr, result.stderr
+    assert "--force" in result.stderr, result.stderr
+    assert not list((tmp_path / ".liteharness" / "inbox").rglob("*.json"))
 
 
 def test_near_miss_sender_is_refused_and_names_its_neighbour(tmp_path: Path) -> None:
@@ -92,7 +98,8 @@ def test_near_miss_sender_is_refused_and_names_its_neighbour(tmp_path: Path) -> 
     assert "Sent message" not in result.stdout
 
 
-def test_near_miss_still_sends_under_force(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sender", [TYPO, FAR, "my-script"])
+def test_unregistered_sender_still_sends_under_force(tmp_path: Path, sender: str) -> None:
     """(d) The escape hatch, same as `--to`'s.
 
     ⬜ An error that offers a remedy in its own text is not a blocker — and that
@@ -100,6 +107,57 @@ def test_near_miss_still_sends_under_force(tmp_path: Path) -> None:
     """
     _register(tmp_path, LIVE)
     _register(tmp_path, PEER)
-    result = _run(tmp_path, ["send", PEER, "hello", "--from", TYPO, "--force"])
+    result = _run(tmp_path, ["send", PEER, "hello", "--from", sender, "--force"])
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Sent message" in result.stdout, result.stdout
+    mail = list((tmp_path / ".liteharness" / "inbox" / "new").glob("*.json"))
+    assert len(mail) == 1
+    assert json.loads(mail[0].read_text(encoding="utf-8"))["from"] == sender
+
+
+@pytest.fixture
+def isolated_send(tmp_path: Path, monkeypatch):
+    root = tmp_path / ".liteharness"
+    monkeypatch.setattr(config, "get_root", lambda: root)
+    for suffix in ("ROOT", "NEW", "CUR", "DONE", "TMP"):
+        path = root / "inbox" if suffix == "ROOT" else root / "inbox" / suffix.lower()
+        monkeypatch.setattr(inbox, f"INBOX_{suffix}", path)
+    return tmp_path
+
+
+def test_distant_sender_reappearing_on_recheck_is_sent(isolated_send, monkeypatch, capsys):
+    _register(isolated_send, PEER)
+    sleeps = []
+
+    def restore_sender(delay):
+        sleeps.append(delay)
+        _register(isolated_send, FAR)
+
+    monkeypatch.setattr(cli.time, "sleep", restore_sender)
+    cli.cmd_send(PEER, "hello", from_id=FAR)
+    assert sleeps == [cli.RECIPIENT_RECHECK_DELAY_S]
+    assert "Sent message" in capsys.readouterr().out
+    assert len(list(inbox.INBOX_NEW.glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize("registry", ["missing", "empty"])
+def test_unverifiable_sender_warns_even_for_broadcast(isolated_send, capsys, registry):
+    if registry == "empty":
+        (isolated_send / ".liteharness" / "agents").mkdir(parents=True)
+    cli.cmd_send("broadcast", "hello", from_id=FAR)
+    out, err = capsys.readouterr()
+    assert "Sent message" in out
+    assert "SENDER NOT VERIFIED" in err
+    assert "not registered" not in err
+    assert len(list(inbox.INBOX_NEW.glob("*.json"))) == 1
+
+
+def test_recheck_becoming_unverifiable_warns_and_sends(isolated_send, monkeypatch, capsys):
+    record_root = isolated_send / ".liteharness" / "agents"
+    _register(isolated_send, PEER)
+    monkeypatch.setattr(cli.time, "sleep", lambda _: (record_root / f"{PEER}.json").unlink())
+    cli.cmd_send("broadcast", "hello", from_id=FAR)
+    out, err = capsys.readouterr()
+    assert "Sent message" in out
+    assert "SENDER NOT VERIFIED" in err
+    assert "not registered" not in err

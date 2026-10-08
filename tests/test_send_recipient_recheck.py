@@ -132,7 +132,8 @@ def _send(to: str, **kwargs) -> tuple[int, str, str]:
     code = 0
     try:
         with redirect_stdout(out), redirect_stderr(err):
-            cli.cmd_send(to, "a briefing that must not be lost", from_id="sender", **kwargs)
+            # T0285: use an already registered sender to isolate recipient checks.
+            cli.cmd_send(to, "a briefing that must not be lost", from_id=OTHERS[0], **kwargs)
     except SystemExit as exc:
         code = int(exc.code or 0)
     return code, out.getvalue(), err.getvalue()

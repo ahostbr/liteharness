@@ -103,18 +103,11 @@ at any tier. Run focused affected checks, not full suites by habit.
 A name identifies one agent and its durable conversation. Follow-up work returns
 to that same named seat. Message a live seat by inbox; resume it only after its
 process is gone: `liteharness spawn --split --resume <Name>`.
-Never replace a seat under a fresh name or self-retire. Every fresh fleet spawn
+Never replace a seat under a fresh name. Every fresh fleet spawn
 has an explicit `--cwd <repo root>`; `liteharness names --list` shows the saved
-identity, conversation and cwd. Lifecycle changes require the leader/orchestrator.
+identity, conversation and cwd.
 
-**Fleet lifecycle safety:**
-Only the leader that spawned a seat may retire it; never self-retire.
-Use `liteharness retire <agent-id>`: fresh identity check, retirement request, then validated ACK before closing.
-The seat writes its handoff and runs `liteharness ack-idle --handoff <path>`; the command resolves its own identity and sends the receipt.
-Never close a named seat by leafId or paneId; the command reports returned-leaf confirmation or "terminal closed; canvas leaf could not be confirmed (terminal list unavailable)", not full success.
-`liteharness retire <agent-id> --force` is explicit spawner-only authority for a dead, hung or throwaway seat, not an automatic fallback.
-Plain `DELETE /pty/<sessionId>` is cleanup only after the agent process is already gone, with fresh exact identity checks.
-A refusal stops retirement; report its exact reason, do not bypass the guard.
+**Closing terminals:** Close a terminal only when the human explicitly asks.
 
 
 ## Merge and human-look gate

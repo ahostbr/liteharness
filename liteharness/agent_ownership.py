@@ -8,16 +8,19 @@ including /new and compaction. Conversation leases remain a separate concern.
 
 The kernel byte/flock algorithm matches LiteTUI shared_state.Lease. Unlike its
 legacy convenience API, acquisition never creates parent directories and every
-uninspectable/inaccessible lock fails closed. No PID, age, timeout or takeover.
+uninspectable/inaccessible lock fails closed. Catalog contention waits briefly;
+seat contention fails immediately. No PID/age-based eviction or timeout takeover.
 Path checks are not a sandbox against concurrent external filesystem changes.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import json
 import os
 from pathlib import Path
 import sys
+import time
 from typing import BinaryIO, Callable, TypeVar
 from uuid import uuid4
 
@@ -37,8 +40,9 @@ class OwnershipError(OSError):
 
 
 class _KernelLease:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, timeout: float = 0):
         self.path = path
+        self.timeout = timeout
         self.handle: BinaryIO | None = None
         self.pid = os.getpid()
 
@@ -59,12 +63,23 @@ class _KernelLease:
             except BaseException:
                 os.close(fd)
                 raise
-            if sys.platform == "win32":
-                import msvcrt
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    # Only kernel contention may wait, never failed path/open or
+                    # initialization checks. Expiry refuses; it cannot take over.
+                    remaining = deadline - time.monotonic()
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or remaining <= 0:
+                        raise
+                    time.sleep(min(0.02, remaining))
             # Lock first: even initialization belongs to the kernel owner.
             if not os.fstat(handle.fileno()).st_size:
                 handle.write(b"\0")
@@ -161,7 +176,9 @@ class AgentSession:
                 or (not (allow_unchosen and model is None)
                     and (not isinstance(model, str) or not model.strip()))):
             raise StoreError('Agent execution authority is incomplete')
-        with _KernelLease(store.data_root / CATALOG_LEASE_NAME):
+        # Serialize short fresh-home reservations; unlike seat ownership, another
+        # creator holding the catalog does not mean this agent is already owned.
+        with _KernelLease(store.data_root / CATALOG_LEASE_NAME, timeout=10):
             agents = store.list_agents()
             if any(name_key(a.name) == name_key(name) or a.agent_id == agent_id for a in agents):
                 raise StoreError("Agent name or identity already exists")

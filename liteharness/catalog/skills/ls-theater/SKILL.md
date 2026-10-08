@@ -1,13 +1,15 @@
 ---
 name: ls-theater
-description: Use to SHOW the human anything visual inside LiteSuite (mockups, page previews, data visualizations, reports, screenshots, prototypes) or to ASK them things a chat question does badly (several questions at once, choice cards, a scale, image or file uploads, an approve/revise/reject verdict). Theater compiles a TSX page, opens it in a new LiteSuite browser pane, and sends every answer back to you as an ANSWER message in your inbox. Triggers on 'theater', 'mockup', 'create a mockup', 'page preview', 'visual prototype', 'visualize this', 'make this pretty', 'visualize this document', 'interactive mockup', 'driven mockup', 'generative UI', 'show me', 'let me answer questions', 'let me upload images'.
+description: Use to SHOW the human anything visual inside LiteSuite (mockups, page previews, data visualizations, reports, screenshots, prototypes) or to ASK them things a chat question does badly (several questions at once, choice cards, a scale, image or file uploads, an approve/revise/reject verdict). Theater compiles a TSX page, opens it as a tab in one marked LiteSuite browser pane per workspace/thread (distinct pages get distinct tabs; reopening reuses the exact tab; only explicit newPane opts out), and sends every answer back to you as an ANSWER message in your inbox. Triggers on 'theater', 'mockup', 'create a mockup', 'page preview', 'visual prototype', 'visualize this', 'make this pretty', 'visualize this document', 'interactive mockup', 'driven mockup', 'generative UI', 'show me', 'let me answer questions', 'let me upload images'.
 ---
 
 # Theater
 
 Theater is where an agent shows the human things inside LiteSuite. You write one page as TSX,
-LiteSuite compiles it live and opens it in a **new browser pane**, and whatever the human
-answers on it comes straight back to **you**, the agent that opened it.
+LiteSuite compiles it live and opens it as a **tab in one marked browser pane per workspace/thread**.
+Distinct pages get distinct tabs; reopening reuses the exact tab and opens no second pane.
+Only explicit `newPane` opts out of this shared-pane default. Whatever the human answers
+on the page comes straight back to **you**, the agent that opened it.
 
 **Quick yes/no or pick-one question? Use `AskUserQuestion` instead.** Theater is for anything
 visual, anything with several questions, and anything with uploads.
@@ -15,24 +17,26 @@ visual, anything with several questions, and anything with uploads.
 ## The loop
 
 ```
-you write page.tsx  ->  ask open  ->  a new pane shows it
+you write page.tsx  ->  ask open  ->  a tab in the marked browser pane shows it
                                               |
                           the human answers   v
                         session.json (+ uploads/)  ->  an ANSWER message in YOUR inbox
                                               |
-you read the answer, edit page.tsx  ->  the open pane reloads itself
+you read the answer, edit page.tsx  ->  the exact open tab reloads itself
 ```
 
 1. **Write the page** at `<cwd>/.litesuite/theater/<pageId>/page.tsx`, or pass it as `source`.
 2. **Open it:** `ask open pageId=<id> title="<what you are asking>"` (MCP tool `ask`,
    or `lst run ask action=open …`). `theater` is a one-release compatibility alias;
-   migrate to `ask` before the next release after T1150. One call opens one NEW pane. Calling `open` again for
-   the same `pageId` reloads that pane in place and opens no second one.
+   migrate to `ask` before the next release after T1150. By default, pages open as tabs
+   of one marked browser pane per workspace/thread: distinct pages get distinct tabs.
+   Calling `open` again for the same `pageId` reuses and reloads the exact tab and opens
+   no second pane. Only explicit `newPane` opts out of the shared-pane default.
 3. **Answers arrive in your inbox**, one ANSWER message per changed answer, through the inbox
    watcher you already run. **You arm nothing.** The exception is below: if `open` says
    `NO INBOX REACHABLE`, arm the Monitor it printed.
 4. **Rewrite the page so the human can see the answer landed.** Editing any file in the page
-   folder reloads the open pane; you do not tell them to refresh.
+   folder reloads its exact open tab; you do not tell them to refresh.
 
 Who gets the answers: the agent whose id LiteSuite finds in the tool's environment, and never
 an id you type. A leader's page answers the leader; a worker's page answers the worker. The pane
@@ -48,7 +52,7 @@ working directory, not yours, so without it the page lands under LiteSuite's.
 
 | Action     | Arguments                              | Does                                                                                   |
 | ---------- | -------------------------------------- | -------------------------------------------------------------------------------------- |
-| `open`     | `pageId`, `title`, `source?`, `projectDir?` | compile and show the page in a new pane (same `pageId` → reload in place)             |
+| `open`     | `pageId`, `title`, `source?`, `projectDir?`, `newPane?` | compile and show a tab in the marked browser pane for this workspace/thread; distinct pages get distinct tabs; same `pageId` → reuse the exact tab, no second pane; only explicit `newPane` opts out |
 | `question` | `pageId`, `questionId`, `wait?`, `timeout?`, `projectDir?` | the answer so far; `wait=true` blocks until it is answered (default 1800 s)      |
 | `media`    | `path` or `url`, `title?`              | show an image, video or audio file                                                     |
 | `status`   | `pageId`, `projectDir?`                | title, owner, revision, which questions are answered                                   |
@@ -320,7 +324,9 @@ page so the human can see the answer landed. `TaskStop` the monitor when the pag
 4. **Never re-ask** something already answered. Read `session.json` first.
 5. **Look at the page before you call it done.** A page can build, serve and still render `NaN`
    or an empty chart; only the pane shows it.
-6. **One page per decision thread.** Revise the same `pageId`; a new `pageId` is a new pane.
+6. **One page per decision thread.** Revise the same `pageId` to reuse its exact tab, not open
+   a second pane. Distinct pages get distinct tabs in one marked browser pane per
+   workspace/thread; only explicit `newPane` opts out of that shared-pane default.
 
 ## Where things live
 

@@ -228,8 +228,7 @@ def _bridge_token_file() -> str:
 
 
 def _bridge_request(method: str, path: str, body: dict | None = None,
-                    *, lifecycle_origin: str | None = None,
-                    retry_stale_token: bool = True) -> dict:
+                    *, lifecycle_origin: str | None = None) -> dict:
     """Send an authenticated request to the LiteSuite Agent Bridge HTTP server."""
     import urllib.request
     import urllib.error
@@ -267,7 +266,7 @@ def _bridge_request(method: str, path: str, body: dict | None = None,
     # bridge uses, so canvas ops work from any terminal.
     env_token = os.environ.get("LITESUITE_BRIDGE_TOKEN", "")
     status, result = send(env_token or _bridge_token_file())
-    if retry_stale_token and status == 401 and env_token:
+    if status == 401 and env_token:
         # T916-D: a relaunched LiteSuite mints a new token and writes it to
         # disk, but a seat's env still holds the old one. A 401 did nothing
         # on the bridge, so retrying ONCE with the file's token is safe.
@@ -275,11 +274,6 @@ def _bridge_request(method: str, path: str, body: dict | None = None,
         if file_token and file_token != env_token:
             status, result = send(file_token)
     return result
-
-
-def _retirement_bridge_request(method: str, path: str, body: dict | None = None) -> dict:
-    """One HTTP attempt, including stale-credential refusal; never token retry."""
-    return _bridge_request(method, path, body, retry_stale_token=False)
 
 
 def _rename_canvas_seat(session_id: str, name: str) -> str | None:
@@ -1036,49 +1030,24 @@ def _require_identity_value(value: str | None, label: str) -> str:
 
 
 def _verify_sender(agent_id: str, force: bool = False) -> None:
-    """Say something when `--from` names an id the registry does not know (T841).
+    """Refuse every unregistered sender unless explicitly forced (T0285).
 
-    🔴 THE TWO ENDS OF ONE ENVELOPE WERE VALIDATED DIFFERENTLY, AND THE
-    UNVALIDATED ONE IS THE ONE THAT SAYS WHO SPOKE. `--to` has been checked
-    since T238: two reads, did-you-mean, refuse, `--force` to override. `--from`
-    was passed straight through to `inbox.send`, so a typo produced a normal
-    "Sent message <id>" from an id that has never existed.
-
-    MEASURED 2026-09-17: message `874dd34b` reached the orchestrator `--from
-    c8f7ae56-4748-41e4-abba-d977ea56e7ec` — the sender's own id with the last
-    twelve characters wrong. Nothing printed. He asked whether an unknown agent
-    was impersonating a live seat, which is the right question and one the
-    channel gave him no way to answer.
-
-        A RECIPIENT TYPO FAILS LOUDLY; A SENDER TYPO SUCCEEDED AND CREATED A
-        GHOST. The check that would have caught it did not exist, and its
-        absence is indistinguishable from the interesting case.
-
-    ⚠️ WHY THIS IS NOT SYMMETRIC WITH `--to`, WHICH REFUSES OUTRIGHT: `--from`
-    has a legitimate unknown case that `--to` does not. A seat that has not
-    registered yet — or whose record the hook sweep removed — really does send
-    under an id the registry cannot confirm, and refusing there would break a
-    live path to close a typo hole. So (the orchestrator's ruling, 716463bb):
-
-      unknown, NO near match  -> SEND, with a loud warning. The new seat works.
-      unknown, NEAR MISS      -> REFUSE and name the neighbour. Nobody's first
-                                 registration is one character off a live id;
-                                 that shape is a typo every time.
-
-    An unreadable registry says nothing at all here: `--to`'s own check already
-    warns about that once, and twice is noise.
+    A missing sender gets the same bounded two-read check as a recipient: one
+    listing can miss a heartbeat rewrite. Near matches are recovery hints, not
+    a criterion for refusal. An unverifiable registry still fails open, but
+    warns independently because broadcast skips recipient verification.
     """
-    if force or not agent_id:
+    if force:
         return
-    # ONE read here, not `_verify_recipient`'s two. Its second read exists to
-    # avoid refusing a live agent on a mid-heartbeat listing miss, and it pays
-    # RECIPIENT_RECHECK_DELAY_S to get it — a cost the recipient check takes only
-    # when it is about to BLOCK. Reusing it here charged that delay to every
-    # send whose sender was not in the registry, which `test_send_recipient_
-    # recheck.py` caught immediately: three arms that pin the sleep ledger went
-    # red. The escalation below pays it only on the path that refuses.
-    known, registry_error = _known_agent_ids()
-    if registry_error or agent_id in known:
+    known, registry_error, sender_known = _verify_recipient(agent_id)
+    if registry_error:
+        print(
+            f"Warning: SENDER NOT VERIFIED -- {registry_error}.\n"
+            f"  Sending anyway. This is not a claim that --from {agent_id!r} is registered.",
+            file=sys.stderr,
+        )
+        return
+    if sender_known:
         return
 
     near = [
@@ -1087,38 +1056,20 @@ def _verify_sender(agent_id: str, force: bool = False) -> None:
         if len(candidate) == len(agent_id) == _UUID_LEN
         and sum(a != b for a, b in zip(candidate, agent_id)) <= SENDER_NEAR_MISS_MAX_DIFF
     ]
+    hint = ""
     if near:
-        # 🔴 ABOUT TO BLOCK A SEND, SO ASK TWICE. A `glob` that runs inside a
-        # heartbeat rewrite can miss the very record being rewritten (T238), and
-        # refusing a LIVE seat's own message on one sample is a worse failure
-        # than the typo this catches. `_verify_recipient` is that second read.
-        known, registry_error, sender_known = _verify_recipient(agent_id)
-        if registry_error or sender_known:
-            return
-        near = [
-            candidate
-            for candidate in sorted(known)
-            if len(candidate) == len(agent_id) == _UUID_LEN
-            and sum(a != b for a, b in zip(candidate, agent_id)) <= SENDER_NEAR_MISS_MAX_DIFF
-        ]
-    if near:
-        listed = "".join(f"    {candidate}\n" for candidate in near[:3])
-        print(
-            f"Error: --from {agent_id!r} is not registered, and it is one typo away "
-            f"from an id that is. NOTHING WAS SENT.\n"
-            f"  Did you mean:\n{listed}"
-            f"  A message sent under an unregistered id cannot be answered or "
-            f"attributed, and the recipient has no way to tell it from an intruder.\n"
-            f"  Pass --force if you really mean this id.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
+        hint = "  Did you mean:\n" + "".join(f"    {candidate}\n" for candidate in near[:3])
     print(
-        f"Warning: --from {agent_id!r} is not registered. Sending anyway "
-        f"(a seat may send before it registers), but nothing can reply to it.",
+        f"Error: --from {agent_id!r} is not registered. NOTHING WAS SENT.\n"
+        f"{hint}"
+        f"  Pass YOUR OWN registered agent id as --from, not a conversation id or another agent's id.\n"
+        f"  If this is your intended identity, register it first with "
+        f"`liteharness register --agent-id <your-id>`.\n"
+        f"  `liteharness discover` lists registered agents.\n"
+        f"  Pass --force if you explicitly intend to send under an unregistered id.",
         file=sys.stderr,
     )
+    sys.exit(1)
 
 
 def _not_a_leader_warning(sender_id: str, recipient_id: str) -> str | None:
@@ -4688,14 +4639,14 @@ def cmd_spawn(
         agents_dir = config.get_root() / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         presence_path = agents_dir / f"{agent_id}.json"
-        presence_path.write_text(json.dumps({
+        config.atomic_write_json(presence_path, {
             "agent_id": agent_id,
             "spawn_mode": "canvas",
             "canvas_session_id": session_id,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "name": name,
             "model": resolved_model,
-        }, indent=2), encoding="utf-8")
+        })
 
         print(f"Spawned Claude session (canvas mode):")
         print(f"  Agent ID: {agent_id}")
@@ -4780,13 +4731,13 @@ def cmd_spawn(
         agents_dir = config.get_root() / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         presence_path = agents_dir / f"{agent_id}.json"
-        presence_path.write_text(json.dumps({
+        config.atomic_write_json(presence_path, {
             "agent_id": agent_id,
             "spawn_mode": "pty",
             "started_at": datetime.now(timezone.utc).isoformat(),
             "name": name,
             "model": resolved_model,
-        }, indent=2), encoding="utf-8")
+        })
 
         kind = "process" if exec_cmd else "Claude session"
         print(f"Spawned {kind} (PTY mode):")
@@ -5843,8 +5794,6 @@ def main() -> None:
         print("  inbox [N] [--all] [--agent ID]  (--agent-id is an accepted alias; an UNKNOWN flag is rejected,")
         print("                                 never ignored) Read-only inbox view: full bodies, new+cur+done, newest N")
         print("  discover [count]               Discover active agents")
-        print("  ack-idle [--handoff PATH]       Verify your own existing handoff, acknowledge idle, then wait")
-        print("  retire <agent-id> [--force]     Ask and retire only a seat you spawned; explicit force only")
         print("  handoffs --audit [--format table|json|both] [--out FILE] [--writable-legacy]")
         print("                                 Read-only inventory of legacy handoff files + owner resolution")
         print("  index --check --project ROOT   Check ROOT/AGENT_INDEX.md: exit 1 on a missing index, >12000 chars,")
@@ -5969,12 +5918,6 @@ def main() -> None:
         print("Done.")
     elif cmd == "status":
         cmd_status()
-    elif cmd == "ack-idle":
-        from .retirement_cli import command_ack_idle
-        sys.exit(command_ack_idle(sys.argv[2:], _retirement_bridge_request))
-    elif cmd == "retire":
-        from .retirement_leader import command_retire
-        sys.exit(command_retire(sys.argv[2:], _retirement_bridge_request))
     elif cmd == "send":
         if len(sys.argv) < 4:
             print(
@@ -5984,13 +5927,10 @@ def main() -> None:
                 "       Use --body-file for anything containing code, backticks or $ -- "
                 "the shell edits an inline body silently and still reports success.\n"
                 "\n"
-                "  --from is CHECKED against the registry (T841), in two tiers, because a\n"
-                "  sender typo used to send cleanly under an id that never existed:\n"
-                "    unknown id, no near match -> SENT, with a warning. A seat that has\n"
-                "      not registered yet is a real case and stays open.\n"
-                "    unknown id that is a NEAR MISS of a registered one -> REFUSED, naming\n"
-                "      the neighbour. Nobody's first registration is a few characters off\n"
-                "      a live id; that shape is a typo every time. --force overrides."
+                "  --from must name YOUR OWN registered agent id (T0285). Unknown\n"
+                "  senders are REFUSED; register your identity first or correct --from.\n"
+                "  --force explicitly overrides sender and recipient registration checks.\n"
+                "  An unverifiable registry still permits sending with a NOT VERIFIED warning."
             )
             sys.exit(1)
         # Consume flags by ARGV POSITION, never by string-matching the joined body.

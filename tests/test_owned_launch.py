@@ -47,6 +47,7 @@ def test_actual_fresh_spawn_binds_child_birth_and_never_scans_archive(world, mon
                   cwd=str(project), backend='codex', model='fixture', thinking_level='high')
     body = next(body for _, path, body in calls if path == '/pty/create')
     assert body['args'][-4:] == ['--create-agent', 'QuietHelm', '--agent-id', AID]
+    assert body['args'][body['args'].index('--tool-profile') + 1] == 'autonomous'
     assert body['env']['LITEHARNESS_AGENT_ID'] == AID
     # Parent request construction grants no AgentSession and creates no home.
     assert not (data / '.agents').exists()
@@ -67,6 +68,7 @@ def test_actual_owned_resume_ignores_poisoned_registry_index_and_uses_home(world
                   cwd=str(project), tier='worker', spawned_by=BID)
     launch = placed[0]['launch']
     assert launch['args'][-4:] == ['--agent', 'QuietHelm', '--convo', CID]
+    assert launch['args'][launch['args'].index('--tool-profile') + 1] == 'autonomous'
     assert launch['harnessAgentId'] == AID
     assert launch['env']['LITETUI_DATA_ROOT'] == str(data)
     assert not (data / '.convos').exists()

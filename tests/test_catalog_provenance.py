@@ -108,9 +108,10 @@ def test_reconciliation_payload_inventory_and_digest(tmp_path):
     assert current['payload_sha256'] == digest
     assert '__init__.py' in paths and 'PROVENANCE.json' not in paths
     assert 'historical' in stamp['upstream_provenance_status']
-    assert current['published_restoration_baseline'] == 'd3ba9a8f59fb7b10279be54980f2385d193273d1'
-    assert current['initial_target_commit'] == '9623e40fc0cfc051eae5861bdb2f18af7d53bc35'
-    assert current['package_version'] == '0.4.5'
+    assert current['published_restoration_baseline'] == 'fba17c7c40a83584283418c6499467a1a8805196'
+    assert current['initial_target_commit'] == '4e57b5f3e851446965f5798431d23f77005bd778'
+    assert current['plugin_public_baseline'] == '02f880cfe474e170e511210fb2cd6b8b1dd79f0e'
+    assert current['package_version'] == '0.4.6'
     assert current['tracked_runtime_exclusions'] == ['skills/ls-conversation-lookup/.last_indexed']
     for name, expected in current['policy_sha256_lf'].items():
         content = (ROOT / 'liteharness' / name).read_bytes().replace(b'\r\n', b'\n')

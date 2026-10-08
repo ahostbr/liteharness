@@ -5,7 +5,32 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.5] — Unreleased
+## [0.4.6] — Unreleased
+
+### Changed
+- Remove the cooperative `retire` / `ack-idle` protocol and its receipt machinery.
+  Close terminals only on explicit human instruction; persistent named seats and
+  unrelated identity/ownership safeguards remain. The 0.4.5 entry below is historical,
+  not current operating guidance.
+- Owned frontier LiteTUI launches and resumes default to the autonomous tool profile;
+  explicit resolver choices and local-backend profiles remain unchanged.
+- Serialize simultaneous catalog creation with a bounded kernel-lock wait. Seat
+  ownership still refuses immediately; timeout never authorizes takeover.
+- Tolerate unreadable unrelated registration rows only after bounded rereads and a
+  validated saved-name index; keep own-ID/name conflicts strict. Spawn presence writes
+  are atomic. Unknown index entries cannot prove the absence of a name collision.
+- Refuse unregistered message senders unless explicitly forced. An unreadable registry
+  remains a separately warned, unverified send rather than a registration claim.
+- Update Theater shared-pane/tab-reuse guidance and Original/Turbo speech capabilities.
+  Audio effects, rebuilt host behavior and real-seat acceptance remain unverified.
+- Preserve packaged YAML/resources, portable identities and runtime-state exclusions;
+  coordinate the hook contract with package 0.4.6 and plugin 1.0.21.
+- Remove active retirement directives from the matching plugin's canonical role
+  prompts and generated wrappers while preserving cognitive method bodies.
+  Already-running seats retain their old preambles until they start again;
+  publication does not rewrite live sessions or authorize a restart/reload.
+
+## [0.4.5] — Historical source entry
 
 Candidate changes relative to the published 0.4.4 source. No publication date is assigned.
 

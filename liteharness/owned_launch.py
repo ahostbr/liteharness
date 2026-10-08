@@ -13,6 +13,10 @@ from pathlib import Path
 from .agent_store import AgentStore, StoreError, _unlinked, valid_id, valid_name
 
 
+# Mirrors litetui.subagent_routing.LOCAL_BACKENDS (not imported: LiteTUI may be absent).
+_LOCAL_BACKENDS = frozenset({'lmstudio', 'llamacpp', 'ninfer', 'strata', 'custom'})
+
+
 class RootUnknown(StoreError):
     """No installed canonical resolver or explicit root; not a corrupt-store fallback."""
 
@@ -97,6 +101,12 @@ def request(resolution: dict, *, root: Path, name: str, agent_id: str,
             if flag == '--thinking-level' and any(a == '--reasoning-effort' or a.startswith('--reasoning-effort=') for a in args):
                 continue
             args.extend([flag, expected])
+    # Frontier seats run autonomous; the confirm profiles are for small local
+    # models. The launch flag outranks a conversation's remembered profile, so a
+    # resumed interactive seat comes up autonomous too. A resolver choice wins.
+    if (backend not in _LOCAL_BACKENDS
+            and not any(a == '--tool-profile' or a.startswith('--tool-profile=') for a in args)):
+        args.extend(['--tool-profile', 'autonomous'])
     if fresh:
         args.extend(['--create-agent', name, '--agent-id', agent_id])
     else:

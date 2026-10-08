@@ -53,9 +53,9 @@ def load_gate():
     import hashlib
     expected = {"deny_gate.py": "15e98aea4ac8154d028aadc2e375e18892d202a95794b9fbe82ef59706d3cd79",
                 "deny_floor.py": "c60d0fee461c3a4bfcfae928c624e4c64ffbbefc7a5d9103851f03fb22704046"}
-    # T0373 / package 0.4.5: reconcile published baseline d3ba9a8f59fb7b10279be54980f2385d193273d1.
-    # The fixed hashes below bind the policy bytes; the release ledger pins the final commit.
-    if distribution.version != "0.4.5":
+    # T0335-H / package 0.4.6: retain policy from public baseline fba17c7c40a83584283418c6499467a1a8805196.
+    # The fixed hashes above bind the policy bytes; the release ledger pins the final commit.
+    if distribution.version != "0.4.6":
         raise ValueError("Unverified installed policy version")
     from types import ModuleType
     modules = {}

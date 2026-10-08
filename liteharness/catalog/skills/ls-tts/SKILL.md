@@ -75,20 +75,20 @@ Choose the delivery **once per reply** from what the content warrants. Neutral i
 
 The **text plus supported delivery fields**. Use ordinary words and punctuation. Do not put stage directions such as `Speak sadly` into spoken text: they can be spoken literally. Qwen instructions belong in `emotion.instruct`.
 
-| Situation | Exact example text cue to send | Chatterbox `emotion` | Qwen `emotion` |
+| Situation | Exact example text cue to send | Original Chatterbox `emotion` | Qwen `emotion` |
 | --- | --- | --- | --- |
 | Neutral / explanation | `The next step is ready.` | Omit block; inherit saved settings | Omit block |
-| Success / gratitude | `Good news, the checks passed! Thank you.` | `{"exaggeration":0.7}` | `{"instruct":"Speak warmly and gratefully."}` |
+| Success / gratitude | `Good news, the checks passed! Thank you.` | `{"exaggeration":0.7,"cfg_weight":0.3}` | `{"instruct":"Speak warmly and gratefully."}` |
 | Warning | `Please pause. This needs a check before we continue.` | Omit block; normal priority, not `interrupt` | `{"instruct":"Speak clearly and calmly, with emphasis on the warning."}` |
 | Apology | `I'm sorry, I got that wrong. Here is the correction.` | `{"exaggeration":0.3}` | `{"instruct":"Speak gently and sincerely."}` |
-| Excitement | `That worked! We have the result we wanted.` | `{"exaggeration":1.0}` | `{"instruct":"Speak with brief, genuine excitement."}` |
+| Excitement | `That worked! We have the result we wanted.` | `{"exaggeration":1.0,"cfg_weight":0.3}` | `{"instruct":"Speak with brief, genuine excitement."}` |
 | Calm / reassurance | `Take your time. We can do this one step at a time.` | `{"exaggeration":0.3}` | `{"instruct":"Speak softly and reassuringly."}` |
 
 These are **conservative starting suggestions, not emotion enum values or audibly verified presets**. Their perceived emotional effect is UNVERIFIED; leave advanced samplers at the user's values unless asked. On Edge/GPT-Live use only wording: these block fields are reported ignored. An empty Qwen instruction `{"instruct":""}` clears the saved instruction for that utterance; omission inherits it.
 
 ### B. Chatterbox controls: saved defaults plus per-call overrides
 
-The current adapter uses **original English `chatterbox.tts.ChatterboxTTS`**, not Turbo or Multilingual. It forwards `ttsEngineParams.chatterbox` from the settings panel, filtered against capabilities, into the managed server's `/v1/audio/speech` request. A validated `/speak` `emotion` block then overrides its six numeric fields for that one utterance; Chatterbox ignores `instruct`. The managed engine API is **different** from port 7438's `/v1/tts/speak`.
+**Original is the default.** Voice > TTS saves `ttsChatterboxVariant` (`original` / `turbo`) for the next server start the user chooses; saving it never restarts, reconfigures or loads a model. Original uses `chatterbox.tts.ChatterboxTTS`; Turbo uses `chatterbox.tts_turbo.ChatterboxTurboTTS` from verified `chatterbox-tts==0.1.7`. Multilingual is not offered. Read the server capabilities `variant`, not the pending setting, before choosing delivery. It forwards `ttsEngineParams.chatterbox` from the settings panel, filtered against capabilities, into the managed server's `/v1/audio/speech` request. A validated `/speak` `emotion` block then overrides its six numeric fields for that one utterance; Both variants ignore `instruct`. The six numeric fields below describe **Original only**. The managed engine API is **different** from port 7438's `/v1/tts/speak`.
 
 | Exact engine parameter | Accepted bound | Original English model default when unset | Purpose |
 | --- | --- | --- | --- |
@@ -105,11 +105,35 @@ The direct managed API accepts these six parameters with `input`, `model: "chatt
 
 Other saved settings: `ttsChatterboxVoice` (reference path/default voice, not a display-name emotion), active Voice Library clone, and `ttsPlaybackRate` (1–2.5, default 1). Playback speed is separate from generation parameters; there is no Chatterbox `speed` or natural-language `instruct` field in this adapter.
 
-### C. Inline text cues: what the source actually confirms
+### C. Turbo: tags and speed, **no exaggeration control**
+
+Turbo is the 350M English model optimized for lower latency. It gives native inline tags and faster inference, **not** Original's expression/CFG controls. A reply that wants a laugh uses a tag on Turbo; a reply that wants stronger delivery on Original uses `exaggeration` with a lower `cfg_weight` (e.g. 0.7 / 0.3). This is still per utterance, not per word. There is **no documented per-word emotion API**.
+
+| Field | Turbo contract (`chatterbox-tts` 0.1.7 source) |
+| --- | --- |
+| `temperature` | Supported; model default 0.8 when unset |
+| `repetition_penalty` | Supported; model default 1.2 when unset |
+| `top_p` | Supported; model default 0.95 when unset (Original is 1.0) |
+| `exaggeration`, `cfg_weight`, `min_p` | Ignored, even though upstream's generate signature accepts them |
+| `instruct` | Ignored by both Chatterbox variants |
+
+The `/speak` response reports unsupported fields in `emotion.ignored`; they are not forwarded as functioning knobs. The panel hides these ignored controls from the active Turbo form and preserves their saved Original values. Do not promise that increasing exaggeration changes Turbo delivery. An unavailable capabilities report cannot certify support.
+
+| Exact inline tag | Turbo documented cue | Original |
+| --- | --- | --- |
+| `[laugh]` | Laugh | Not supported |
+| `[chuckle]` | Chuckle | Not supported |
+| `[cough]` | Cough | Not supported |
+
+Send tags literally inside the **text**, e.g. `That worked [chuckle]. Thank you!`; they are not emotion-object keys, SSML, or invented instructions. LiteSuite preserves these cues through the speak queue and adapters (ordinary Markdown cleanup/length bounds still apply). Avoid summarization for deliberately placed cues. Place the tag near the intended sound; do not call that per-word happy/sad control. These cues are source-documented, **not audibly verified on this machine**.
+
+Turbo cloning uses the **selected library voice's reference audio**, longer than 5 seconds (10 seconds recommended), never its incompatible Original `conditionals.pt`. Missing/short references fail explicitly, not silently substitute another voice. Original keeps its cached embeddings. Expected startup variant travels with synthesis requests: a mismatch returns 409 and asks for a user-chosen server restart; a request never switches the server variant. Turbo checkpoint loading is local-only at a pinned official Hugging Face revision and an explicit nine-file allowlist; downloads and model loads remain separate approval gates.
+
+### D. Original inline text cues: what the source actually confirms
 
 Original English Chatterbox normalizes punctuation then tokenizes the text. Full stops, commas, `!`, and `?` survive normalization. `...` and `…` become comma-space; colons and semicolons become commas; whitespace is collapsed. Use plain sentences, not invented pause-duration syntax.
 
-**No supported inline emotion-tag vocabulary is established for this adapter.** `[happy]`, `[sad]`, `[laugh]`, `[chuckle]`, `[sigh]`, `[excited]`, SSML, and parenthesized stage directions are not verified emotion controls; do not insert them in normal speech. Turbo-specific claims do not establish support in original Chatterbox. The source confirms text reaches the tokenizer, not that a tag or exclamation mark produces a particular emotional sound.
+**No supported inline emotion-tag vocabulary is established for Original.** `[happy]`, `[sad]`, `[laugh]`, `[chuckle]`, `[sigh]`, `[excited]`, SSML, and parenthesized stage directions are not verified emotion controls; do not insert them in normal speech. Turbo-specific claims do not establish support in original Chatterbox. The source confirms text reaches the tokenizer, not that a tag or exclamation mark produces a particular emotional sound.
 
 ### Other engines and the classifier
 
@@ -160,4 +184,4 @@ Fallback requires Python `edge-tts` and `playsound`; the primary API example use
 
 ## Verification boundary
 
-Source-checked against LiteSuite's Voice API handler, queue, settings/engine-parameter resolver, engine adapters and managed server schemas; T0360's HTTP-to-queue-to-synthesis override path is tested with mocked audio/network boundaries (2026-10-05). No speech, inference, model loading, downloads, or live API tests were performed. **UNVERIFIED:** deployed server/bundle parity, current voice/knob values, audible emotional effects and latency, inline tag interpretation, and model/account-specific behavior beyond these adapters. Listening tests require the user's OK.
+Source-checked against LiteSuite's Voice API handler, queue, settings/engine-parameter resolver, engine adapters and managed server schemas; T0360's per-line emotion path and T0362's variant selection, truthful Turbo capabilities, tag passthrough and clone/cache boundary are tested with mocked audio/network/model boundaries (2026-10-05). Turbo field support was source-checked against installed chatterbox-tts 0.1.7 and the official Resemble AI repository. No speech, inference, model loading, downloads, or live API tests were performed. **UNVERIFIED:** deployed server/bundle parity, current voice/knob values, audible emotional effects and latency, inline tag interpretation, and model/account-specific behavior beyond these adapters. Listening tests require the user's OK.
