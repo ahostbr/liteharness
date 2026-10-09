@@ -2029,3 +2029,103 @@ def test_the_default_name_is_still_the_schedule_file_and_refusal_asks_about_no_o
     assert deny_floor.is_jobs_file(litetui / SCHEDULE) and not deny_floor.is_jobs_file(litetui / OTHER_NAME)
     assert "[jobs-file]" in deny_floor.refusal(schedule, workspace, home)
     assert deny_floor.refusal(f"echo x > {litetui.as_posix()}/{OTHER_NAME}", workspace, home) is None
+
+
+# ── the recognizer's `under` keyword (T0306-R): a file at any depth below one
+#    named folder of a data root. Without it the file must sit IN the data root. ──
+
+UNDER = ".agents"
+DEPTHS = ["{under}/NAME", "{under}/Seat/NAME", "{under}/Seat/conversations/c1/NAME"]
+UNDER_SHELL = [   # (command, is it a write)
+    ("echo x > {file}", True),                                     # a redirect
+    ("rm {file}", True),                                           # a delete
+    ("cp other.json {file}", True),                                # a copy onto it
+    ("python -c \"open('{file}','w').write('x')\"", True),         # code handed to an interpreter
+    ("cat {file}", False),                                         # a reader
+    ("cp {file} other.json", False),                               # a copy from it
+]
+
+
+def _below(root, depth, name=OTHER_NAME, under=UNDER):
+    return root / depth.format(under=under).replace("NAME", name)
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_under_asks_the_path_questions_at_any_depth_below_the_folder(roots, depth, name):
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        path = _below(root, depth, name)
+        assert deny_floor.is_jobs_file(path, name, UNDER), path
+        assert not deny_floor.is_jobs_file(path, name), "without `under` the file must sit in the data root"
+        assert not deny_floor.is_jobs_file(path, _other(name), UNDER)
+        assert deny_floor.write_refusal(str(path), workspace, home, name=name, under=UNDER)
+        assert deny_floor.write_refusal(str(path), workspace, home, name=name) is None
+    assert not deny_floor.is_jobs_file(_below(plain, depth, name), name, UNDER), "not a data root"
+    assert deny_floor.write_refusal(str(_below(plain, depth, name)), workspace, home, name=name, under=UNDER) is None
+
+
+def test_under_does_not_ask_about_the_file_in_the_data_root_itself(roots):
+    home, workspace, litetui, _, _ = roots
+    assert deny_floor.is_jobs_file(litetui / OTHER_NAME, OTHER_NAME)
+    assert not deny_floor.is_jobs_file(litetui / OTHER_NAME, OTHER_NAME, UNDER)
+
+
+@pytest.mark.parametrize("place", ["agents/Seat", ".agents2/Seat", "x.agents/Seat",
+                                   "sub/.agents/Seat", ".agents.d/Seat"])
+def test_under_means_that_folder_directly_inside_the_data_root(roots, place):
+    """Another folder's name, or the right name one level too deep, is not it."""
+    home, workspace, litetui, _, _ = roots
+    path = litetui / place / OTHER_NAME
+    assert not deny_floor.is_jobs_file(path, OTHER_NAME, UNDER), path
+    assert deny_floor.jobs_write_target(f"echo x > {path.as_posix()}", workspace, home,
+                                        name=OTHER_NAME, under=UNDER) is None
+
+
+@pytest.mark.parametrize("spelling", [".AGENTS", ".Agents", ".agents.", ".agents ", ".agents..",
+                                      ".agents::$INDEX_ALLOCATION", ".agents:$I30:$INDEX_ALLOCATION"])
+def test_under_compares_the_folders_name_as_a_files_name_is_compared(roots, spelling):
+    """Case, trailing dots and spaces and a stream suffix name the same folder
+    (canonical_name). The path is judged as spelled: no folder exists on disk
+    here, so nothing but the comparison can make these equal."""
+    home, workspace, litetui, _, _ = roots
+    assert deny_floor.is_jobs_file(litetui / spelling / "Seat" / OTHER_NAME, OTHER_NAME, UNDER)
+    assert deny_floor.is_jobs_file(litetui / UNDER / "Seat" / OTHER_NAME, OTHER_NAME, spelling), \
+        "the caller's spelling of `under` is folded too"
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+@pytest.mark.parametrize("template, writes", UNDER_SHELL)
+def test_under_asks_the_shell_question_below_the_folder(roots, template, writes, depth):
+    home, workspace, litetui, _, plain = roots
+    command = template.format(file=_below(litetui, depth).as_posix())
+    target = deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME, under=UNDER)
+    assert (target is not None) is writes, command
+    if writes:
+        assert target == _below(litetui, depth)
+    assert deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME) is None, \
+        "without `under` a file below the folder is not the data root's own"
+    assert deny_floor.jobs_write_target(command, workspace, home, name=SCHEDULE, under=UNDER) is None
+    elsewhere = template.format(file=_below(plain, depth).as_posix())
+    assert deny_floor.jobs_write_target(elsewhere, workspace, home, name=OTHER_NAME, under=UNDER) is None
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+@pytest.mark.parametrize("template, writes", NAMED_GIT)
+def test_under_asks_the_git_question_below_the_folder(roots, template, writes, depth):
+    home, workspace, litetui, _, plain = roots
+    command = template.format(dir=_below(litetui, depth).parent.as_posix()).replace("NAME", OTHER_NAME)
+    assert bool(deny_floor.jobs_git_refusal(command, workspace, home, name=OTHER_NAME, under=UNDER)) is writes, command
+    assert deny_floor.jobs_git_refusal(command, workspace, home, name=OTHER_NAME) is None, command
+    elsewhere = template.format(dir=_below(plain, depth).parent.as_posix()).replace("NAME", OTHER_NAME)
+    assert deny_floor.jobs_git_refusal(elsewhere, workspace, home, name=OTHER_NAME, under=UNDER) is None
+
+
+def test_under_knows_a_data_root_by_the_environment_too(roots, monkeypatch):
+    home, workspace, _, _, plain = roots
+    path = _below(plain, DEPTHS[1])
+    assert not deny_floor.is_jobs_file(path, OTHER_NAME, UNDER)   # control: an unmarked folder
+    monkeypatch.setenv("LITETUI_DATA_ROOT", str(plain))
+    assert deny_floor.is_jobs_file(path, OTHER_NAME, UNDER)
+    assert deny_floor.jobs_write_target(f"rm {path.as_posix()}", workspace, home,
+                                        name=OTHER_NAME, under=UNDER) == path
