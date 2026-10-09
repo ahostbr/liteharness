@@ -2129,3 +2129,26 @@ def test_under_knows_a_data_root_by_the_environment_too(roots, monkeypatch):
     assert deny_floor.is_jobs_file(path, OTHER_NAME, UNDER)
     assert deny_floor.jobs_write_target(f"rm {path.as_posix()}", workspace, home,
                                         name=OTHER_NAME, under=UNDER) == path
+
+
+def test_under_follows_the_folders_short_name_when_the_folder_is_on_disk(roots):
+    """A volume may give the folder a second, short name (`AGENTS~1`). That
+    word is not the folder's name as spelled, so the bare path question says
+    no; the tool and shell questions resolve the path on disk first and are
+    answered for the folder it really is. Skipped where the volume gives none."""
+    if os.name != "nt":
+        pytest.skip("short names are a Windows volume feature")
+    import ctypes
+    home, workspace, litetui, _, _ = roots
+    path = _below(litetui, DEPTHS[1])
+    path.parent.mkdir(parents=True)
+    buffer = ctypes.create_unicode_buffer(600)
+    ctypes.windll.kernel32.GetShortPathNameW(str(litetui / UNDER), buffer, 600)
+    short = Path(buffer.value).name
+    if not short or short.lower() == UNDER:
+        pytest.skip("this volume gives the folder no short name")
+    spelled = (litetui / short / "Seat" / OTHER_NAME).as_posix()
+    assert not deny_floor.is_jobs_file(Path(spelled), OTHER_NAME, UNDER), "as spelled, another folder"
+    assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME, under=UNDER)
+    assert deny_floor.jobs_write_target(f"echo x > {spelled}", workspace, home,
+                                        name=OTHER_NAME, under=UNDER) == path
