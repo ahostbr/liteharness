@@ -58,6 +58,10 @@ Four rules, all about what the command TARGETS, never about how it is spelled:
                           with uncertain targets are refused conservatively. Windows
                           aliases of the name (`jobs.json::$DATA`, `:x`, a trailing
                           dot or space) are the same file (canonical_name, A1).
+                          The recognizer takes the file's name as a keyword
+                          (`name`, default `jobs.json`), so a caller can ask the
+                          same question of another file in a data root; `refusal`
+                          asks it of `jobs.json` only.
 
 Relative targets resolve against the folder the command is IN at that point:
 `cd ~; Remove-Item * -Recurse` is judged as a delete of the profile, because a
@@ -211,7 +215,14 @@ _READERS = frozenset({
 #: ...with any Windows alias of it (Dijkstra 69c7c209 A1): a stream suffix
 #: (`::$DATA`, `:x`) and trailing dots name the same file. A trailing space is
 #: a separator unquoted, and inside quotes the path tail stops before it anyway.
-_JOBS = re.compile(r"(?i)jobs\.json(?::[^\s\"'`;&|)<>,]*)?\.*(?=$|[\s\"'`;&|)<>,])")
+_JOBS_NAME = "jobs.json"
+
+
+def _jobs_word(name: str) -> re.Pattern:
+    """`name` as the shell word described above; `re` caches the compiled pattern."""
+    return re.compile(r"(?i)" + re.escape(name) + r"(?::[^\s\"'`;&|)<>,]*)?\.*(?=$|[\s\"'`;&|)<>,])")
+
+
 #: A redirect straight onto the path in front of it: `> jobs.json`, `2>>"x\jobs.json"`.
 _REDIRECT_ONTO = re.compile(r"(?<![<>=-])>{1,2}\s*[\"']?\Z")
 #: Heads that only READ the schedule file. Not the T1054 reader set: an editor,
@@ -312,7 +323,7 @@ def dealias(path: str) -> str:
     return head + sep + drive + last.split(":", 1)[0].rstrip(" .")
 
 
-def is_jobs_file(path) -> bool:
+def is_jobs_file(path, name: str = _JOBS_NAME) -> bool:
     """Is `path` a LiteTUI data root's jobs.json (T1085)? Its name, and a folder
     that holds src/litetui (a checkout, the default root), or the
     .litetui-data.json marker every data root gets on launch, or that IS
@@ -320,7 +331,7 @@ def is_jobs_file(path) -> bool:
     if path is None:
         return False
     path = Path(path)
-    if canonical_name(path.name) != "jobs.json":
+    if canonical_name(path.name) != name.lower():
         return False
     folder = path.parent
     if (folder / "src" / "litetui").is_dir() or (folder / ".litetui-data.json").is_file():
@@ -343,14 +354,14 @@ def _jobs_say(target: Path) -> str:
                 "Schedule with /cron or LiteTUI's schedule tools instead.")
 
 
-def write_refusal(path, workspace, home=None) -> str | None:
+def write_refusal(path, workspace, home=None, *, name: str = _JOBS_NAME) -> str | None:
     """The jobs-file refusal for a Write/Edit tool's `file_path`, or None. This
     rule ALONE: a tool write never meets the delete or launcher rules."""
     if not isinstance(path, str) or not path:
         return None
     target = _resolve(dealias(path), Path(workspace),
                       Path(home) if home is not None else Path.home())
-    return _jobs_say(target) if is_jobs_file(target) else None
+    return _jobs_say(target) if is_jobs_file(target, name) else None
 
 
 def shell_commands(command: str, shell: str | None = None, *, _depth: int = 0) -> list[dict]:
@@ -723,7 +734,8 @@ def _git_read_words(args: list[str], redirects=()) -> bool:
     }
 
 
-def jobs_git_refusal(command, workspace, home=None, *, shell=None) -> str | None:
+def jobs_git_refusal(command, workspace, home=None, *, shell=None,
+                     name: str = _JOBS_NAME) -> str | None:
     """Protected schedule Git writes; actual command heads alone get read waivers.
 
     Relocated writes retain the conservative guard. This is literal syntax
@@ -738,10 +750,10 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None) -> str | None
         r'(?i)^(?:(?:set|export)\s+)?(?:\$env:)?(?:GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE)\s*=',
         " ".join(w[0] for w in part["words"])) for part in parts)
     inherited_relocation = False
-    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
-        value = os.environ.get(name)
+    for variable in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        value = os.environ.get(variable)
         target = _resolve(value, base, home) if value else None
-        if target is not None and any(is_jobs_file(folder / "jobs.json")
+        if target is not None and any(is_jobs_file(folder / name, name)
                                       for folder in (target, *target.parents)):
             inherited_relocation = True
             break
@@ -764,7 +776,7 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None) -> str | None
         targets = args + [word[0] for op, word in part["redirects"] if op.startswith(">")]
         for word in targets:
             path = word.partition("=")[2] if "=" in word else word
-            if not _JOBS.search(path):
+            if not _jobs_word(name).search(path):
                 continue
             if relocating:
                 return _say("jobs-file", "a relocated Git write names jobs.json; "
@@ -772,7 +784,7 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None) -> str | None
                             "Read schedules with a file-read tool instead.")
             if ":" in path and not re.match(r"^[A-Za-z]:", path):
                 path = path.partition(":")[2]
-            if reason := write_refusal(path, base, home):
+            if reason := write_refusal(path, base, home, name=name):
                 return reason
         if relocating:
             return _say("jobs-file", "a repo-relocating Git write may change a LiteTUI "
@@ -781,7 +793,8 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None) -> str | None
     return None
 
 
-def jobs_write_target(command, workspace, home=None, *, shell=None) -> Path | None:
+def jobs_write_target(command, workspace, home=None, *, shell=None,
+                      name: str = _JOBS_NAME) -> Path | None:
     """Protected schedule write target, using real argv and control boundaries."""
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
@@ -796,7 +809,7 @@ def jobs_write_target(command, workspace, home=None, *, shell=None) -> Path | No
             for op, word in part["redirects"]:
                 if op.startswith(">"):
                     target = _resolve(dealias(word[0]), base, home)
-                    if is_jobs_file(target):
+                    if is_jobs_file(target, name):
                         return target
             if head in {"cd", "chdir", "pushd", "set-location", "sl", "push-location"}:
                 args = [word for word in words[1:] if word.lower() not in {"/d", "-path", "-literalpath"}]
@@ -824,7 +837,7 @@ def jobs_write_target(command, workspace, home=None, *, shell=None) -> Path | No
                     _, _, path = word.partition("=")
                 # Literal paths retain spaces. Embedded interpreter code keeps
                 # the historical finite path scan (no inner-language execution).
-                matches = list(_JOBS.finditer(path))
+                matches = list(_jobs_word(name).finditer(path))
                 for match in matches:
                     if match.end() == len(path) and match.start() >= 0:
                         raw = path
@@ -832,9 +845,9 @@ def jobs_write_target(command, workspace, home=None, *, shell=None) -> Path | No
                         prefix = _PATH_TAIL.search(path[:match.start()]).group(0)
                         if prefix and prefix[-1] not in "\\/":
                             continue
-                        raw = prefix + "jobs.json"
+                        raw = prefix + name
                     target = _resolve(dealias(raw), target_base, home)
-                    if not is_jobs_file(target):
+                    if not is_jobs_file(target, name):
                         continue
                     if head in _JOBS_COPIES:
                         previous = args[n - 1].lower() if n else ""
