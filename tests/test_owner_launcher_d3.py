@@ -23,7 +23,8 @@ def owner(tmp_path, monkeypatch):
     launcher = tmp_path / "owner" / "run.bat"
     launcher.parent.mkdir()
     launcher.write_text("@echo off\n", encoding="utf-8")
-    monkeypatch.setattr(deny_floor, "_OWNER_LAUNCHER", launcher)
+    # Released identity-free policy has no _OWNER_LAUNCHER override. The file
+    # supplies literal command spellings only; existence is not an exemption.
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     return launcher
 
@@ -41,14 +42,14 @@ def test_d3_literal_owner_positions(owner, shell, launch, template):
 
 
 @pytest.mark.parametrize("template", D3_LAUNCHES)
-def test_d3_requires_existing_owner_identity(owner, tmp_path, template):
+def test_d3_denies_other_and_missing_launcher_identity(owner, tmp_path, template):
     other = tmp_path / "other"
     other.mkdir()
     (other / "run.bat").write_text("@echo off\n", encoding="utf-8")
     command = template.format(launch="./run.bat")
-    assert deny_floor.refusal(command, other, jobs=False) is None
-    owner.unlink()
-    assert deny_floor.refusal(command, owner.parent, jobs=False) is None
+    assert "[owner-launcher]" in deny_floor.refusal(command, other, jobs=False)
+    owner.unlink()  # Inert temporary fixture only; nothing is ever executed.
+    assert "[owner-launcher]" in deny_floor.refusal(command, owner.parent, jobs=False)
 
 
 @pytest.mark.parametrize("command", [
