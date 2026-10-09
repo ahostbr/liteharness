@@ -5,6 +5,19 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`ls-youtube`: a second transcript route.** When yt-dlp's subtitle route fails or
+  returns no usable file, the skill tries the standalone `youtube-transcript-api` package
+  through `Get-Transcript.py`. That package is optional and is never installed silently.
+
+### Removed
+- The native tool guard mod: its backend and front half in the catalog's `hooks/mods/`,
+  its `tool.call` / `tool.check` hook-up in `hooks/register.mjs`, its test, and the policy
+  hash pin in the catalog stamp. The fleet, usage, paste-history and inbox mods are
+  unchanged.
+
 ## [0.4.6] — Unreleased
 
 ### Changed

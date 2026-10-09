@@ -113,9 +113,6 @@ def test_reconciliation_payload_inventory_and_digest(tmp_path):
     assert current['plugin_public_baseline'] == '02f880cfe474e170e511210fb2cd6b8b1dd79f0e'
     assert current['package_version'] == '0.4.6'
     assert current['tracked_runtime_exclusions'] == ['skills/ls-conversation-lookup/.last_indexed']
-    for name, expected in current['policy_sha256_lf'].items():
-        content = (ROOT / 'liteharness' / name).read_bytes().replace(b'\r\n', b'\n')
-        assert hashlib.sha256(content).hexdigest() == expected
 
 
 def test_payload_digest_covers_init_but_avoids_stamp_cycle(tmp_path):

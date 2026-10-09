@@ -18,8 +18,8 @@
     "commands",
     "hooks"
   ],
-  "file_count": 415,
-  "hash": "760791522fab",
+  "file_count": 414,
+  "hash": "339cec3a8d32",
   "upstream_provenance_status": "historical: source_repo/source_commit/source_path/synced_at record the prior upstream baseline; this reconciled tree was not synced to that commit",
   "reconciliation": {
     "task_id": "T0335-H",
@@ -31,7 +31,6 @@
       "CHANGELOG.md",
       "liteharness/agent_ownership.py",
       "liteharness/catalog/PROVENANCE.json",
-      "liteharness/catalog/hooks/mods/guard_backend.py",
       "liteharness/catalog/skills/ls-init-liteharness/skill-template.md",
       "liteharness/catalog/skills/ls-liteharness/SKILL.md",
       "liteharness/catalog/skills/ls-sentinel/SKILL.md",
@@ -47,7 +46,6 @@
       "pyproject.toml",
       "tests/test_agent_ownership.py",
       "tests/test_catalog_provenance.py",
-      "tests/test_mod_guard_policy_pin.py",
       "tests/test_owned_launch.py",
       "tests/test_owned_launch_profiles.py",
       "tests/test_release_cli_contract.py",
@@ -71,10 +69,6 @@
     },
     "catalog_projection": "git-tracked catalog paths; ASCII-case-insensitive runtime families excluded; untracked tool locks are not inputs",
     "hash_algorithm": "sorted POSIX relative path + NUL + SHA256(content) bytes; CRLF to LF only for content without NUL; legacy hash excludes __init__.py and PROVENANCE.json basenames at all depths",
-    "policy_sha256_lf": {
-      "deny_gate.py": "15e98aea4ac8154d028aadc2e375e18892d202a95794b9fbe82ef59706d3cd79",
-      "deny_floor.py": "c60d0fee461c3a4bfcfae928c624e4c64ffbbefc7a5d9103851f03fb22704046"
-    },
     "payload_algorithm": "catalog-payload-sha256-v1",
     "tracked_runtime_exclusions": [
       "skills/ls-conversation-lookup/.last_indexed"
@@ -177,8 +171,6 @@
       "hooks/codex_hooks.json",
       "hooks/hooks.json",
       "hooks/mods/fleet.mjs",
-      "hooks/mods/guard_backend.py",
-      "hooks/mods/guards.mjs",
       "hooks/mods/inbox.mjs",
       "hooks/mods/paste-schema.mjs",
       "hooks/mods/usage-schema.mjs",
@@ -493,12 +485,13 @@
       "skills/ls-video-lens/video_lens.py",
       "skills/ls-watch/SKILL.md",
       "skills/ls-worker/SKILL.md",
+      "skills/ls-youtube/Get-Transcript.py",
       "skills/ls-youtube/Get-YouTube.ps1",
       "skills/ls-youtube/SKILL.md",
       "skills/ls-youtube/evals/evals.json"
     ],
-    "payload_file_count": 416,
-    "payload_sha256": "255d3ea3a7d6f382ffd82f021b613150b21a562488f0ea9ee85a528a3b41d80a",
+    "payload_file_count": 415,
+    "payload_sha256": "254e4239b94aa32b9feb2c89ba8c539134cf1bab8a023f4aa0494f9a107cd43b",
     "payload_hash_scope": "all projected catalog files including __init__.py; excludes only top-level PROVENANCE.json and runtime families",
     "candidate_commit_binding": "final immutable candidate commit recorded externally; no self-referential commit SHA",
     "artifact_verification": "pending separate wheel/sdist payload comparison; recalculated source stamp alone is not artifact proof",
