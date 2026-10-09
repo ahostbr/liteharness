@@ -15,6 +15,8 @@ ACTOR = bytes.fromhex('73656e74696e656c').decode()
 OWNER = bytes.fromhex('61686f73746272').decode()
 AUTHOR = bytes.fromhex('5279616e204465766c696e').decode()
 EMAIL = bytes.fromhex('7279616e406c69746573756974652e646576').decode()
+# A token that still blocks; a name alone is only a printed note.
+CODENAME = bytes.fromhex('4b75726f72797575').decode()
 
 
 def legal_line(field='authors'):
@@ -116,25 +118,25 @@ def seed(repo, name, data):
 
 
 def test_mixed_benign_and_dirty_rename_destination_index(repo):
-    seed(repo, 'old.txt', ('prefix\n'*30 + ACTOR).encode())
+    seed(repo, 'old.txt', ('prefix\n'*30 + CODENAME).encode())
     git(repo, 'mv', 'old.txt', 'destination.txt')
     (repo/'clean.txt').write_text('clean')
     git(repo, 'add', 'clean.txt')
     (repo/'destination.txt').write_text('clean worktree substitution')
     result = run(repo)
     assert result.returncode == 1
-    assert 'destination.txt:' in result.stdout and ACTOR not in result.stdout
+    assert 'destination.txt:' in result.stdout and CODENAME not in result.stdout
 
 
 def test_mixed_benign_and_dirty_typechange_index(repo):
     seed(repo, 'link', b'clean target')
-    blob = git(repo, 'hash-object', '-w', '--stdin', input=ACTOR.encode()).decode().strip()
+    blob = git(repo, 'hash-object', '-w', '--stdin', input=CODENAME.encode()).decode().strip()
     git(repo, 'update-index', '--cacheinfo', '120000', blob, 'link')
     (repo/'clean.txt').write_text('clean')
     git(repo, 'add', 'clean.txt')
     result = run(repo)
     assert result.returncode == 1
-    assert 'link:' in result.stdout and ACTOR not in result.stdout
+    assert 'link:' in result.stdout and CODENAME not in result.stdout
 
 
 def test_unmerged_index_refuses_even_with_clean_file(repo):

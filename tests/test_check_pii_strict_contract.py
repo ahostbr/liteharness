@@ -35,6 +35,11 @@ def private_actor():
     return bytes.fromhex("73656e74696e656c")
 
 
+def private_codename():
+    # A token that still blocks; a name alone is only a printed note.
+    return bytes.fromhex("4b75726f72797575")
+
+
 @pytest.mark.parametrize("args", [(), ("--all",), ("--alll",), ("extra-positional",)])
 def test_nothing_or_unknown_arguments_are_error_not_pass(repo, args):
     assert run(repo, *args).returncode == 2
@@ -49,11 +54,11 @@ def test_selftest_positive_negative_controls(repo):
 
 
 def test_binary_non_utf8_index_is_not_skipped(repo):
-    stage(repo, "fixture.bin", b"\x00\xff" + private_actor())
+    stage(repo, "fixture.bin", b"\x00\xff" + private_codename())
     result = run(repo)
     assert result.returncode == 1
     assert "fixture.bin" in result.stdout
-    assert private_actor().decode() not in result.stdout.lower()
+    assert private_codename().decode().lower() not in result.stdout.lower()
 
 
 def test_nul_listing_preserves_space_and_unicode_paths(repo):
@@ -78,8 +83,22 @@ def test_all_binary_clean_counts_as_scanned(repo):
 
 
 def test_old_scanner_and_test_filename_exclusions_do_not_exempt_values(repo):
-    stage(repo, "check_pii.py", private_actor())
+    stage(repo, "check_pii.py", private_codename())
     assert run(repo).returncode == 1
+
+
+def test_name_alone_is_a_printed_note_and_a_codename_still_blocks(repo):
+    stage(repo, "notes.md", b"Ask " + private_actor())
+    result = run(repo)
+    assert result.returncode == 0
+    assert "note: 1 name mention(s), not blocking" in result.stdout
+    assert "1 of 1" in result.stdout
+    assert private_actor().decode() not in result.stdout.lower()
+    stage(repo, "notes.md", b"Ask " + private_actor() + b" about " + private_codename())
+    result = run(repo)
+    assert result.returncode == 1
+    assert "notes.md:1 [private codename]" in result.stdout
+    assert "identity]" not in result.stdout
 
 
 def test_git_read_errors_fail_closed(monkeypatch):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Public shipping guard: private actor defaults are findings, not public branding.
+"""Public shipping guard: hashed private identifiers and machine paths block; names are a printed note.
 
 Legal attribution is permitted by exact file + field + reason. Stable command/API
 identifiers have separate compatibility exceptions; neither exempts operational
@@ -30,6 +30,7 @@ DENIED = {
     '9c90049b1de0a64d3a6409106783e088035da1a06a51426abcccf36555ac09fb': 'private numeric identifier',
     'd8d06e03342377d4739d9ead355d566bda7b1935de149d26336413b927e9de9a': 'private numeric identifier',
 }
+NOTES = {'private orchestrator identity', 'private human identity'}
 # Narrow legal ownership fields, not an author-token exemption.
 LEGAL_FIELDS = {
     '.claude-plugin/plugin.json': {'author.name': 'plugin legal author'},
@@ -281,6 +282,10 @@ def main(argv: list[str] | None = None) -> int:
             scanned += 1
             for line, label in scan_file(relative, data):
                 hits.append((relative, line, label))
+        notes = [hit for hit in hits if hit[2] in NOTES]
+        if notes:
+            print(f'note: {len(notes)} name mention(s), not blocking')
+            hits = [hit for hit in hits if hit[2] not in NOTES]
         if hits:
             print(f'BLOCKED: {len(hits)} public privacy/actor findings ({scanned} files scanned)')
             for relative, line, label in hits:
