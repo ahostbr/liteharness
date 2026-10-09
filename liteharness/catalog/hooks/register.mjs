@@ -3,23 +3,6 @@ import { POLL_MS, validSessionId, restoredRequest, snapshot, bandText, cacheEsti
 import { PASTE_PANE, PASTE_PAGE_SIZE, MANIFEST_BYTES, absolutePath, within, historyEntries, imageGeometry } from './mods/paste-schema.mjs'
 
 import { INBOX_POLL_MS, INBOX_PANE, inboxIdentity, inboxBatch, inboxContext } from './mods/inbox.mjs'
-import { guardPayload, guardReply, continuedEvent, permissionResult } from './mods/guards.mjs'
-
-// Shared B/D seam: call this SAME-FILE helper before privileged tool handling.
-// The fixed backend evaluates the submitted command as JSON data, never a shell.
-export async function evaluateGuard($, event, kind = 'call') {
-  try {
-    const cwd = await $.session.cwd()
-    const sessionId = await $.session.id()
-    const payload = guardPayload(event, cwd, sessionId, kind)
-    const result = await $.process.run(['python', $.plugin.root + '/hooks/mods/guard_backend.py'],
-      { stdin: JSON.stringify(payload), timeoutMs: 15000 })
-    return guardReply(result)
-  } catch {
-    return { protocol: 1, deny: 'Mods guard unavailable or unsupported payload; tool refused.',
-      allowOwnWrite: false, command: null }
-  }
-}
 
 // API-bearing helpers must stay in this file: Claude's analyzer cannot pass $
 // to imported functions. Shared lifecycle registrations live here exactly once.
@@ -599,21 +582,6 @@ async function startFleet($) {
 }
 
 export function register(on, options) {
-  // Register once: B/D tool dispatch composes AFTER this guard, never alongside
-  // an earlier short-circuit capable of bypassing the floor.
-  on('tool.call', async ($, e, next) => {
-    const guarded = await evaluateGuard($, e)
-    if (guarded.deny) return { deny: guarded.deny }
-    return next(continuedEvent(e, guarded))
-  }).catch(async () => ({ deny: 'Mods guard failed or timed out; tool refused.' }))
-
-  on('tool.check', async ($, e, next) => {
-    const guarded = await evaluateGuard($, e, 'check')
-    if (guarded.deny) return { decision: 'deny', reason: guarded.deny }
-    const decided = await next(e)
-    return permissionResult(decided, guarded)
-  }).catch(async () => ({ decision: 'deny', reason: 'Mods permission guard failed or timed out.' }))
-
   // B/D/E add same-file lifecycle calls here, not another unmatched registration.
   on('session.start', async ($, e, next) => {
     try { await startCacheBand($) } catch { publicationError = true }
