@@ -80,7 +80,8 @@ if ($Url -match '[?&]v=([A-Za-z0-9_-]{11})') {
 }
 
 $TempDir = $env:TEMP
-$SubFileBase = Join-Path $TempDir "yt-transcript-$VideoId"
+# Per-run name: a previous/parallel run's captions must not hide a refused fetch.
+$SubFileBase = Join-Path $TempDir "yt-transcript-$VideoId-$([guid]::NewGuid().ToString('N'))"
 $SavePayloadPath = Join-Path $TempDir "yt-save-$VideoId.json"
 
 # ── Helper: bounded diagnostic that PRIORITISES the decisive ERROR (T894b) ────
@@ -228,26 +229,59 @@ try {
     # Glob for the subtitle file (yt-dlp appends .en.json3, .en-US.json3, etc.)
     $SubFile = Get-ChildItem "$SubFileBase*.json3" -ErrorAction SilentlyContinue | Select-Object -First 1
 
-    if (-not $SubFile) {
-        # 🔴 T894b — A REFUSED FETCH IS NOT "NO SUBTITLES", and this branch used to
-        # call every empty result the second thing. 429, members-only and network
-        # failures are GATED AND RETRYABLE; "this video has no English captions" is
-        # DEFINITIVE. Reporting the first as the second tells the user to stop
-        # trying when they should wait, and the exit code carried the same lie.
-        # yt-dlp's own exit code separates them: nonzero = it failed, 0 with no
-        # file = it succeeded and there was nothing to get.
-        if ($subExit -ne 0) {
-            Write-Error "Subtitle fetch FAILED (yt-dlp exit $subExit) - a fetch failure, NOT no-subs. $(Get-DiagText $subStderr)"
+    $transcriptRoute = 'yt-dlp (JSON3 subtitles)'
+    $primaryDataDiag = ''
+    if ($subExit -eq 0 -and $SubFile) {
+        try {
+            $json = Get-Content -Raw -Encoding UTF8 -LiteralPath $SubFile.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $usable = @($json.events | Where-Object { ($_.segs.utf8 -join '').Trim() })
+            if (-not $usable.Count) { throw 'no usable caption text' }
+        } catch {
+            $primaryDataDiag = "Subtitle data FAILED: $($_.Exception.Message)"
+        }
+    }
+    if ($subExit -ne 0 -or -not $SubFile -or $primaryDataDiag) {
+        # A partial file from a refused run is not success; an absent file alone
+        # is not proof of absent English captions either. Confirm via catalog.
+        $primaryDiag = "yt-dlp exit ${subExit}: $(Get-DiagText $subStderr)"
+        if (-not $SubFile) { $primaryDiag += ' (no subtitle file produced)' }
+        if ($primaryDataDiag) { $primaryDiag += " ($primaryDataDiag)" }
+        Write-Warning "Subtitle route FAILED ($primaryDiag). Trying standalone youtube-transcript-api."
+        $fallbackPath = "$SubFileBase.api.json3"
+        try {
+            if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+                throw 'python not on PATH; youtube-transcript-api fallback requires Python'
+            }
+            # Argument array, not generated code or a shell command: paths/IDs
+            # containing shell metacharacters cannot become executable text.
+            $fallbackResult = & python (Join-Path $PSScriptRoot 'Get-Transcript.py') $VideoId $fallbackPath 2>&1
+            $fallbackExit = $LASTEXITCODE
+            $fallbackDiag = Get-DiagText @($fallbackResult) 1600
+        } catch {
+            $fallbackExit = 3
+            $fallbackDiag = $_.Exception.Message
+        }
+        if ($fallbackExit -eq 2) {
+            Write-Error "No English subtitles (youtube-transcript-api catalog confirmed). $fallbackDiag; primary route: $primaryDiag"
+            exit 2
+        }
+        if ($fallbackExit -ne 0 -or -not (Test-Path -LiteralPath $fallbackPath)) {
+            Write-Error "Subtitle fetch FAILED on all routes - NOT no-subs. $primaryDiag; youtube-transcript-api exit ${fallbackExit}: $fallbackDiag"
             exit 3
         }
-        Write-Error "No subtitle file found (yt-dlp exit 0) - no English subtitles. $(Get-DiagText $subStderr)"
-        exit 2
+        $SubFile = Get-Item -LiteralPath $fallbackPath
+        $transcriptRoute = 'youtube-transcript-api (standalone Python captions)'
     }
 
-    # ── 4. Parse JSON3 ────────────────────────────────────────────────────────
+    # ── 4. Parse JSON3 (both routes share the existing renderer) ───────────────
 
-    $json = Get-Content -Raw -Encoding UTF8 $SubFile.FullName | ConvertFrom-Json
-    $events = @($json.events | Where-Object { $_.segs })
+    try {
+        $json = Get-Content -Raw -Encoding UTF8 -LiteralPath $SubFile.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $events = @($json.events | Where-Object { $_.segs })
+    } catch {
+        Write-Error "Subtitle data FAILED ($transcriptRoute) - NOT no-subs. $($_.Exception.Message)"
+        exit 3
+    }
 
     $Lines = [System.Collections.Generic.List[string]]::new()
     $Segments = [System.Collections.Generic.List[object]]::new()
@@ -283,6 +317,11 @@ try {
             offset   = [int]$startSec
             duration = $durationSec
         })
+    }
+
+    if ($Lines.Count -eq 0) {
+        Write-Error "Subtitle data FAILED ($transcriptRoute): no usable caption text - NOT no-subs."
+        exit 3
     }
 
     # ── 5. (Optional) Save to a local archive — not configured by default ────────
@@ -500,6 +539,7 @@ print('inserted' if changed else 'exists')
 **URL:** https://youtube.com/watch?v=$VideoId
 **Channel:** $ChannelHandle
 **Exported:** $exportDate
+**Transcript route:** $transcriptRoute
 **Video:** $videoStatus
 **Frames:** $frameStatus
 **Archived:** $archiveStatus

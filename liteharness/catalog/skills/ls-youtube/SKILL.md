@@ -6,7 +6,7 @@ allowed-tools: Bash(powershell.exe:*), Bash(yt-dlp:*), Bash(ffmpeg:*)
 
 # YouTube Grabber — video, transcript, frames
 
-Pull a YouTube video down, get its transcript, and cut it into frames — one script, one folder per video. If LiteSuite is installed, transcripts are also saved to LiteSuite's YouTube database so they appear in the YouTube panel.
+Pull a YouTube video down, get its transcript, and cut it into frames — one script, one folder per video. Transcript retrieval does **not** require LiteSuite running or installed: yt-dlp is tried first, then the standalone Python `youtube-transcript-api` package if the subtitle route fails or returns no usable file. If LiteSuite is installed, transcripts are also saved to LiteSuite's YouTube database so they appear in the YouTube panel.
 
 ## What lands where
 
@@ -44,7 +44,7 @@ Pull a YouTube video down, get its transcript, and cut it into frames — one sc
    powershell.exe -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/Get-YouTube.ps1" -Url "VIDEO_URL" -MediaRoot "D:/yt" -OutputPath "D:/yt/talk.md"
    ```
 
-3. **Present the output**: The script prints a formatted markdown transcript to stdout whose header names the video path, the frame count and the save status. Display it, and tell the user where the video and frames landed.
+3. **Present the output**: The script prints a formatted markdown transcript to stdout whose header names the **producing transcript route** (`yt-dlp` or `youtube-transcript-api`), the video path, the frame count and the save status. Display it, and tell the user where the video and frames landed.
 
 ## Parameters
 
@@ -63,14 +63,20 @@ Pull a YouTube video down, get its transcript, and cut it into frames — one sc
 | Exit Code | Meaning | Action |
 | --------- | ------- | ------ |
 | 1 | yt-dlp failure (video unavailable, private, or metadata error) | The message carries yt-dlp's own ERROR line — read it and tell the user what it says |
-| 2 | **No English subtitles** — yt-dlp exited 0 and produced no captions. Definitive | Run `yt-dlp --list-subs --skip-download "VIDEO_URL"` and offer available languages |
-| 3 | **Subtitle fetch FAILED** — yt-dlp exited non-zero (429, members-only, geo-block, network). Gated and retryable | Do NOT report this as "no subtitles". Read the ERROR line; wait and retry, or say what blocked it |
+| 2 | **No English subtitles** — the fallback retrieved a caption catalog and confirmed no `en`, `en-US` or `en-GB` track | Report the available catalog languages from the diagnostic; offer those, not invented English text |
+| 3 | **Subtitle routes FAILED** — neither route yielded a usable transcript (refusal, network, import/dependency or invalid data) | Do NOT report this as "no subtitles". Read both route diagnostics and explain the actual blocker |
 
-🔴 **2 and 3 are different answers and used to be the same one.** A refused fetch is retryable;
-"this video has no English captions" is final. Reporting the first as the second sends the user
-away from a video they could have had. yt-dlp's exit code is what separates them.
+🔴 **2 and 3 are different answers.** A refused fetch or missing file is not proof that English
+captions are absent. After yt-dlp exits non-zero, produces no file, or produces unusable JSON3,
+the script tries `Get-Transcript.py` using `python` on PATH. The helper calls
+`YouTubeTranscriptApi().list(video_id).find_transcript(["en", "en-US", "en-GB"]).fetch()` —
+the same package route as Suite, retaining caption timings, preferring manual tracks and
+accepting generated tracks. It does not translate, use ASR, cookies, proxies or the Suite bridge.
+Only a successful catalog lookup with no requested track yields exit 2. Disabled-caption,
+network, package and parse errors remain exit 3; there is no retry loop.
 
 - If `yt-dlp` is not installed, tell the user: `pip install yt-dlp`
+- **Fallback dependency is optional for successful yt-dlp transcripts.** If absent from the selected `python` interpreter, the diagnostic names that interpreter and gives one command: `python -m pip install youtube-transcript-api`. Explain it; do not silently install or upgrade anything. An incompatible or broken installed package is an import failure, not "no captions".
 - **A failed video download or a missing ffmpeg does NOT fail the run.** The transcript is the older contract and most callers still want it, so both report their status in the markdown header and the script carries on. Read the header — `Video:` and `Frames:` say what actually happened.
 - If `ffmpeg` is not on PATH the frames step names the install (`winget install Gyan.FFmpeg`) and skips. Nothing here vendors an ffmpeg.
 - ⚠️ **`ffmpeg` exiting 0 is not proof it wrote anything.** The script counts the jpgs and says so explicitly when the count is zero, because a "done" over an empty folder is the failure that reads as success.
