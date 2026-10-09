@@ -2152,3 +2152,43 @@ def test_under_follows_the_folders_short_name_when_the_folder_is_on_disk(roots):
     assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME, under=UNDER)
     assert deny_floor.jobs_write_target(f"echo x > {spelled}", workspace, home,
                                         name=OTHER_NAME, under=UNDER) == path
+
+
+def _asked_every_way(path, workspace, home):
+    """The path question, the tool question, a redirect and a delete, each with `under`."""
+    return [bool(deny_floor.is_jobs_file(path, OTHER_NAME, UNDER)),
+            bool(deny_floor.write_refusal(str(path), workspace, home, name=OTHER_NAME, under=UNDER)),
+            deny_floor.jobs_write_target(f"echo x > {path.as_posix()}", workspace, home,
+                                         name=OTHER_NAME, under=UNDER) == path,
+            deny_floor.jobs_write_target(f"rm {path.as_posix()}", workspace, home,
+                                         name=OTHER_NAME, under=UNDER) == path]
+
+
+@pytest.mark.parametrize("depth", ["{under}/Seat/conversations/c1/attachments/NAME",
+                                   "{under}/Seat/conversations/c1/a/b/c/NAME"])
+def test_under_reaches_deeper_than_the_deepest_file_that_exists_today(roots, depth):
+    """ANY depth: five and seven folders below the data root. A walk that
+    stopped four folders up would still catch a conversation's own file, the
+    deepest one any other test here names, so only these rows hold "any"."""
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        assert _asked_every_way(_below(root, depth), workspace, home) == [True] * 4, root
+    assert _asked_every_way(_below(plain, depth), workspace, home) == [False] * 4, "not a data root"
+
+
+def test_under_with_two_folders_of_that_name_in_one_path(roots):
+    """EVERY folder of that name on the path is tried, not the nearest alone and
+    not the outermost alone. A second one inside an agent's home: the outer one
+    is the data root's. A data root kept below another folder of that name: the
+    inner one is the data root's."""
+    home, workspace, litetui, marked, plain = roots
+    inside_a_home = litetui / UNDER / "Seat" / UNDER / "x" / OTHER_NAME
+    kept = plain / UNDER / "kept"
+    kept.mkdir(parents=True)
+    (kept / ".litetui-data.json").write_text("{}", encoding="utf-8")
+    root_below_another = kept / UNDER / "Seat" / OTHER_NAME
+    for path in (inside_a_home, root_below_another):
+        assert _asked_every_way(path, workspace, home) == [True] * 4, path
+    # CONTROL: two folders of that name and no data root above either.
+    neither = plain / UNDER / "other" / UNDER / "Seat" / OTHER_NAME
+    assert _asked_every_way(neither, workspace, home) == [False] * 4
