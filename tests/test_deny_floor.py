@@ -1964,3 +1964,68 @@ def test_t0116_review2_jobs_linear_depth_actual_floor(roots, depth):
     proven = deny_floor.refusal(command, workspace, home, shell="bash")
     print("REVIEW2 DEPTH", depth, repr(out), repr(proven))
     assert out and proven, "actual floor must preserve depth exhaustion writer"
+
+
+# ── the recognizer's `name` keyword (T0306): the same questions about another file ──
+#
+# A caller may ask about another file in a data root. Each question is asked
+# under the default name and under another, beside each other: the answer must
+# follow the name asked about, and never the other one.
+
+SCHEDULE, OTHER_NAME = "jobs.json", "settings.json"
+NAMED_SHELL = [   # (command, is it a write)
+    ("echo x > {dir}/NAME", True),                                  # a redirect
+    ("rm {dir}/NAME", True),                                        # a delete
+    ("python -c \"open('{dir}/NAME','w').write('x')\"", True),      # code handed to an interpreter
+    ("cat {dir}/NAME", False),                                      # a reader
+]
+NAMED_GIT = [
+    ("git restore -- {dir}/NAME", True),
+    ("git diff -- {dir}/NAME", False),
+]
+
+
+def _other(name):
+    return OTHER_NAME if name == SCHEDULE else SCHEDULE
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template, writes", NAMED_SHELL)
+def test_the_name_keyword_asks_the_shell_question_of_that_file(roots, template, writes, name):
+    home, workspace, litetui, _, _ = roots
+    command = template.format(dir=litetui.as_posix()).replace("NAME", name)
+    target = deny_floor.jobs_write_target(command, workspace, home, name=name)
+    assert (target is not None) is writes, command
+    if writes:
+        assert target == litetui / name
+    assert deny_floor.jobs_write_target(command, workspace, home, name=_other(name)) is None, command
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template, writes", NAMED_GIT)
+def test_the_name_keyword_asks_the_git_question_of_that_file(roots, template, writes, name):
+    home, workspace, litetui, _, _ = roots
+    command = template.format(dir=litetui.as_posix()).replace("NAME", name)
+    assert bool(deny_floor.jobs_git_refusal(command, workspace, home, name=name)) is writes, command
+    assert deny_floor.jobs_git_refusal(command, workspace, home, name=_other(name)) is None, command
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_the_name_keyword_asks_the_path_questions_of_that_file(roots, name):
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        assert deny_floor.is_jobs_file(root / name, name)
+        assert not deny_floor.is_jobs_file(root / name, _other(name))
+        assert deny_floor.write_refusal(str(root / name), workspace, home, name=name)
+        assert deny_floor.write_refusal(str(root / name), workspace, home, name=_other(name)) is None
+    assert not deny_floor.is_jobs_file(plain / name, name)
+    assert deny_floor.write_refusal(str(plain / name), workspace, home, name=name) is None
+
+
+def test_the_default_name_is_still_the_schedule_file_and_refusal_asks_about_no_other(roots):
+    home, workspace, litetui, _, _ = roots
+    schedule = f"echo x > {litetui.as_posix()}/{SCHEDULE}"
+    assert deny_floor.jobs_write_target(schedule, workspace, home) == litetui / SCHEDULE
+    assert deny_floor.is_jobs_file(litetui / SCHEDULE) and not deny_floor.is_jobs_file(litetui / OTHER_NAME)
+    assert "[jobs-file]" in deny_floor.refusal(schedule, workspace, home)
+    assert deny_floor.refusal(f"echo x > {litetui.as_posix()}/{OTHER_NAME}", workspace, home) is None
