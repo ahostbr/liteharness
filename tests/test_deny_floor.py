@@ -2607,6 +2607,9 @@ FIX2_FORMS = [
     ("powershell", "Copy-Item {src}/* {root} -Exclude x.json"),
     ("powershell", "Copy-Item {src}/* {root} -Filter NAME"),
     ("powershell", "Copy-Item -Exclude x.json -Path {src}/NAME {root}"),
+    ("powershell", "Copy-Item -ea Stop {src}/NAME {root}"),                 # an alias that takes a value
+    ("powershell", "Copy-Item -pv p {src}/NAME {root}"),
+    ("cmd", "cd /d {root} && copy {src}\\NAME"),                            # one word: into the current folder
     ("cmd", "copy /Y {src}\\NAME+{src}\\x.json {root}"),
     ("cmd", "copy {src}\\NAME {root} /-Y"),
 ]
