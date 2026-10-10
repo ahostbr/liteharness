@@ -1309,6 +1309,15 @@ _PS_ALIASES = {"pspath": "literalpath", "lp": "literalpath", "ea": "erroraction"
                "proga": "progressaction", "wi": "whatif", "cf": "confirm", "vb": "verbose", "db": "debug"}
 
 
+#: Names that exist only in PowerShell (fix 3, R12). `shell_commands` cuts the
+#: body of `if (...) { Copy-Item A B }` into a part whose head is `Copy-Item` but
+#: whose shell is the one asked (bash, cmd, none), so the PowerShell reading is
+#: asked for these names in every shell. `copy` and `move` are PowerShell's too
+#: wherever the part is not cmd's: bash has neither.
+_PS_ONLY = frozenset({"copy-item", "move-item", "cpi", "mi"})
+_PS_OR_CMD = frozenset({"copy", "move"})
+
+
 def _meanings(shell, head) -> list[str]:
     """The grammars `head` may run under in a part of that shell (fix 2, R7): its
     alias in that shell (PowerShell's cp, mv, copy, move, cpi, mi), and the
@@ -1317,17 +1326,30 @@ def _meanings(shell, head) -> list[str]:
     refusals; PATH is not predicted."""
     bare = head.removesuffix(".exe")
     found = ["gnu"] if bare in _GNU_INTO else []
-    if shell == "powershell" and head in _PS_INTO:
+    if (shell == "powershell" and head in _PS_INTO) or head in _PS_ONLY or (shell != "cmd" and head in _PS_OR_CMD):
         found.append("powershell")
     if (shell == "cmd" and bare in _CMD_INTO) or bare == "xcopy":
         found.append("cmd")
     return found
 
 
+def _comma_joined(args):
+    """PowerShell reads `a, b`, `a ,b` and `a , b` as ONE array argument (fix 3,
+    R11): join the words on either side of a comma before they are bound."""
+    joined = []
+    for word in args:
+        if joined and (joined[-1].endswith(",") or word.startswith(",")):
+            joined[-1] += word
+        else:
+            joined.append(word)
+    return joined
+
+
 def _ps_binding(args):
     """(destination, sources) as PowerShell binds Copy-Item's and Move-Item's words:
     a parameter's value is consumed by it; the first free positional is -Path, the
     next -Destination; a comma array is split into its paths."""
+    args = _comma_joined(args)
     named, positional, i = {"source": [], "dest": []}, [], 0
     while i < len(args):
         word = args[i]
@@ -1420,9 +1442,14 @@ def _named_into(dest, sources, base, home, name, under, streams) -> Path | None:
 
 
 def _tree_into(grammar, dest, sources, base, home, name, under, streams, *, no_target) -> Path | None:
-    """A folder source's files landing in a protected folder, judged on disk."""
+    """A folder source's files landing in a protected folder, judged on disk. A
+    source that begins with two slashes (a UNC or `\\\\?\\` path) is never looked at
+    (fix 3, R13): the test would touch the network before the destination is
+    known, so a folder copied FROM there is a stated limit."""
     folder = None
     for source in sources:
+        if source.startswith(("\\\\", "//")):
+            continue
         src = _resolve(source, base, home, streams=streams)
         if src is None or not src.is_dir() or not (src / name).exists():
             continue

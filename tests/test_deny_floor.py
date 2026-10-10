@@ -2623,7 +2623,6 @@ FIX2_LEFT = [   # not written into the root, or not this file
     ("bash", "cp -r {src} {root}/"),            # lands in ROOT/src/, a folder of its own
     ("bash", "cp -rT {empty} {root}"),          # the folder does not hold the file
     ("bash", "cp {src}/. {root}/"),             # no -r: a folder is not copied
-    ("bash", "Copy-Item {src}/NAME {root}"),    # no Copy-Item in bash
     ("cmd", "move {src} {root}"),               # cmd's move renames the folder; not followed
     ("powershell", "Copy-Item {src}/x.json {root} -Filter NAME"),
 ]
@@ -2686,6 +2685,120 @@ def test_fix2_leaves_these_alone(roots, shell, template):
     command = _fix2(template, litetui, src, OTHER_NAME, empty)
     assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME,
                                         more=deny_floor.MORE) is None, command
+
+
+#: Fix round 3 (R11, R12): rows the regression gate of fix round 2 had no template
+#: for. (The shell the caller names, command); each really written by PowerShell 7,
+#: refused by the rounds before, so each must be refused again under `more`.
+FIX3_FORMS = [
+    # R11: a PowerShell array written with a space after (or before) its comma is ONE argument
+    ("powershell", "Copy-Item {src}/x.json, {src}/NAME {root}"),
+    ("powershell", "Copy-Item {src}/NAME, {src}/x.json {root}"),            # the name first
+    ("powershell", "Copy-Item {src}/x.json , {src}/NAME {root}"),
+    ("powershell", "Copy-Item {src}/x.json ,{src}/NAME {root}"),
+    ("powershell", "Copy-Item {src}/x.json, {src}/y.json, {src}/NAME {root}"),
+    ("powershell", "Copy-Item 'x.json', '{src}/NAME' {root}"),
+    ("powershell", 'Copy-Item "x.json", "{src}/NAME" {root}'),
+    ("powershell", "Copy-Item -Path {src}/x.json, {src}/NAME -Destination {root}"),
+    ("powershell", "Copy-Item -Destination {root} -Path {src}/x.json, {src}/NAME"),
+    ("powershell", "Copy-Item -Path {src}/x.json , {src}/NAME -Destination {root}"),
+    ("powershell", "Move-Item {src}/x.json, {src}/NAME {root} -Force"),
+    ("powershell", "Move-Item -Path {src}/x.json, {src}/NAME -Destination {root} -Force"),
+    ("powershell", "mi {src}/x.json, {src}/NAME {root} -Force"),
+    ("powershell", "cpi {src}/x.json, {src}/NAME {root} -Force"),
+    ("powershell", "cp {src}/x.json, {src}/NAME {root}"),
+    ("powershell", "copy {src}/x.json, {src}/NAME {root}"),
+    ("bash", "pwsh -NoProfile -c 'Copy-Item {src}/x.json, {src}/NAME {root}'"),
+    # R12: a PowerShell statement or block around the copy, asked with NO shell (what the hook and the
+    # owner rule pass): the part the splitter cuts out has the shell that was asked, not PowerShell.
+    # Asked as powershell the head of the statement is `if`, `{`; no round saw those.
+    (None, "if ($true) { Copy-Item {src}/NAME {root} }"),
+    (None, "if ($true) { Copy-Item {src}/NAME {root} } else { }"),
+    (None, "if (Test-Path {src}/NAME) { Copy-Item {src}/NAME {root} }"),
+    (None, "foreach ($i in 1..2) { Copy-Item {src}/NAME {root} }"),
+    (None, "1 | ForEach-Object { Copy-Item {src}/NAME {root} }"),
+    (None, "1 | % { Copy-Item {src}/NAME {root} }"),
+    (None, "try { Copy-Item {src}/NAME {root} } catch { }"),
+    (None, "try { } finally { Copy-Item {src}/NAME {root} }"),
+    (None, "while ($true) { Copy-Item {src}/NAME {root}; break }"),
+    (None, "switch (1) { 1 { Copy-Item {src}/NAME {root} } }"),
+    (None, "function f { Copy-Item {src}/NAME {root} }; f"),
+    (None, "$sb = { Copy-Item {src}/NAME {root} }; & $sb"),
+    (None, "Invoke-Command -ScriptBlock { Copy-Item {src}/NAME {root} }"),
+    (None, ". { Copy-Item {src}/NAME {root} }"),
+    (None, "Measure-Command { Copy-Item {src}/NAME {root} } | Out-Null"),
+    (None, "if ($true) { Move-Item {src}/NAME {root} -Force }"),
+    (None, "try { Move-Item {src}/NAME {root} -Force } catch { }"),
+    (None, "foreach ($i in 1) { mi {src}/NAME {root} -Force }"),
+    (None, "if ($true) { cpi {src}/NAME {root} }"),
+    (None, "while ($true) { copy {src}/NAME {root}; break }"),
+    (None, "while ($true) { move {src}/NAME {root} -Force; break }"),
+    (None, "if ($true) { Copy-Item {src}/x.json, {src}/NAME {root} }"),   # R11 inside R12
+    ("bash", "Copy-Item {src}/NAME {root}"),     # the names PowerShell alone has, asked in every shell
+    ("bash", "Move-Item {src}/NAME {root} -Force"),
+    ("cmd", "Copy-Item {src}/NAME {root}"),
+    ("cmd", "cpi {src}/NAME {root}"),
+]
+FIX3_LEFT = [   # R11/R12 controls: the same words that copy something else, or nothing of this name
+    ("powershell", "Copy-Item {src}/x.json, {src}/y.json {root}"),
+    ("powershell", "Copy-Item -Path {src}/x.json, {src}/y.json -Destination {root}"),
+    ("powershell", "Copy-Item {src}/x.json, {src}/y.json, {src}/z.json {root}"),
+    ("powershell", "if ($true) { Copy-Item {src}/x.json {root} }"),
+    ("powershell", "if ($true) { Copy-Item {src}/NAME {src}/elsewhere }"),
+    ("powershell", "Copy-Item {src}/NAME, {src}/x.json {src}/elsewhere"),
+    ("bash", "copy {src}/x.json {root}"),
+    ("bash", "if ($true) { Copy-Item {src}/x.json, {src}/y.json {root} }"),
+]
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("shell, template", FIX3_FORMS)
+def test_fix3_arrays_with_a_space_and_copies_inside_a_statement(roots, shell, template, name):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    (src / "elsewhere").mkdir(parents=True, exist_ok=True)
+    (src / name).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for root in (litetui, marked):
+        command = _fix2(template, root, src, name)
+        for asked_as in (shell, None):
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
+            target = deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name, more=into)
+            assert target is not None, (asked_as, command)
+
+
+@pytest.mark.parametrize("shell, template", FIX3_LEFT)
+def test_fix3_leaves_these_alone(roots, shell, template):
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    (src / "elsewhere").mkdir(parents=True, exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    command = _fix2(template, litetui, src, OTHER_NAME)
+    for asked_as in (shell, None):
+        assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=OTHER_NAME,
+                                            more=deny_floor.MORE) is None, (asked_as, command)
+
+
+@pytest.mark.parametrize("command", [
+    "cp -r //no-such-host/share/dir {dest}/", "cp -a //no-such-host/share/dir {dest}/",
+    "cp -rT //no-such-host/share/dir {dest}", "env cp -r //no-such-host/share/dir {dest}/",
+    "xcopy \\\\no-such-host\\share\\dir {dest} /E", "copy \\\\no-such-host\\share\\dir {dest}",
+    "cp -r \\\\no-such-host\\share\\dir {dest}/",
+])
+def test_fix3_a_folder_source_on_the_network_is_never_looked_at(roots, monkeypatch, command):
+    """R13: a tree grammar tests each folder source on disk; a source that begins
+    with two slashes may be a host that does not answer, so it is skipped (a stated
+    limit) before anything is resolved. CONTROL: a local folder source is resolved."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    deny_floor.jobs_write_target(command.format(dest=plain.as_posix()), workspace, home, name=OTHER_NAME,
+                                 more=deny_floor.MORE)
+    assert not any(raw.startswith(("\\\\", "//")) for raw in resolved), resolved
+    deny_floor.jobs_write_target(f"cp -r {plain.as_posix()} {litetui.as_posix()}/", workspace, home,
+                                 name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(plain.as_posix() in raw for raw in resolved), "CONTROL: a local folder source is resolved"
 
 
 def test_the_gnu_grammar_alone_in_bash(roots):
