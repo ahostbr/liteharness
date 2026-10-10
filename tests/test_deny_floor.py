@@ -2483,6 +2483,7 @@ MORE_FORMS = [   # (class, command): {root} a data root, {src} a plain folder, N
     (deny_floor.COPY_INTO, "env cp {src}/NAME {root}/"),
     (deny_floor.COPY_INTO, "env -i A=1 cp {src}/NAME {root}/"),
     (deny_floor.COPY_INTO, "env -C {root} cp {src}/NAME ."),
+    (deny_floor.COPY_INTO, "env -C{root} cp {src}/NAME ."),                # attached
     (deny_floor.COPY_INTO, "command cp {src}/NAME {root}/"),
     (deny_floor.COPY_INTO, "exec cp {src}/NAME {root}/"),
     (deny_floor.COPY_INTO, "nice -n 5 cp {src}/NAME {root}/"),
@@ -2495,6 +2496,7 @@ MORE_FORMS = [   # (class, command): {root} a data root, {src} a plain folder, N
     (deny_floor.COPY_INTO, "timeout 20 env cp {src}/NAME {root}/"),
     # fix 1: a PowerShell comma array, the name first
     (deny_floor.COPY_INTO, "Copy-Item {src}/NAME,{src}/x.json {root}"),
+    (deny_floor.COPY_INTO, "cp -Destination {root} {src}/NAME"),            # PowerShell's cp alias
     (deny_floor.COPY_INTO, "Copy-Item -Path {src}/x.json,{src}/NAME -Destination {root}"),
     # G: a stream suffix on a FOLDER of the path word
     (deny_floor.DOLLAR_PATH, 'echo x > "{root}::$INDEX_ALLOCATION/NAME"'),
@@ -2524,7 +2526,7 @@ MORE_CONTROLS = [   # no class and no combination refuses these
     "cp {src}/NAME {root}/renamed.json", "cp {root}/NAME {src}/", "mv {root}/other.json {src}/",
     "robocopy {src} {root} /XF NAME", "robocopy {src} {root}",
     "robocopy {src} {root} NAME", "rsync {src}/NAME {root}/",        # M forms left to S2 (fix 1)
-    "ln -T {src}/NAME {root}", "install -d {root} {src}/NAME",       # no target folder; dirs only
+    "ln -T {src}/NAME {root}", "install -d {src}/NAME {root}/",       # no target folder; dirs only
     "command -v cp {src}/NAME {root}/", "env -S 'cp {src}/NAME {root}/'",   # not a run; a string
     "cp -S .bak {src}/x.json {root}/", "cp --suffix=NAME {src}/x.json {root}/",   # option values
     "Copy-Item {src}/x.json,{src}/y.json {root}",
@@ -2578,6 +2580,33 @@ def test_more_names_seven_recognitions_and_defaults_to_none(roots):
     assert "[jobs-file]" in deny_floor.refusal(command, workspace, home, more=deny_floor.MORE)
 
 
+def test_the_gnu_grammar_alone_in_bash(roots):
+    """Asked as bash only (no PowerShell reading of `cp` beside it): `--` ends the
+    options and the words after it are operands, even one that looks like `-t`."""
+    home, workspace, litetui, _, plain = roots
+    into = frozenset({deny_floor.COPY_INTO})
+    for command, written in ((f"cp -- {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}/", True),
+                             (f"cp -v -- {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}", True),
+                             (f"cp -T {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}", False)):
+        target = deny_floor.jobs_write_target(command, workspace, home, shell="bash", name=OTHER_NAME, more=into)
+        assert (target == litetui / OTHER_NAME) is written, command
+
+
+def test_copy_into_looks_at_the_destination_only_when_a_source_has_the_name(roots, monkeypatch):
+    """R5: a copy whose sources do not carry the name never resolves or stats its
+    destination (a UNC folder on a host that does not answer can outlast the hook)."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    deny_floor.jobs_write_target("cp notes.md //no-such-host/share/", workspace, home, name=OTHER_NAME,
+                                 more=deny_floor.MORE)
+    assert not any("no-such-host" in raw for raw in resolved), resolved
+    deny_floor.jobs_write_target(f"cp {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}/", workspace, home,
+                                 name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(litetui.as_posix() in raw for raw in resolved), "CONTROL: a match does resolve it"
+
+
 def test_refusal_hands_more_to_both_jobs_questions(roots, monkeypatch):
     """refusal() passes `more` on to the Git question and the shell question
     alike (each also asks a pathspec, so a verdict alone cannot show which did)."""
@@ -2593,7 +2622,8 @@ def test_refusal_hands_more_to_both_jobs_questions(roots, monkeypatch):
 
 NUL_MORE_ONLY = [   # a NUL in a word only an added recognition reads (fix 1, R3)
     "cp {src}/NAME {root}\x00/", "cp a b\x00", "Copy-Item {src}/NAME -Destination {root}\x00",
-    'echo x > "{root}::$INDEX\x00/NAME"', "rm {root}/SETTIN~1\x00.JSO", "dd of={root}/x\x00/NAME",
+    'echo x > "{root}::$INDEX\x00/NAME"', 'cd "{root}::$INDEX_ALLOCATION" && echo x > a\x00/NAME',
+"rm {root}/SETTIN~1\x00.JSO", "dd of={root}/x\x00/NAME",
     "git checkout HEAD -- :/x\x00/NAME", "[IO.File]::Delete('{root}/x\x00/NAME')",
 ]
 
@@ -2620,9 +2650,10 @@ def test_a_nul_only_more_reads_is_no_answer_and_never_an_error(roots, template):
                 if default[0] == "raised":
                     continue   # the base's own exception, unchanged
                 asked += 1
-                with_more = answer(lambda: ask(deny_floor.MORE))
-                assert with_more[0] == "answer", (text, "raised where the default answered")
-                assert with_more[1] or not default[1], (text, "refuse -> allow")
+                for more in (deny_floor.MORE, *(frozenset({cls}) for cls in deny_floor.MORE)):
+                    with_more = answer(lambda: ask(more))
+                    assert with_more[0] == "answer", (text, sorted(more), "raised where the default answered")
+                    assert with_more[1] or not default[1], (text, sorted(more), "refuse -> allow")
     assert asked, "every form raised at the default: the row tests nothing"
 
 
@@ -2698,7 +2729,7 @@ def test_short_name_resolves_an_existing_file_for_the_writers(roots, name):
     if not short or short.lower() == name:
         pytest.skip("this volume gives the file no short name")
     spelled = f"{litetui.as_posix()}/{short}"
-    for writer in (f"rm {spelled}", f"Remove-Item {spelled}", f"mv {spelled} {plain.as_posix()}/x",
+    for writer in (f"rm {spelled}", f"env rm {spelled}", f"Remove-Item {spelled}", f"mv {spelled} {plain.as_posix()}/x",
                    f"sed -i s/a/b/ {spelled}", f"Set-Content {spelled} x", f"cp x.json {spelled}"):
         assert _four_ways(writer, workspace, home, deny_floor.SHORT_NAME, name) == \
             [False, True, False, True], writer

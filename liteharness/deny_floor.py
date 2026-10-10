@@ -2216,8 +2216,7 @@ def _resolve(raw: str, base: Path | None, home: Path, *, streams: bool = False) 
         if low == name or low.startswith(name + "/"):
             text = str(home) + text[len(name):]
             break
-    cut = streams and "$" in text
-    if cut:
+    if streams and "$" in text:
         drive = text[:2] if re.match(r"[A-Za-z]:", text) else ""
         text = drive + "".join(part.split(":", 1)[0] for part in re.split(r"([\\/])", text[len(drive):]))
     if re.search(r"\$|%\w+%", text):
