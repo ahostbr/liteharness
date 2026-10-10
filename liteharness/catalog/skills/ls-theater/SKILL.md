@@ -71,7 +71,7 @@ under the page's `assets/` directory and are referenced as `assets/<path>` (for 
 ```tsx
 import {
   useTheaterSession, SessionBanner, Recommendation,
-  AskChoice, AskText, AskScale, AskFiles, AskReview,
+  AskChoice, AskText, AskScale, AskFiles, AskReview, AskSend,
   StatCard, MetricRow,
 } from "@theater/kit";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip } from "recharts";
@@ -103,6 +103,7 @@ export default function Page() {
       <AskFiles session={session} promptId="refs" title="4 · Drop reference images" />
       <AskReview session={session} promptId="verdict" title="Verdict on this draft" />
       <AskText session={session} promptId="feedback" title="Anything else?" />
+      <AskSend session={session} />
     </main>
   );
 }
@@ -143,11 +144,24 @@ accent.
 | `AskScale`                  | `number`                                 | taste dials: density, boldness, risk       |
 | `AskFiles` / `DropImages`   | files on disk                            | screenshots, sketches, any file            |
 | `AskReview`                 | `approve\|revise\|reject` + `<id>.note`   | the verdict gate                           |
+| `AskSend`                   | `send` (the press time)                  | the Send button. EVERY page ends with it   |
 | `SessionBanner`             | none                                     | the page title, and where answers go       |
 
-Every control takes `session`, `promptId`, `title` and an optional `hint`. There is no submit
-button: each answer saves the moment it is given. `AskText` saves when the box loses focus, so
-you get a finished thought rather than a keystroke.
+Every control takes `session`, `promptId`, `title` and an optional `hint` (`AskSend` takes only
+`session` and an optional `label`). Each answer is saved the moment it is given; `AskText` saves
+when the box loses focus, so you get a finished thought rather than a keystroke.
+
+**End every page with `<AskSend session={session} />`.** It is the dedicated Send button, and
+ctrl/⌘+Enter inside any `AskText` presses it. A press commits every text box (the one the human
+is still typing in first), then writes ONE `send` answer, and you get ONE ANSWER message
+carrying every current answer and file. While a page has an `AskSend`, single answers are saved
+but held back: **nothing reaches your inbox until the human presses Send.** A page without one
+keeps the old behaviour (one message per answer), which is why none should omit it.
+
+**Pasted images.** `AskSend` also takes Ctrl+V of an image anywhere on the page (or into a
+note): it is saved as a real file under the page's `uploads/` (question id `paste`, named
+`paste-<date>-<n>.png`), shown as a thumbnail, and delivered exactly like an `AskFiles` upload.
+Pasted text is untouched. You do not add anything for this; it comes with `AskSend`.
 
 **The genui catalog** is exported too, and renders exactly as it does in Frontier chat:
 `StatCard`, `MetricRow`, `DataTable`, `ProgressRing`, `TLDR`, `KeyTakeaways`,
@@ -220,7 +234,19 @@ Theater answer — <page title>: <questionId> (reply on the page, not to "Theate
 {"pageId": …, "questionId": …, "value": …, "revision": …, "uploads": [...]}
 ```
 
-- **One message per changed answer.** Re-saving the same value sends nothing. Several clicks
+- **A page with `AskSend` sends ONE message per press of Send**, in this shape, and no
+  per-answer messages before it:
+
+  ```
+  Theater SEND — <page title>: <n> answer(s), <m> file(s) (reply on the page, not to "Theater")
+  <questionId>: <value, cut at 300 characters>        (one line per answer)
+  <questionId> file: <absolute path>                  (one line per upload, pasted images too)
+  session: <absolute path of session.json>
+  {"pageId": …, "send": true, "answers": {…}, "uploads": [{"questionId", "path", "name"}]}
+  ```
+
+  A second press sends a second message with whatever is current then.
+- **One message per changed answer** (a page without `AskSend`). Re-saving the same value sends nothing. Several clicks
   on a multi-choice within 1.5 s, or a drop of several files, become ONE message.
 - **A long answer is cut in the message.** The full value is always in `session.json`; read it
   there.
@@ -327,6 +353,8 @@ page so the human can see the answer landed. `TaskStop` the monitor when the pag
 6. **One page per decision thread.** Revise the same `pageId` to reuse its exact tab, not open
    a second pane. Distinct pages get distinct tabs in one marked browser pane per
    workspace/thread; only explicit `newPane` opts out of that shared-pane default.
+7. **End every page with `<AskSend session={session} />`.** It is how the human says "that is
+   everything", and it makes your inbox get one message instead of a trickle.
 
 ## Where things live
 
