@@ -2818,4 +2818,6 @@ def test_count_only_cannot_change_a_verdict_when_it_breaks(counted, monkeypatch)
     monkeypatch.setattr(deny_gate, "_load_floor", broken)
     command = f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/"
     assert deny_gate.decide(_payload("Bash", command, workspace)) is None
-    assert _count_lines(harness) == []
+    lines = _count_lines(harness)   # R4: the failure is said, so a quiet log means "nothing"
+    assert len(lines) == 1 and "count-only: error TypeError" in lines[0], lines
+    assert "would refuse" not in lines[0]

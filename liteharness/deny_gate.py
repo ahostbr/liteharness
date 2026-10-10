@@ -108,8 +108,10 @@ def _count_only(floor, judge, what: str) -> None:
         would = judge(floor.MORE)
         if would:
             _log(f"count-only: would refuse {what[:300]!r}: {would[:300]!r}")
-    except Exception:
-        pass  # count-only must never decide the outcome
+    except Exception as exc:
+        # Count-only must never decide the outcome; but a silent day must not
+        # read as "nothing would be refused" when the question failed.
+        _log(f"count-only: error {type(exc).__name__} {what[:300]!r}")
 
 
 #: Keystroke streams a tool types into a live shell, judged WHENEVER they are
