@@ -2712,10 +2712,10 @@ FIX3_FORMS = [
     # GNU cp reads -Destination as junk and takes the last operand, so only the PowerShell
     # reading of the nested part (its own shell, not the outer dialect) sees this one.
     ("bash", "pwsh -NoProfile -c 'cp -Destination {root} {src}/NAME'"),
-    # Fix 4 (Q5 again): `copy`, `cp` are PowerShell's in every shell now, so the row above no longer tells the part's shell from the
-    # outer dialect. cmd's `A+B` joins two sources and PowerShell reads it as ONE name: only the cmd reading of the cmd-dialect part
-    # (shell "cmd", whatever was asked) refuses this one, so asked with no shell it needs the PART's shell.
-    ("cmd", "copy {src}/NAME+{src}/x.json {root}"),
+    # Fix 4 (Q5 again): `cp`, `copy` are PowerShell's in every shell now, so the row above no longer tells the part's shell from the
+    # outer dialect. A nested `cmd /c` body is a cmd part under any outer dialect, and cmd's `A+B` joins two sources where PowerShell
+    # reads ONE name: only the cmd reading, chosen by the PART's shell, refuses this one.
+    ("bash", 'cmd /c "copy {src}/NAME+{src}/x.json {root}"'),
     # R12: a PowerShell statement or block around the copy, asked with NO shell (what the hook and the
     # owner rule pass): the part the splitter cuts out has the shell that was asked, not PowerShell.
     # Asked as powershell the head of the statement is `if`, `{`; no round saw those.
