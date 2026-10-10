@@ -1309,26 +1309,23 @@ _PS_ALIASES = {"pspath": "literalpath", "lp": "literalpath", "ea": "erroraction"
                "proga": "progressaction", "wi": "whatif", "cf": "confirm", "vb": "verbose", "db": "debug"}
 
 
-#: Names PowerShell's cmdlets are called by, read as PowerShell reads them in
-#: EVERY shell (fix 3 R12, fix 4 R18). `shell_commands` cuts the body of
-#: `if (...) { Copy-Item A B }` into a part whose head is `Copy-Item` but whose
-#: shell is the one asked (bash, cmd, none); behind a nested `pwsh -c '...'` the
-#: body is cut only in PowerShell's dialect, where the head is `{` or `if`, and
-#: the one part headed `copy` is the cmd dialect's. Which dialect surfaced the
-#: statement must not decide its meaning: `copy`, `move`, `cp`, `mv` are PowerShell's
-#: too wherever they are asked. The union only adds refusals (equal to round 0).
-_PS_ONLY = frozenset({"copy-item", "move-item", "cpi", "mi", "copy", "move", "cp", "mv"})
-
-
 def _meanings(shell, head) -> list[str]:
     """The grammars `head` may run under in a part of that shell (fix 2, R7): its
     alias in that shell (PowerShell's cp, mv, copy, move, cpi, mi), and the
     executable of that name, reached from every shell on Windows (GNU's cp, mv,
     ln, install from Git's usr\\bin; System32's xcopy). The union only adds
-    refusals; PATH is not predicted."""
+    refusals; PATH is not predicted.
+
+    The PowerShell reading is asked for every name in `_PS_INTO` in EVERY shell
+    (fix 3 R12, fix 4 R18). `shell_commands` cuts the body of `if (...) { Copy-Item
+    A B }` into a part whose head is `Copy-Item` but whose shell is the one asked
+    (bash, cmd, none); behind a nested `pwsh -c '...'` the body is cut only in
+    PowerShell's dialect, where the head is `{` or `if`, and the one part headed
+    `copy` is the cmd dialect's. Which dialect surfaced the statement must not
+    decide its meaning. Equal to round 0, which read these names as PowerShell's."""
     bare = head.removesuffix(".exe")
     found = ["gnu"] if bare in _GNU_INTO else []
-    if head in _PS_ONLY or (shell == "powershell" and head in _PS_INTO):
+    if head in _PS_INTO:
         found.append("powershell")
     if (shell == "cmd" and bare in _CMD_INTO) or bare == "xcopy":
         found.append("cmd")
