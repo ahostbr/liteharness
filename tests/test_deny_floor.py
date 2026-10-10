@@ -2804,6 +2804,93 @@ def test_fix3_a_folder_source_on_the_network_is_never_looked_at(roots, monkeypat
     assert any(plain.as_posix() in raw for raw in resolved), "CONTROL: a local folder source is resolved"
 
 
+#: Fix round 4 (R18): a copy written in PowerShell inside a block, behind a nested
+#: `pwsh -c` or direct. The nested body is cut only in PowerShell's dialect (the head
+#: is `{`, `if`, `$sb`), so the one part with the head `copy` is the cmd dialect's
+#: and `cp`/`mv` get PowerShell's meaning only from a powershell part: every head
+#: the PowerShell cmdlet is called by must be read as PowerShell reads it, in every
+#: shell. Each cell really writes in PowerShell 7 and was refused by round 0.
+FIX4_BLOCKS = ["if ($true) { CMD }", "foreach ($i in 1) { CMD }", "try { CMD } catch { }",
+               "function f { CMD }; f", "$sb = { CMD }; & $sb"]
+FIX4_WRAPS = {
+    "direct": "{body}",
+    "pwsh": "pwsh -NoProfile -c '{body}'",
+    "powershell": "powershell -NoProfile -Command '{body}'",
+}
+FIX4_HEADS = ["Copy-Item", "Move-Item", "cpi", "mi", "copy", "move", "cp", "mv"]
+FIX4_TRAILING = ["", "-Force", "-Verbose", "-Recurse", "-PassThru", "-ea Stop", "-Confirm:$false"]
+
+
+@pytest.mark.parametrize("wrap", FIX4_WRAPS)
+def test_fix4_r18_a_copy_in_a_block_is_read_as_powershell_in_every_shell(roots, wrap):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    open_ = []
+    for block in FIX4_BLOCKS:
+        for head in FIX4_HEADS:
+            for trailing in FIX4_TRAILING:
+                body = block.replace("CMD", f"{head} {src.as_posix()}/{OTHER_NAME} {litetui.as_posix()} {trailing}".rstrip())
+                command = FIX4_WRAPS[wrap].replace("{body}", body)
+                for asked_as in (None, "bash", "cmd"):
+                    if not deny_floor.jobs_write_target(command, workspace, home, shell=asked_as,
+                                                         name=OTHER_NAME, more=into):
+                        open_.append((asked_as, command))
+    assert not open_, (len(open_), open_[:6])
+
+
+@pytest.mark.parametrize("command", [
+    "pwsh -NoProfile -c 'if ($true) { move -Path {src}/NAME -Destination {root} -Force }'",
+    "pwsh -NoProfile -c '1 | % { move {src}/NAME {root} -Force }'",
+    "pwsh -NoProfile -c 'if ($true) { mv {src}/NAME {root} -Force -PassThru }'",
+    "if ($true) { mv {src}/NAME {root} -Force -PassThru }",
+    "try { cp {src}/NAME {root} -PassThru } catch { }",
+])
+def test_fix4_r18_rows_of_the_review(roots, command):
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    command = _fix2(command, litetui, src, OTHER_NAME)
+    assert deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME) is None
+    assert deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME, more=into), command
+
+
+#: Fix round 4 (R20): a backtick-newline between the words of a copy leaves an EMPTY
+#: word in PowerShell's dialect; it was bound as the destination and the folder fell
+#: off. Each really writes in PowerShell 7; round 0 and fix 1 refused it.
+FIX4_CONTINUED = [
+    "Copy-Item {src}/NAME `\n {root}",
+    "Copy-Item {src}/x.json `\n , {src}/NAME {root}",
+    "Move-Item {src}/NAME `\n {root} -Force",
+    "cpi {src}/NAME `\n {root}",
+    "mi {src}/NAME `\n {root} -Force",
+    "copy {src}/NAME `\n {root}",
+    "move {src}/NAME `\n {root} -Force",
+    "Copy-Item `\n {src}/NAME `\n {root}",
+    "Copy-Item {src}/x.json, `\n {src}/NAME {root}",
+]
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template", FIX4_CONTINUED)
+def test_fix4_r20_a_backtick_newline_between_the_words_of_a_copy(roots, template, name):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / name).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for root in (litetui, marked):
+        command = _fix2(template, root, src, name)
+        for asked_as in ("powershell", None):
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name,
+                                                more=into), (asked_as, command)
+
+
 def test_the_gnu_grammar_alone_in_bash(roots):
     """Asked as bash only (no PowerShell reading of `cp` beside it): `--` ends the
     options and the words after it are operands, even one that looks like `-t`."""
