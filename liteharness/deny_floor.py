@@ -534,11 +534,30 @@ def _jobs_say(target: Path) -> str:
                 "Schedule with /cron or LiteTUI's schedule tools instead.")
 
 
+def _more_adds(ask, more: frozenset):
+    """`more` only ever adds a refusal (T0306-S, fix round 1): the question is
+    asked without it first, and that answer stands, a refusal or an exception
+    exactly as without `more`. Only when it allows is the question asked again
+    with `more`, and an error there (a NUL in a word only `more` reads) is no
+    answer."""
+    answer = ask(frozenset())
+    if answer or not more:
+        return answer
+    try:
+        return ask(more)
+    except (ValueError, OSError):
+        return None
+
+
 @_path_refusal
 def write_refusal(path, workspace, home=None, *, name: str = _JOBS_NAME,
                   under: str | None = None, more: frozenset = frozenset()) -> str | None:
     """The jobs-file refusal for a Write/Edit tool's `file_path`, or None. This
     rule ALONE: a tool write never meets the delete or launcher rules."""
+    return _more_adds(lambda m: _write_refusal(path, workspace, home, name, under, m), more)
+
+
+def _write_refusal(path, workspace, home, name, under, more) -> str | None:
     if not isinstance(path, str) or not path:
         return None
     target = _resolve(dealias(path, allow_globs=False), Path(workspace),
@@ -926,6 +945,10 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None,
     classification, not proof about aliases, variables or a script's effects.
     Like jobs_write_target, raises UnresolvablePath when a literal cannot be checked.
     """
+    return _more_adds(lambda m: _jobs_git_refusal(command, workspace, home, shell, name, under, m), more)
+
+
+def _jobs_git_refusal(command, workspace, home, shell, name, under, more) -> str | None:
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
     if "\x00" in command:
@@ -1016,6 +1039,10 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
     Raises UnresolvablePath for invalid literals; callers must refuse the call.
     None means no recognized target, NOT a failed path check.
     """
+    return _more_adds(lambda m: _jobs_write_target(command, workspace, home, shell, name, under, m), more)
+
+
+def _jobs_write_target(command, workspace, home, shell, name, under, more) -> Path | None:
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
     if "\x00" in command:
@@ -1075,26 +1102,20 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
                     paths.append(magic)   # N, from the folder a `cd` moved to
                 # Literal paths retain spaces. Embedded interpreter code keeps
                 # the historical finite path scan (no inner-language execution).
-                # (raw, added): an added raw is one only `more` asks about.
                 raws = []
-                for k, path in enumerate(paths):
+                for path in paths:
                     for match in _jobs_word(name).finditer(path):
                         if match.end() == len(path) and match.start() >= 0:
-                            raws.append((path, k > 0 or n is None))
+                            raws.append(path)
                             continue
                         prefix = _PATH_TAIL.search(path[:match.start()]).group(0)
                         if prefix and prefix[-1] not in "\\/":
                             continue
-                        raws.append((prefix + name, k > 0 or n is None))
+                        raws.append(prefix + name)
                     if SHORT_NAME in more and inner in _WRITERS and re.search(r"~\d", canonical_name(path)):
-                        raws.append((path, True))   # H: resolved on disk, an existing file's long name
-                for raw, added in raws:
-                    try:
-                        target = _resolve(dealias(raw), target_base, home, streams=streams)
-                    except ValueError:   # a NUL: the default's own raws raise as before
-                        if added:
-                            continue
-                        raise
+                        raws.append(path)   # H: resolved on disk, an existing file's long name
+                for raw in raws:
+                    target = _resolve(dealias(raw), target_base, home, streams=streams)
                     if not is_jobs_file(target, name, under):
                         continue
                     if head in _JOBS_COPIES:
@@ -1110,12 +1131,7 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
                             continue
                     return target
             if COPY_INTO in more:
-                copy_base = target_base
-                if chdir is not None:
-                    try:
-                        copy_base = _resolve(chdir, target_base, home, streams=streams)
-                    except ValueError:
-                        copy_base = None
+                copy_base = target_base if chdir is None else _resolve(chdir, target_base, home, streams=streams)
                 if copy_base is not None and (target := _copied_into(
                         dialect, inner, inner_args, copy_base, home, name, under, streams)):
                     return target
@@ -1268,7 +1284,7 @@ def _copied_into(dialect, head, args, base, home, name, under, streams) -> Path 
     - cmd, `copy xcopy move`: the last word that is not a switch.
 
     The sources' names are tested first; only a match resolves the folder (a
-    disk look). Any error resolving it is no answer: only `more` asks this."""
+    disk look)."""
     head = head.removesuffix(".exe")
     if dialect == "bash" and head in _GNU_INTO:
         gnu = _gnu_options(head, args)
@@ -1310,13 +1326,10 @@ def _copied_into(dialect, head, args, base, home, name, under, streams) -> Path 
             last == wanted or (re.search(r"[*?[]", last) and fnmatch.fnmatchcase(wanted, last))
             for last in (canonical_name(source) for source in sources)):
         return None
-    try:
-        folder = _resolve(dest, base, home, streams=streams)   # not dealias: it would cut `.` to nothing
-        if folder is None or not (dest.endswith(("/", "\\")) or folder.is_dir()):
-            return None
-        return folder / name if is_jobs_file(folder / name, name, under) else None
-    except (ValueError, OSError):
+    folder = _resolve(dest, base, home, streams=streams)   # not dealias: it would cut `.` to nothing
+    if folder is None or not (dest.endswith(("/", "\\")) or folder.is_dir()):
         return None
+    return folder / name if is_jobs_file(folder / name, name, under) else None
 
 
 @_path_refusal
@@ -1326,8 +1339,13 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
 
     Omitted / unknown shell retains the original full scan. Never infer this
     context from command syntax or an agent-supplied argument. `more` (T0306-S)
-    adds recognitions to the jobs-file rule, and DOLLAR_PATH to the delete rules.
+    adds recognitions to the jobs-file rule, and DOLLAR_PATH to the delete rules;
+    a refusal without it stands as it is, text and all.
     """
+    return _more_adds(lambda m: _refusal(command, workspace, home, jobs, shell, m), more)
+
+
+def _refusal(command, workspace, home, jobs, shell, more) -> str | None:
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
     if "\x00" in command:
@@ -1335,9 +1353,9 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
     workspace = Path(workspace)
     home = Path(home) if home is not None else Path.home()
     streams = DOLLAR_PATH in more
-    if jobs and (reason := jobs_git_refusal(command, workspace, home, shell=shell, more=more)):
+    if jobs and (reason := _jobs_git_refusal(command, workspace, home, shell, _JOBS_NAME, None, more)):
         return reason
-    if jobs and (target := jobs_write_target(command, workspace, home, shell=shell, more=more)):
+    if jobs and (target := _jobs_write_target(command, workspace, home, shell, _JOBS_NAME, None, more)):
         return _jobs_say(target)
     base: Path | None = workspace   # where relative targets resolve; None = unknown
     literal_data = _literal_here_data(command) if shell == "powershell" else []

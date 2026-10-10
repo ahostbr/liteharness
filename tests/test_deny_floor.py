@@ -2608,16 +2608,19 @@ def test_copy_into_looks_at_the_destination_only_when_a_source_has_the_name(root
 
 
 def test_refusal_hands_more_to_both_jobs_questions(roots, monkeypatch):
-    """refusal() passes `more` on to the Git question and the shell question
-    alike (each also asks a pathspec, so a verdict alone cannot show which did)."""
+    """refusal() asks the Git question and the shell question without `more`
+    first, then (the default allowing) with it (each also asks a pathspec, so a
+    verdict alone cannot show which did)."""
     home, workspace, _, _, _ = roots
     seen = []
-    for fn in ("jobs_git_refusal", "jobs_write_target"):
+    for fn in ("_jobs_git_refusal", "_jobs_write_target"):
         real = getattr(deny_floor, fn)
-        monkeypatch.setattr(deny_floor, fn, lambda *a, _real=real, _fn=fn, **k:
-                            seen.append((_fn, k.get("more"))) or _real(*a, **k))
+        monkeypatch.setattr(deny_floor, fn, lambda *a, _real=real, _fn=fn:
+                            seen.append((_fn, a[-1])) or _real(*a))
     deny_floor.refusal("echo x", workspace, home, more=deny_floor.MORE)
-    assert seen == [("jobs_git_refusal", deny_floor.MORE), ("jobs_write_target", deny_floor.MORE)]
+    none = frozenset()
+    assert seen == [("_jobs_git_refusal", none), ("_jobs_write_target", none),
+                    ("_jobs_git_refusal", deny_floor.MORE), ("_jobs_write_target", deny_floor.MORE)]
 
 
 NUL_MORE_ONLY = [   # a NUL in a word only an added recognition reads (fix 1, R3)
@@ -2843,7 +2846,7 @@ def test_count_only_cannot_change_a_verdict_when_it_breaks(counted, monkeypatch)
 
     def broken():
         floor = real()
-        floor.MORE = None   # `more=None` makes the added question raise
+        floor.MORE = 1   # `more=1` makes the added question raise (TypeError)
         return floor
 
     monkeypatch.setattr(deny_gate, "_load_floor", broken)
