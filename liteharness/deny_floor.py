@@ -64,7 +64,13 @@ Four rules, all about what the command TARGETS, never about how it is spelled:
                           asks it of `jobs.json` only. A second keyword
                           (`under`, default none: the file sits directly in the
                           data root) asks it of a file at any depth below one
-                          named folder of the data root.
+                          named folder of the data root. A third keyword
+                          (`more`, default empty: nothing added) names the
+                          recognitions a caller adds, from MORE: a copy or
+                          move INTO the folder, a stream suffix on a folder of
+                          a path word, the file's short name, a `key=value`
+                          word, a linking copy of it, Git pathspec magic, and
+                          the path inside a .NET call (T0306-S).
 
 Relative targets resolve against the folder the command is IN at that point:
 `cd ~; Remove-Item * -Recurse` is judged as a delete of the profile, because a
@@ -383,6 +389,30 @@ _JOBS_READERS = frozenset({
 #: Copies read their SOURCE: only a copy whose destination is the file writes it.
 _JOBS_COPIES = frozenset({"cp", "copy", "copy-item", "cpi", "xcopy"})
 
+#: The recognitions a caller may add with `more` (T0306-S). Each is OFF unless
+#: named, so with `more` empty no verdict differs from the rule without it, and
+#: each only ever adds a refusal.
+COPY_INTO = "copy-into"      # A: `cp other/NAME DIR/` writes DIR/NAME
+DOLLAR_PATH = "dollar-path"  # G: `DIR::$INDEX_ALLOCATION/NAME` opens DIR/NAME
+SHORT_NAME = "short-name"    # H: `rm DIR/SETTIN~1.JSO`, resolved on disk
+KEY_VALUE = "key-value"      # J: `dd of=DIR/NAME`
+LINK_COPY = "link-copy"      # K: `cp -l DIR/NAME alias` makes a second name for it
+PATHSPEC = "pathspec"        # N: `git checkout HEAD -- :/REL`, `:(top)REL`
+CALL_PATH = "call-path"      # E: `[IO.File]::WriteAllText('DIR/NAME','x')`
+MORE = frozenset({COPY_INTO, DOLLAR_PATH, SHORT_NAME, KEY_VALUE, LINK_COPY, PATHSPEC, CALL_PATH})
+#: A: heads that copy, move or link sources INTO a destination folder.
+_INTO_HEADS = frozenset({"cp", "copy", "copy-item", "cpi", "xcopy", "mv", "move", "move-item",
+                         "mi", "ln", "install", "rsync"})
+#: H: heads that write, move or delete the files they name (a finite list:
+#: resolving a word on disk is paid for these only).
+_WRITERS = frozenset({
+    "rm", "del", "erase", "remove-item", "ri", "unlink", "shred", "truncate", "dd",
+    "mv", "move", "move-item", "mi", "ren", "rename", "rename-item", "rni",
+    "cp", "copy", "copy-item", "cpi", "xcopy", "ln", "install", "rsync", "sed",
+    "set-content", "sc", "add-content", "ac", "clear-content", "clc", "out-file",
+    "tee", "tee-object", "new-item", "ni",
+})
+
 #: Recognize complete PowerShell here-strings, including expandable ones so
 #: literal-looking text inside an expandable body cannot gain an exemption.
 _HERE_STRING = re.compile(r"@(['\"])[ \t]*\r?\n.*?^\1@", re.MULTILINE | re.DOTALL)
@@ -509,13 +539,14 @@ def _jobs_say(target: Path) -> str:
 
 @_path_refusal
 def write_refusal(path, workspace, home=None, *, name: str = _JOBS_NAME,
-                  under: str | None = None) -> str | None:
+                  under: str | None = None, more: frozenset = frozenset()) -> str | None:
     """The jobs-file refusal for a Write/Edit tool's `file_path`, or None. This
     rule ALONE: a tool write never meets the delete or launcher rules."""
     if not isinstance(path, str) or not path:
         return None
     target = _resolve(dealias(path, allow_globs=False), Path(workspace),
-                      Path(home) if home is not None else Path.home())
+                      Path(home) if home is not None else Path.home(),
+                      streams=DOLLAR_PATH in more)
     return _jobs_say(target) if is_jobs_file(target, name, under) else None
 
 
@@ -890,7 +921,8 @@ def _git_read_words(args: list[str], redirects=()) -> bool:
 
 
 def jobs_git_refusal(command, workspace, home=None, *, shell=None,
-                     name: str = _JOBS_NAME, under: str | None = None) -> str | None:
+                     name: str = _JOBS_NAME, under: str | None = None,
+                     more: frozenset = frozenset()) -> str | None:
     """Protected schedule Git writes; actual command heads alone get read waivers.
 
     Relocated writes retain the conservative guard. This is literal syntax
@@ -942,11 +974,15 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None,
                 return _say("jobs-file", "a relocated Git write names jobs.json; "
                             "its schedule target cannot be proven outside a data root",
                             "Read schedules with a file-read tool instead.")
+            paths = [path]
             if ":" in path and not re.match(r"^[A-Za-z]:", path):
-                path = path.partition(":")[2]
-            target = _resolve(dealias(path), base, home)
-            if target is not None and is_jobs_file(target, name, under):
-                return _jobs_say(target)
+                paths = [path.partition(":")[2]]
+                if PATHSPEC in more and (magic := _pathspec(path, base)):
+                    paths.append(magic)
+            for path in paths:
+                target = _resolve(dealias(path), base, home, streams=DOLLAR_PATH in more)
+                if target is not None and is_jobs_file(target, name, under):
+                    return _jobs_say(target)
         if relocating:
             return _say("jobs-file", "a repo-relocating Git write may change a LiteTUI "
                         "schedule outside the shell cwd; its target is not proven safe",
@@ -954,8 +990,30 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None,
     return None
 
 
+def _pathspec(word: str, base: Path) -> str | None:
+    """N (T0306-S): the path a Git pathspec with magic names, or None.
+
+    `:/REL`, `:(top)REL` (and any long magic list holding `top`) are REL from the
+    repository root, the nearest folder above `base` that holds `.git`; other
+    long magic (`:(icase)REL`) is REL from `base`. An exclude (`:!`, `:^`,
+    `:(exclude)`) names nothing written."""
+    if not word.startswith(":"):
+        return None   # `HEAD:REL` names a revision's file, not a pathspec
+    long = re.match(r":\(([^)]*)\)(.*)\Z", word, re.S)
+    short = re.match(r":([/!^]*):?(.*)\Z", word, re.S)
+    magic = {m.strip() for m in long.group(1).split(",")} if long else set(short.group(1))
+    rest = (long or short).group(2)
+    if magic & {"exclude", "!", "^"}:
+        return None
+    folder = Path(os.path.abspath(base))
+    if magic & {"top", "/"}:
+        folder = next((f for f in (folder, *folder.parents) if (f / ".git").exists()), folder)
+    return str(folder / rest)
+
+
 def jobs_write_target(command, workspace, home=None, *, shell=None,
-                      name: str = _JOBS_NAME, under: str | None = None) -> Path | None:
+                      name: str = _JOBS_NAME, under: str | None = None,
+                      more: frozenset = frozenset()) -> Path | None:
     """Protected schedule write target, using real argv and control boundaries.
 
     Raises UnresolvablePath for invalid literals; callers must refuse the call.
@@ -966,6 +1024,7 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
     if "\x00" in command:
         raise UnresolvablePath("<shell command>", "embedded null character in command")
     home = Path(home) if home is not None else Path.home()
+    streams = DOLLAR_PATH in more
     # Unknown shells are independent interpretations, not three consecutive cwd changes.
     dialects = (shell,) if shell in {"bash", "powershell", "cmd"} else ("bash", "powershell", "cmd")
     for dialect in dialects:
@@ -977,13 +1036,13 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
                 if op.startswith(">"):
                     if dialect == "bash" and word[0].startswith(">(") and word[0].endswith(")"):
                         continue  # computed fd, not a path; its inner commands are scanned below
-                    target = _resolve(dealias(word[0]), base, home)
+                    target = _resolve(dealias(word[0]), base, home, streams=streams)
                     if is_jobs_file(target, name, under):
                         return target
             if head in {"cd", "chdir", "pushd", "set-location", "sl", "push-location"}:
                 args = [word for word in words[1:] if word.lower() not in {"/d", "-path", "-literalpath"}]
                 if args:
-                    base = _resolve(args[0], base, home)
+                    base = _resolve(args[0], base, home, streams=streams)
                 continue
             if not words or head in _JOBS_READERS:
                 continue
@@ -994,28 +1053,43 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
                     continue
                 for n, word in enumerate(args[:-1]):
                     if word == "-C":
-                        target_base = _resolve(args[n + 1], target_base, home)
+                        target_base = _resolve(args[n + 1], target_base, home, streams=streams)
                     elif word.startswith("-C") and len(word) > 2:
-                        target_base = _resolve(word[2:], target_base, home)
-            for n, word in enumerate(args):
+                        target_base = _resolve(word[2:], target_base, home, streams=streams)
+            scan = list(enumerate(args))
+            if CALL_PATH in more and re.search(r"[\\/]", words[0]):
+                # E: `(` ends a segment, so a .NET call's quoted path is the HEAD word of its own.
+                scan.insert(0, (None, words[0]))
+            for n, word in scan:
                 path = word
                 param = ""
                 if word.startswith("-") and ":" in word:
                     param, _, path = word.partition(":")
                 elif word.startswith("-") and "=" in word:
                     _, _, path = word.partition("=")
+                paths = [path]
+                if (KEY_VALUE in more and "=" in word and not word.startswith("-")
+                        and not (head == "dd" and word.lower().startswith("if="))):
+                    paths.append(word.partition("=")[2])   # J: `of=FILE`; dd's `if=` is its input
+                if (PATHSPEC in more and head in {"git", "git.exe"} and target_base is not None
+                        and (magic := _pathspec(word, target_base))):
+                    paths.append(magic)   # N, from the folder a `cd` moved to
                 # Literal paths retain spaces. Embedded interpreter code keeps
                 # the historical finite path scan (no inner-language execution).
-                matches = list(_jobs_word(name).finditer(path))
-                for match in matches:
-                    if match.end() == len(path) and match.start() >= 0:
-                        raw = path
-                    else:
+                raws = []
+                for path in paths:
+                    for match in _jobs_word(name).finditer(path):
+                        if match.end() == len(path) and match.start() >= 0:
+                            raws.append(path)
+                            continue
                         prefix = _PATH_TAIL.search(path[:match.start()]).group(0)
                         if prefix and prefix[-1] not in "\\/":
                             continue
-                        raw = prefix + name
-                    target = _resolve(dealias(raw), target_base, home)
+                        raws.append(prefix + name)
+                    if SHORT_NAME in more and head in _WRITERS and re.search(r"~\d", canonical_name(path)):
+                        raws.append(path)   # H: resolved on disk, an existing file's long name
+                for raw in raws:
+                    target = _resolve(dealias(raw), target_base, home, streams=streams)
                     if not is_jobs_file(target, name, under):
                         continue
                     if head in _JOBS_COPIES:
@@ -1024,18 +1098,91 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
                         named_dest = param.lower().startswith("-d") or previous.startswith("-d")
                         has_named_dest = any(a.lower().startswith("-destination") for a in args)
                         destination = named_dest or (not named_source and not has_named_dest and n == len(args) - 1)
-                        if not destination:
+                        # K: a linking copy of the file gives it a second name, written through later.
+                        linked = LINK_COPY in more and head == "cp" and any(
+                            a == "--link" or _CP_LINK.fullmatch(a) for a in args)
+                        if not destination and not linked:
                             continue
                     return target
+            if COPY_INTO in more and (target := _copied_into(head, args, target_base, home,
+                                                             name, under, streams)):
+                return target
+    return None
+
+
+#: K: a cluster of GNU cp's short options holding `l` (`-l`, `-al`); PowerShell's
+#: `-Filter`, `-Include`, `-LiteralPath` hold letters cp has no option for.
+_CP_LINK = re.compile(r"-[abdfHiLnPpRrsuvxZ]*l[abdfHiLnPpRrsuvxZ]*")
+#: cmd's and robocopy's switches (`/Y`, `/MIR`, `/LEV:2`), which are not paths.
+_SWITCH = re.compile(r"/[A-Za-z?][\w:-]*\Z")
+
+
+def _copied_into(head, args, base, home, name, under, streams) -> Path | None:
+    """A (T0306-S): the protected file a copy, move or link writes when its
+    destination is a FOLDER: that folder / the source's last segment (a source
+    glob counts when it matches the name).
+
+    The destination is `-t DIR`, `--target-directory[=]DIR`, PowerShell's
+    `-Destination[:]DIR` (3+ letters), else the last word that is not an option;
+    `ln` with one name links into the current folder. It is a folder when it
+    ends in a separator or exists as one. robocopy (M) names it second and the
+    files after it: `robocopy SRC DIR NAME`."""
+    head = head.removesuffix(".exe")
+    switches = head in {"copy", "xcopy", "move", "robocopy"}
+    if head == "robocopy":
+        words = []
+        for word in args:
+            if _SWITCH.fullmatch(word):
+                break   # the file list ends at the first switch (`/XF NAME` excludes)
+            words.append(word)
+        if len(words) < 3:
+            return None
+        dest, sources, into = words[1], words[2:], True
+    elif head in _INTO_HEADS:
+        dest, sources, i = None, [], 0
+        while i < len(args):
+            word, low = args[i], args[i].lower()
+            option, colon, _ = low.partition(":")
+            if low in ("-t", "--target-directory") or (len(low) >= 4 and "-destination".startswith(low)):
+                dest = args[i + 1] if i + 1 < len(args) else None
+                i += 2
+                continue
+            if low.startswith("--target-directory="):
+                dest = word.partition("=")[2]
+            elif colon and len(option) >= 4 and "-destination".startswith(option):
+                dest = word.partition(":")[2]
+            elif low.startswith("-") and colon:
+                sources.append(word.partition(":")[2])   # -Path:x
+            elif not low.startswith("-") and not (switches and _SWITCH.fullmatch(word)):
+                sources.append(word)
+            i += 1
+        if dest is None:
+            dest = "." if head == "ln" and len(sources) == 1 else (sources.pop() if sources else None)
+        into = False
+    else:
+        return None
+    if dest is None:
+        return None
+    folder = _resolve(dest, base, home, streams=streams)   # not dealias: it would cut `.` to nothing
+    if folder is None or not (into or dest.endswith(("/", "\\")) or folder.is_dir()):
+        return None
+    wanted = name.lower()
+    for source in sources:
+        last = canonical_name(source)
+        if last == wanted or (re.search(r"[*?[]", last) and fnmatch.fnmatchcase(wanted, last)):
+            if is_jobs_file(folder / name, name, under):
+                return folder / name
     return None
 
 
 @_path_refusal
-def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = None) -> str | None:
+def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = None,
+            more: frozenset = frozenset()) -> str | None:
     """Refusal sentence, or None. Only a trusted runtime may prove `shell`.
 
     Omitted / unknown shell retains the original full scan. Never infer this
-    context from command syntax or an agent-supplied argument.
+    context from command syntax or an agent-supplied argument. `more` (T0306-S)
+    adds recognitions to the jobs-file rule, and DOLLAR_PATH to the delete rules.
     """
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
@@ -1043,9 +1190,10 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
         raise UnresolvablePath("<shell command>", "embedded null character in command")
     workspace = Path(workspace)
     home = Path(home) if home is not None else Path.home()
-    if jobs and (reason := jobs_git_refusal(command, workspace, home, shell=shell)):
+    streams = DOLLAR_PATH in more
+    if jobs and (reason := jobs_git_refusal(command, workspace, home, shell=shell, more=more)):
         return reason
-    if jobs and (target := jobs_write_target(command, workspace, home, shell=shell)):
+    if jobs and (target := jobs_write_target(command, workspace, home, shell=shell, more=more)):
         return _jobs_say(target)
     base: Path | None = workspace   # where relative targets resolve; None = unknown
     literal_data = _literal_here_data(command) if shell == "powershell" else []
@@ -1063,7 +1211,7 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
     for _, match in steps:
         in_data = any(start <= match.start() < end for start, end in literal_data)
         if match.re is _CD:
-            base = _cd_target(command[match.end():], base, home)
+            base = _cd_target(command[match.end():], base, home, streams=streams)
             if not in_data:
                 launcher_base = _cd_target(command[match.end():], launcher_base, home)
             continue
@@ -1092,7 +1240,7 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
                             "the host cannot see")
             if not recursive:
                 continue
-            resolved = _resolve(raw, base, home)
+            resolved = _resolve(raw, base, home, streams=streams)
             why = resolved and _protected(resolved, workspace, home)
             if why:
                 return _say("protected-root-delete",
@@ -1882,7 +2030,7 @@ def _normal(raw: str) -> str:
         return text
 
 
-def _cd_target(rest: str, base: Path | None, home: Path) -> Path | None:
+def _cd_target(rest: str, base: Path | None, home: Path, *, streams: bool = False) -> Path | None:
     """The base after `cd <rest>`: the first word that is not a flag. A bare
     `cd` goes home (bash); `-` or a variable leaves the base unknown."""
     for token in _TOKEN.findall(rest.split("\n", 1)[0]):
@@ -1892,7 +2040,7 @@ def _cd_target(rest: str, base: Path | None, home: Path) -> Path | None:
         if low.startswith("-") and ":" in word:
             word = low = word.partition(":")[2]   # -Path:C:\x names the folder (N3)
         if word and not (low.startswith("-") or re.fullmatch(r"/[a-z]", low)):
-            return _resolve(word, base, home)
+            return _resolve(word, base, home, streams=streams)
         if word == "-":
             return None
         if cut >= 0:
@@ -1900,9 +2048,13 @@ def _cd_target(rest: str, base: Path | None, home: Path) -> Path | None:
     return resolve_path(home)
 
 
-def _resolve(raw: str, base: Path | None, home: Path) -> Path | None:
+def _resolve(raw: str, base: Path | None, home: Path, *, streams: bool = False) -> Path | None:
     """The folder a target names, or None when a variable (or an unknown base
-    under a relative target) hides it."""
+    under a relative target) hides it. With `streams` (G, T0306-S), a word
+    holding a `$` first has every segment cut at its first colon (the drive's
+    excepted): `DIR::$INDEX_ALLOCATION` and `DIR:$I30:$INDEX_ALLOCATION` open DIR
+    itself, so that `$` is no variable. A `$` left after the cut still is one.
+    Only a word the default leaves unanswered changes."""
     if "\x00" in raw:
         raise UnresolvablePath(raw, "embedded null character in path")
     if not _unquote(raw):
@@ -1920,6 +2072,9 @@ def _resolve(raw: str, base: Path | None, home: Path) -> Path | None:
         if low == name or low.startswith(name + "/"):
             text = str(home) + text[len(name):]
             break
+    if streams and "$" in text:
+        drive = text[:2] if re.match(r"[A-Za-z]:", text) else ""
+        text = drive + "".join(part.split(":", 1)[0] for part in re.split(r"([\\/])", text[len(drive):]))
     if re.search(r"\$|%\w+%", text):
         return None  # an arbitrary variable: not resolvable from the string
     msys = _MSYS.match(text)

@@ -2427,3 +2427,207 @@ def test_a_wrapper_around_something_else_still_passes(checkouts, template):
     home, _, litetui, _ = checkouts
     command = _wrap_spell(template, litetui)
     assert deny_floor.refusal(command, litetui, home) is None, command
+
+# ── the recognizer's `more` keyword (T0306-S): recognitions a caller ADDS ──
+#
+# Each is named in MORE and is OFF unless the caller names it. Every row is
+# asked four ways: the default (no), its own class alone (yes), every OTHER class
+# together (no), and MORE (yes). So the default does not see it, the class's own
+# name is what turns it on, and no other class turns it on by accident.
+
+def _more_asked(command, cwd, home, name, under=None, more=frozenset()):
+    return (deny_floor.jobs_git_refusal(command, cwd, home, name=name, under=under, more=more)
+            or deny_floor.jobs_write_target(command, cwd, home, name=name, under=under, more=more))
+
+
+def _four_ways(command, cwd, home, cls, name, under=None):
+    return [bool(_more_asked(command, cwd, home, name, under, more))
+            for more in (frozenset(), frozenset({cls}), deny_floor.MORE - {cls}, deny_floor.MORE)]
+
+
+MORE_FORMS = [   # (class, command): {root} a data root, {src} a plain folder, NAME the file
+    # A: a copy, move or link of a same-named file INTO the folder
+    (deny_floor.COPY_INTO, "cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cp {src}/NAME {root}"),
+    (deny_floor.COPY_INTO, "mv {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cp -t {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp --target-directory={root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "Copy-Item {src}/NAME -Destination {root}"),
+    (deny_floor.COPY_INTO, "Copy-Item -Path {src}/NAME -Destination:{root}"),
+    (deny_floor.COPY_INTO, "Copy-Item {src}/NAME -Dest {root}"),
+    (deny_floor.COPY_INTO, "Move-Item {src}/NAME {root}"),
+    (deny_floor.COPY_INTO, "mi {src}/NAME {root}"),
+    (deny_floor.COPY_INTO, "copy {src}/NAME {root} /Y"),
+    (deny_floor.COPY_INTO, "xcopy {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cd {root} && cp {src}/NAME ."),
+    (deny_floor.COPY_INTO, "cp {src}/*.json {root}/"),
+    (deny_floor.COPY_INTO, "cp {src}/* {root}/"),
+    (deny_floor.COPY_INTO, "ln -s {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cd {root} && ln -s {src}/NAME"),
+    (deny_floor.COPY_INTO, "install -m 644 {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "rsync -a {src}/NAME {root}/"),          # M, a copy head
+    (deny_floor.COPY_INTO, "robocopy {src} {root} NAME"),           # M, a copy head
+    (deny_floor.COPY_INTO, "robocopy {src} {root} NAME /R:0"),
+    # G: a stream suffix on a FOLDER of the path word
+    (deny_floor.DOLLAR_PATH, 'echo x > "{root}::$INDEX_ALLOCATION/NAME"'),
+    (deny_floor.DOLLAR_PATH, 'rm "{root}:$I30:$INDEX_ALLOCATION/NAME"'),
+    (deny_floor.DOLLAR_PATH, 'Set-Content "{root}::$INDEX_ALLOCATION/NAME" x'),
+    (deny_floor.DOLLAR_PATH, 'cd "{root}::$INDEX_ALLOCATION" && rm NAME'),
+    # J: a `key=value` word with no dash
+    (deny_floor.KEY_VALUE, "dd if=/dev/null of={root}/NAME"),
+    (deny_floor.KEY_VALUE, "dd of={root}/NAME conv=notrunc"),
+    (deny_floor.KEY_VALUE, "somewriter out={root}/NAME"),
+    # K: a linking copy of the file (a second name that is written through later)
+    (deny_floor.LINK_COPY, "cp -l {root}/NAME {src}/alias"),
+    (deny_floor.LINK_COPY, "cp --link {root}/NAME {src}/alias"),
+    (deny_floor.LINK_COPY, "cp -fl {root}/NAME {src}/alias"),
+    # E: the path inside a .NET call is its segment's head word
+    (deny_floor.CALL_PATH, "[IO.File]::WriteAllText('{root}/NAME','x')"),
+    (deny_floor.CALL_PATH, '[System.IO.File]::Delete("{root}/NAME")'),
+    (deny_floor.CALL_PATH, "[IO.File]::WriteAllText( '{root}/NAME', 'x')"),
+    (deny_floor.CALL_PATH, "$null = [IO.File]::WriteAllText('{root}/NAME','x')"),
+    (deny_floor.CALL_PATH, "[IO.File]::Copy('evil.json','{root}/NAME',$true)"),
+    (deny_floor.CALL_PATH, "[IO.File]::ReadAllText('{root}/NAME')"),   # over-block, stated
+]
+MORE_CONTROLS = [   # no class and no combination refuses these
+    "cp {src}/other.json {root}/", "cp {src}/NAME.bak {root}/", "cp {src}/NAME {src}/sub/",
+    "cp {src}/NAME {root}/renamed.json", "cp {root}/NAME {src}/", "mv {root}/other.json {src}/",
+    "robocopy {src} {root} /XF NAME", "robocopy {src} {root}",
+    'echo x > "{root}/$x/NAME"', 'echo x > "{src}::$INDEX_ALLOCATION/NAME"',
+    "dd if={root}/NAME of={src}/copy", "dd if={root}/NAME",
+    "cp {root}/NAME {src}/backup", "cp -r {root}/NAME {src}/backup",
+    "Copy-Item -LiteralPath {root}/NAME -Destination {src}/backup",
+    "Copy-Item -Path {root}/NAME -Filter x -Destination {src}/backup",
+    "[IO.File]::WriteAllText('{src}/NAME','x')", "C:/tools/writer.exe --x",
+    "(Get-Item {root}/NAME).Delete()",   # E, held: the path is a READER's argument (no `shell_commands` change)
+]
+
+
+def _more_command(template, root, src, name):
+    return template.format(root=root.as_posix(), src=src.as_posix()).replace("NAME", name)
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("cls, template", MORE_FORMS)
+def test_more_adds_each_recognition_under_its_own_name_only(roots, cls, template, name):
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        command = _more_command(template, root, plain, name)
+        assert _four_ways(command, workspace, home, cls, name) == [False, True, False, True], command
+        target = _more_asked(command, workspace, home, name, more=frozenset({cls}))
+        assert target == root / name or (isinstance(target, str) and "[jobs-file]" in target), command
+        if "*" not in template:   # a glob may match both names, and does
+            assert _more_asked(command, workspace, home, _other(name), more=deny_floor.MORE) is None, \
+                "the recognition follows the name asked about"
+    elsewhere = _more_command(template, plain / "x", plain, name)
+    (plain / "x").mkdir(exist_ok=True)
+    assert _more_asked(elsewhere, workspace, home, name, more=deny_floor.MORE) is None, "not a data root"
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template", MORE_CONTROLS)
+def test_more_leaves_these_alone(roots, template, name):
+    home, workspace, litetui, marked, plain = roots
+    (plain / "sub").mkdir(exist_ok=True)
+    for root in (litetui, marked):
+        command = _more_command(template, root, plain, name)
+        assert _more_asked(command, workspace, home, name, more=deny_floor.MORE) is None, command
+
+
+def test_more_names_seven_recognitions_and_defaults_to_none(roots):
+    assert deny_floor.MORE == {"copy-into", "dollar-path", "short-name", "key-value",
+                               "link-copy", "pathspec", "call-path"}
+    home, workspace, litetui, _, plain = roots
+    command = f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/"
+    assert deny_floor.refusal(command, workspace, home) is None, "default: the copy into is not seen"
+    assert "[jobs-file]" in deny_floor.refusal(command, workspace, home, more=deny_floor.MORE)
+
+
+@pytest.mark.parametrize("template", JOBS_WRITES)
+def test_more_never_takes_a_refusal_away(roots, template):
+    home, workspace, litetui, marked, plain = roots
+    command = _jobs(template, litetui, marked, plain)
+    assert "[jobs-file]" in (deny_floor.refusal(command, workspace, home, more=deny_floor.MORE) or "")
+
+
+@pytest.mark.parametrize("template", JOBS_READS)
+def test_more_still_lets_the_reads_pass(roots, template):
+    home, workspace, litetui, marked, plain = roots
+    command = _jobs(template, litetui, marked, plain)
+    assert deny_floor.refusal(command, workspace, home, more=deny_floor.MORE) is None, command
+
+
+def test_copy_into_a_folder_below_under(roots):
+    """A, with `under`: the copy into a folder below `.agents` is judged there."""
+    home, workspace, litetui, _, plain = roots
+    seat = litetui / UNDER / "Seat"
+    seat.mkdir(parents=True)
+    for dest in (f"{seat.as_posix()}/", seat.as_posix()):
+        command = f"cp {plain.as_posix()}/{OTHER_NAME} {dest}"
+        assert _four_ways(command, workspace, home, deny_floor.COPY_INTO, OTHER_NAME, UNDER) == \
+            [False, True, False, True], command
+        assert _more_asked(command, workspace, home, OTHER_NAME, more=deny_floor.MORE) is None, \
+            "without `under` a folder below `.agents` is not the data root"
+
+
+def test_dollar_path_reaches_the_tool_path_and_the_delete_rules(roots):
+    """G: the tool question, and the recursive-delete rules, which take the same keyword."""
+    home, workspace, litetui, _, _ = roots
+    spelled = f"{litetui.as_posix()}::$INDEX_ALLOCATION/{OTHER_NAME}"
+    assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME) is None
+    assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME,
+                                    more=frozenset({deny_floor.DOLLAR_PATH}))
+    for command in (f'rm -rf "{home.as_posix()}::$INDEX_ALLOCATION"',
+                    f'Remove-Item -Recurse "{home.as_posix()}:$I30:$INDEX_ALLOCATION"',
+                    f'cd "{home.as_posix()}::$INDEX_ALLOCATION"; Remove-Item * -Recurse',
+                    f'rm -rf "{home.as_posix()}/.claude::$INDEX_ALLOCATION"'):
+        assert deny_floor.refusal(command, workspace, home) is None, command
+        assert deny_floor.refusal(command, workspace, home, more=deny_floor.MORE - {deny_floor.DOLLAR_PATH}) is None
+        reason = deny_floor.refusal(command, workspace, home, more=frozenset({deny_floor.DOLLAR_PATH}))
+        assert reason and "[protected-root-delete]" in reason, command
+    # A `$` left after the cut is still a variable: no answer, so no refusal.
+    assert deny_floor.refusal(f'rm -rf "{home.as_posix()}/$x"', workspace, home, more=deny_floor.MORE) is None
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_short_name_resolves_an_existing_file_for_the_writers(roots, name):
+    """H: the file's 8.3 short name in an argument word, writer heads only, on disk.
+    Skipped where the volume gives the file no short name."""
+    if os.name != "nt":
+        pytest.skip("short names are a Windows volume feature")
+    import ctypes
+    home, workspace, litetui, _, plain = roots
+    (litetui / name).write_text("{}", encoding="utf-8")
+    buffer = ctypes.create_unicode_buffer(600)
+    ctypes.windll.kernel32.GetShortPathNameW(str(litetui / name), buffer, 600)
+    short = Path(buffer.value).name
+    if not short or short.lower() == name:
+        pytest.skip("this volume gives the file no short name")
+    spelled = f"{litetui.as_posix()}/{short}"
+    for writer in (f"rm {spelled}", f"Remove-Item {spelled}", f"mv {spelled} {plain.as_posix()}/x",
+                   f"sed -i s/a/b/ {spelled}", f"Set-Content {spelled} x", f"cp x.json {spelled}"):
+        assert _four_ways(writer, workspace, home, deny_floor.SHORT_NAME, name) == \
+            [False, True, False, True], writer
+    for left in (f"cat {spelled}", f"python tool.py {spelled}", f"cp {spelled} {plain.as_posix()}/x",
+                 f"rm {litetui.as_posix()}/{short[:-5]}9{short[-4:]}"):
+        assert _more_asked(left, workspace, home, name, more=deny_floor.MORE) is None, left
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_pathspec_magic_names_the_file_from_the_repository_root(roots, monkeypatch, name):
+    """N: `:/REL` and `:(top)REL` from a subfolder of the repository; other long
+    magic is from the current folder; an exclude names nothing written."""
+    home, _, litetui, _, plain = roots
+    (litetui / ".git").mkdir()
+    sub = litetui / "sub"
+    sub.mkdir()
+    for form in (":/NAME", "':(top)NAME'", "':(top,icase)NAME'", ":/:NAME"):
+        command = f"git checkout HEAD -- {form}".replace("NAME", name)
+        assert _four_ways(command, sub, home, deny_floor.PATHSPEC, name) == [False, True, False, True], command
+        moved = f"cd {sub.as_posix()} && {command}"   # from another folder: the `cd` is followed
+        assert _four_ways(moved, plain, home, deny_floor.PATHSPEC, name) == [False, True, False, True], moved
+    assert _four_ways(f"git checkout HEAD -- ':(icase)sub/../{name}'", litetui, home,
+                      deny_floor.PATHSPEC, name)[1], "other magic: from the current folder"
+    for left in (f"git checkout HEAD -- ':(icase){name}'", f"git checkout HEAD -- ':!{name}'",
+                 f"git checkout HEAD -- ':(exclude){name}'", f"git diff -- :/{name}"):
+        assert _more_asked(left, sub, home, name, more=deny_floor.MORE) is None, left
