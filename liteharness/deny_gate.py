@@ -92,6 +92,26 @@ def _log(text: str) -> Path:
     return path
 
 
+#: T0306-S: the floor's added recognitions (deny_floor.MORE), COUNT-ONLY. With
+#: this variable set to "1" in the hook's environment, a call the added
+#: recognitions would refuse and the default does not is LOGGED (one line in
+#: deny_gate.log) and ALLOWED. Off by default. It never refuses anything, and an
+#: error inside it is swallowed: it cannot change a verdict.
+COUNT_ONLY_ENV = "LITEHARNESS_FLOOR_COUNT_ONLY"
+
+
+def _count_only(floor, judge, what: str) -> None:
+    """Log what the added recognitions would refuse; `judge(more)` asks the floor."""
+    if os.environ.get(COUNT_ONLY_ENV) != "1":
+        return
+    try:
+        would = judge(floor.MORE)
+        if would:
+            _log(f"count-only: would refuse {what[:300]!r}: {would[:300]!r}")
+    except Exception:
+        pass  # count-only must never decide the outcome
+
+
 #: Keystroke streams a tool types into a live shell, judged WHENEVER they are
 #: strings: a PTY submits on "\r" as well as "\n", and terminal action=submit
 #: presses Enter itself (review a93de8a9 R3), so "holds a newline" missed both.
@@ -432,7 +452,11 @@ def decide(payload: dict) -> dict | None:
         # returns HERE, before the floor is loaded.
         if not _names_jobs_file(written):
             return None
-        reason = _load_floor().write_refusal(written, payload.get("cwd") or os.getcwd())
+        floor = _load_floor()
+        cwd = payload.get("cwd") or os.getcwd()
+        reason = floor.write_refusal(written, cwd)
+        if not reason:
+            _count_only(floor, lambda more: floor.write_refusal(written, cwd, more=more), written)
         return _deny(reason) if reason else None
     command = _command(payload)
     if not command:
@@ -446,6 +470,9 @@ def decide(payload: dict) -> dict | None:
                          and tool_cwd else [])
     reason = next(filter(None, (floor.refusal(command, base) for base in bases)), None)
     reason = reason or _full_suite_refusal(payload)
+    if not reason:
+        _count_only(floor, lambda more: next(filter(None, (floor.refusal(command, base, more=more)
+                                                           for base in bases)), None), command)
     return _deny(reason) if reason else None
 
 

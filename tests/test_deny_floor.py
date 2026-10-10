@@ -2631,3 +2631,87 @@ def test_pathspec_magic_names_the_file_from_the_repository_root(roots, monkeypat
     for left in (f"git checkout HEAD -- ':(icase){name}'", f"git checkout HEAD -- ':!{name}'",
                  f"git checkout HEAD -- ':(exclude){name}'", f"git diff -- :/{name}"):
         assert _more_asked(left, sub, home, name, more=deny_floor.MORE) is None, left
+
+
+# ── the hook's COUNT-ONLY opt-in for the added recognitions (T0306-S) ──
+#
+# Off by default. On ("1"), a call the added recognitions would refuse and the
+# default does not is logged, one line, and ALLOWED. Nothing is ever refused by it.
+
+def _count_lines(harness):
+    log = harness / "deny_gate.log"
+    return [line for line in log.read_text(encoding="utf-8").splitlines()
+            if "count-only" in line] if log.exists() else []
+
+
+@pytest.fixture
+def counted(roots, tmp_path, monkeypatch):
+    harness = tmp_path / "harness-home"
+    monkeypatch.setenv("LITEHARNESS_HOME", str(harness))
+    monkeypatch.delenv(deny_gate.COUNT_ONLY_ENV, raising=False)
+    return (*roots, harness)
+
+
+def test_count_only_is_off_by_default(counted):
+    home, workspace, litetui, _, plain, harness = counted
+    command = f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/"
+    assert deny_gate.decide(_payload("Bash", command, workspace)) is None
+    assert _count_lines(harness) == []
+
+
+@pytest.mark.parametrize("value", ["0", "", "true", "yes"])
+def test_count_only_is_on_for_one_value_only(counted, monkeypatch, value):
+    home, workspace, litetui, _, plain, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, value)
+    deny_gate.decide(_payload("Bash", f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/", workspace))
+    assert _count_lines(harness) == []
+
+
+@pytest.mark.parametrize("template", [
+    "cp {src}/jobs.json {root}/", "robocopy {src} {root} jobs.json", "dd if=/dev/null of={root}/jobs.json",
+    "cp -l {root}/jobs.json {src}/alias", "[IO.File]::WriteAllText('{root}/jobs.json','x')",
+    'echo x > "{root}::$INDEX_ALLOCATION/jobs.json"', 'rm -rf "{home}::$INDEX_ALLOCATION"',
+])
+def test_count_only_logs_one_line_and_allows(counted, monkeypatch, template):
+    home, workspace, litetui, _, plain, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    command = template.format(src=plain.as_posix(), root=litetui.as_posix(), home=Path.home().as_posix())
+    assert deny_gate.decide(_payload("Bash", command, workspace)) is None, "count-only refused"
+    lines = _count_lines(harness)
+    assert len(lines) == 1 and "would refuse" in lines[0] and "DENY FLOOR" in lines[0], lines
+
+
+def test_count_only_logs_a_file_tool_write_too(counted, monkeypatch):
+    home, workspace, litetui, _, _, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    spelled = f"{litetui.as_posix()}::$INDEX_ALLOCATION/{SCHEDULE}"
+    assert deny_gate.decide(_write("Write", spelled, workspace)) is None
+    assert len(_count_lines(harness)) == 1
+
+
+def test_count_only_leaves_a_refusal_and_an_ordinary_call_alone(counted, monkeypatch):
+    home, workspace, litetui, _, _, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    out = deny_gate.decide(_payload("Bash", f"echo x > {litetui.as_posix()}/{SCHEDULE}", workspace))
+    assert out and "[jobs-file]" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert deny_gate.decide(_payload("Bash", "git status", workspace)) is None
+    assert deny_gate.decide(_write("Write", litetui / SCHEDULE, workspace))
+    assert _count_lines(harness) == [], "only a call the default allows is counted"
+
+
+def test_count_only_cannot_change_a_verdict_when_it_breaks(counted, monkeypatch):
+    """An error inside the count-only branch is swallowed: the call is allowed
+    exactly as the default allows it."""
+    home, workspace, litetui, _, plain, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    real = deny_gate._load_floor
+
+    def broken():
+        floor = real()
+        floor.MORE = None   # `more=None` makes the added question raise
+        return floor
+
+    monkeypatch.setattr(deny_gate, "_load_floor", broken)
+    command = f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/"
+    assert deny_gate.decide(_payload("Bash", command, workspace)) is None
+    assert _count_lines(harness) == []
