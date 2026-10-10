@@ -2712,6 +2712,10 @@ FIX3_FORMS = [
     # GNU cp reads -Destination as junk and takes the last operand, so only the PowerShell
     # reading of the nested part (its own shell, not the outer dialect) sees this one.
     ("bash", "pwsh -NoProfile -c 'cp -Destination {root} {src}/NAME'"),
+    # Fix 4 (Q5 again): `copy`, `cp` are PowerShell's in every shell now, so the row above no longer tells the part's shell from the
+    # outer dialect. cmd's `A+B` joins two sources and PowerShell reads it as ONE name: only the cmd reading of the cmd-dialect part
+    # (shell "cmd", whatever was asked) refuses this one, so asked with no shell it needs the PART's shell.
+    ("cmd", "copy {src}/NAME+{src}/x.json {root}"),
     # R12: a PowerShell statement or block around the copy, asked with NO shell (what the hook and the
     # owner rule pass): the part the splitter cuts out has the shell that was asked, not PowerShell.
     # Asked as powershell the head of the statement is `if`, `{`; no round saw those.
@@ -2923,13 +2927,17 @@ def test_fix4_r21_any_spelling_windows_reads_as_a_network_folder_is_never_looked
 
 
 def test_the_gnu_grammar_alone_in_bash(roots):
-    """Asked as bash only (no PowerShell reading of `cp` beside it): `--` ends the
-    options and the words after it are operands, even one that looks like `-t`."""
+    """Asked as bash only: `--` ends the options and the words after it are operands,
+    even one that looks like `-t`. (Since fix 4 the PowerShell reading of `cp` is asked
+    in bash too, so only a row it does not refuse tells the GNU reading apart.)"""
     home, workspace, litetui, _, plain = roots
     into = frozenset({deny_floor.COPY_INTO})
     for command, written in ((f"cp -- {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}/", True),
                              (f"cp -v -- {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}", True),
-                             (f"cp -T {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}", False)):
+                             (f"cp -T {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}", False),
+                             # fix 4 (G5 again): PowerShell's reading of `cp` is asked in bash too and takes `-Destination` for
+                             # its parameter; GNU, after `--`, takes it for a file name and the last operand for the folder.
+                             (f"cp -- -Destination {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}/", True)):
         target = deny_floor.jobs_write_target(command, workspace, home, shell="bash", name=OTHER_NAME, more=into)
         assert (target == litetui / OTHER_NAME) is written, command
 
