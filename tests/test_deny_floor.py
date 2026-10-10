@@ -2709,6 +2709,9 @@ FIX3_FORMS = [
     ("powershell", "cp {src}/x.json, {src}/NAME {root}"),
     ("powershell", "copy {src}/x.json, {src}/NAME {root}"),
     ("bash", "pwsh -NoProfile -c 'Copy-Item {src}/x.json, {src}/NAME {root}'"),
+    # GNU cp reads -Destination as junk and takes the last operand, so only the PowerShell
+    # reading of the nested part (its own shell, not the outer dialect) sees this one.
+    ("bash", "pwsh -NoProfile -c 'cp -Destination {root} {src}/NAME'"),
     # R12: a PowerShell statement or block around the copy, asked with NO shell (what the hook and the
     # owner rule pass): the part the splitter cuts out has the shell that was asked, not PowerShell.
     # Asked as powershell the head of the statement is `if`, `{`; no round saw those.
