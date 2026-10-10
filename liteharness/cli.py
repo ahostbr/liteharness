@@ -2928,7 +2928,7 @@ def _build_claude_cmd(
 
     bootstrap = (
         "MANDATORY FIRST STEPS: "
-        "1) Run /liteharness to load the harness skill. "
+        "1) Run /liteharness:ls-liteharness to load the harness skill. "
         "2) Register yourself: python -m liteharness.cli register --agent-id <YOUR-AGENT-ID> --cli claude-code --model <your-model>"
     )
     if name:
@@ -3063,7 +3063,7 @@ def _generate_bootstrap(
 
     lines.append("")
     lines.append("## Mandatory Startup")
-    lines.append("1) Run /liteharness to load the harness skill.")
+    lines.append("1) Run /liteharness:ls-liteharness to load the harness skill.")
     reg_line = f"2) Register: python -m liteharness.cli register --agent-id <YOUR-AGENT-ID> --cli claude-code --model {resolved_model or 'unknown'}"
     if name:
         reg_line += f' --name "{name}"'
