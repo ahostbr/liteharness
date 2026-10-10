@@ -1309,13 +1309,15 @@ _PS_ALIASES = {"pspath": "literalpath", "lp": "literalpath", "ea": "erroraction"
                "proga": "progressaction", "wi": "whatif", "cf": "confirm", "vb": "verbose", "db": "debug"}
 
 
-#: Names that exist only in PowerShell (fix 3, R12). `shell_commands` cuts the
-#: body of `if (...) { Copy-Item A B }` into a part whose head is `Copy-Item` but
-#: whose shell is the one asked (bash, cmd, none), so the PowerShell reading is
-#: asked for these names in every shell. `copy` and `move` are PowerShell's too
-#: wherever the part is not cmd's: bash has neither.
-_PS_ONLY = frozenset({"copy-item", "move-item", "cpi", "mi"})
-_PS_OR_CMD = frozenset({"copy", "move"})
+#: Names PowerShell's cmdlets are called by, read as PowerShell reads them in
+#: EVERY shell (fix 3 R12, fix 4 R18). `shell_commands` cuts the body of
+#: `if (...) { Copy-Item A B }` into a part whose head is `Copy-Item` but whose
+#: shell is the one asked (bash, cmd, none); behind a nested `pwsh -c '...'` the
+#: body is cut only in PowerShell's dialect, where the head is `{` or `if`, and
+#: the one part headed `copy` is the cmd dialect's. Which dialect surfaced the
+#: statement must not decide its meaning: `copy`, `move`, `cp`, `mv` are PowerShell's
+#: too wherever they are asked. The union only adds refusals (equal to round 0).
+_PS_ONLY = frozenset({"copy-item", "move-item", "cpi", "mi", "copy", "move", "cp", "mv"})
 
 
 def _meanings(shell, head) -> list[str]:
@@ -1326,7 +1328,7 @@ def _meanings(shell, head) -> list[str]:
     refusals; PATH is not predicted."""
     bare = head.removesuffix(".exe")
     found = ["gnu"] if bare in _GNU_INTO else []
-    if (shell == "powershell" and head in _PS_INTO) or head in _PS_ONLY or (shell != "cmd" and head in _PS_OR_CMD):
+    if head in _PS_ONLY or (shell == "powershell" and head in _PS_INTO):
         found.append("powershell")
     if (shell == "cmd" and bare in _CMD_INTO) or bare == "xcopy":
         found.append("cmd")

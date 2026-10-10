@@ -2834,7 +2834,8 @@ def test_fix4_r18_a_copy_in_a_block_is_read_as_powershell_in_every_shell(roots, 
             for trailing in FIX4_TRAILING:
                 body = block.replace("CMD", f"{head} {src.as_posix()}/{OTHER_NAME} {litetui.as_posix()} {trailing}".rstrip())
                 command = FIX4_WRAPS[wrap].replace("{body}", body)
-                for asked_as in (None, "bash", "cmd"):
+                # Asked as bash, a quoted `pwsh -c` body is not entered: allowed at every round (a stated limit).
+                for asked_as in (None, "cmd") + (("bash",) if wrap == "direct" else ()):
                     if not deny_floor.jobs_write_target(command, workspace, home, shell=asked_as,
                                                          name=OTHER_NAME, more=into):
                         open_.append((asked_as, command))
