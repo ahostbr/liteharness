@@ -2598,6 +2598,11 @@ FIX2_FORMS = [
     ("bash", "env - /usr/bin/cp {src}/NAME {root}/"),
     ("bash", "env -iu X /usr/bin/cp {src}/NAME {root}/"),
     ("bash", "timeout -vk 5 20 cp {src}/NAME {root}/"),
+    # R8: a wrapper's long option, by a prefix and with its value in the next word
+    ("bash", "env --chdir {root} cp {src}/NAME ."),
+    ("bash", "env --chd={root} cp {src}/NAME ."),
+    ("bash", "timeout --signal KILL 20 cp {src}/NAME {root}/"),
+    ("bash", "timeout --kill-after 5 20 cp {src}/NAME {root}/"),
     # R8: PowerShell parameters that take a value; cmd's concatenation and /-Y
     ("powershell", "Copy-Item {src}/* {root} -Exclude x.json"),
     ("powershell", "Copy-Item {src}/* {root} -Filter NAME"),
