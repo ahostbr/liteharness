@@ -2873,7 +2873,11 @@ FIX4_CONTINUED = [
     "move {src}/NAME `\n {root} -Force",
     "Copy-Item `\n {src}/NAME `\n {root}",
     "Copy-Item {src}/x.json, `\n {src}/NAME {root}",
+    "Copy-Item -Path {src}/NAME -Destination `\n {root}",   # fell out of the same change
 ]
+#: NOT closed (open at every round, stated limits): a CRLF (the splitter cuts the statement at
+#: the newline), a bare newline after a comma, the continuation inside a block, and bash's
+#: backslash-newline between `-t` and its value. No second mechanism was built for them.
 
 
 @pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
@@ -2890,6 +2894,32 @@ def test_fix4_r20_a_backtick_newline_between_the_words_of_a_copy(roots, template
             assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
             assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name,
                                                 more=into), (asked_as, command)
+
+
+@pytest.mark.parametrize("source", [
+    "\\/no-such-host/share/dir", "/\\no-such-host\\share\\dir", "'//no-such-host/share/dir'",
+    "\"//no-such-host/share/dir\"", "'\\\\no-such-host\\share\\dir'", "//no-such-host/share/dir",
+    "\\\\no-such-host\\share\\dir", "//?/UNC/no-such-host/share/dir", "\\/?/UNC/no-such-host/share/dir",
+])
+@pytest.mark.parametrize("head", ["cp -r {s} {dest}/", "cp -a {s} {dest}/", "cp -rT {s} {dest}",
+                                  "env cp -r {s} {dest}/", "xcopy {s} {dest} /E", "copy {s} {dest}"])
+def test_fix4_r21_any_spelling_windows_reads_as_a_network_folder_is_never_looked_at(roots, monkeypatch,
+                                                                                     source, head):
+    """R21: R13 skipped `//host/share` and `\\\\host\\share` only. Mixed separators and a quote left on
+    the word (cmd keeps single quotes) name the same host; none may reach a stat. CONTROL: R13's
+    control, a local folder source IS resolved."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    for asked_as in (None, "bash", "cmd", "powershell"):
+        deny_floor.jobs_write_target(head.format(s=source, dest=plain.as_posix()), workspace, home,
+                                     shell=asked_as, name=OTHER_NAME, more=deny_floor.MORE)
+    assert not [raw for raw in resolved
+                if raw.strip("'\"").replace("/", "\\").startswith("\\\\")], resolved
+    deny_floor.jobs_write_target(f"cp -r {plain.as_posix()} {litetui.as_posix()}/", workspace, home,
+                                 name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(plain.as_posix() in raw for raw in resolved), "CONTROL: a local folder source is resolved"
 
 
 def test_the_gnu_grammar_alone_in_bash(roots):

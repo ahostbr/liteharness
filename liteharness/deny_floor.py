@@ -1350,8 +1350,10 @@ def _comma_joined(args):
 def _ps_binding(args):
     """(destination, sources) as PowerShell binds Copy-Item's and Move-Item's words:
     a parameter's value is consumed by it; the first free positional is -Path, the
-    next -Destination; a comma array is split into its paths."""
-    args = _comma_joined(args)
+    next -Destination; a comma array is split into its paths. A backtick-newline
+    leaves an EMPTY word between two words of the copy (fix 4, R20): it is no
+    argument, so it is dropped before anything is bound."""
+    args = _comma_joined([word for word in args if word])
     named, positional, i = {"source": [], "dest": []}, [], 0
     while i < len(args):
         word = args[i]
@@ -1447,10 +1449,14 @@ def _tree_into(grammar, dest, sources, base, home, name, under, streams, *, no_t
     """A folder source's files landing in a protected folder, judged on disk. A
     source that begins with two slashes (a UNC or `\\\\?\\` path) is never looked at
     (fix 3, R13): the test would touch the network before the destination is
-    known, so a folder copied FROM there is a stated limit."""
+    known, so a folder copied FROM there is a stated limit. Windows reads either
+    slash as a separator and a quote left on the word (cmd keeps a single quote) is
+    no part of the path, so the test is made on the word with one layer of quotes
+    removed and the slashes unified (fix 4, R21)."""
     folder = None
     for source in sources:
-        if source.startswith(("\\\\", "//")):
+        bare = source[1:-1] if len(source) > 1 and source[0] == source[-1] and source[0] in "'\"" else source
+        if bare.replace("/", "\\").startswith("\\\\"):
             continue
         src = _resolve(source, base, home, streams=streams)
         if src is None or not src.is_dir() or not (src / name).exists():
