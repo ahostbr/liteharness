@@ -2455,6 +2455,8 @@ MORE_FORMS = [   # (class, command): {root} a data root, {src} a plain folder, N
     (deny_floor.COPY_INTO, "Copy-Item {src}/NAME -Destination {root}"),
     (deny_floor.COPY_INTO, "Copy-Item -Path {src}/NAME -Destination:{root}"),
     (deny_floor.COPY_INTO, "Copy-Item {src}/NAME -Dest {root}"),
+    (deny_floor.COPY_INTO, "Copy-Item -Dest {root} {src}/NAME"),       # the abbreviation, not last
+    (deny_floor.COPY_INTO, "Copy-Item -Path:{src}/NAME -Destination {root}"),
     (deny_floor.COPY_INTO, "Move-Item {src}/NAME {root}"),
     (deny_floor.COPY_INTO, "mi {src}/NAME {root}"),
     (deny_floor.COPY_INTO, "copy {src}/NAME {root} /Y"),
@@ -2543,6 +2545,19 @@ def test_more_names_seven_recognitions_and_defaults_to_none(roots):
     assert "[jobs-file]" in deny_floor.refusal(command, workspace, home, more=deny_floor.MORE)
 
 
+def test_refusal_hands_more_to_both_jobs_questions(roots, monkeypatch):
+    """refusal() passes `more` on to the Git question and the shell question
+    alike (each also asks a pathspec, so a verdict alone cannot show which did)."""
+    home, workspace, _, _, _ = roots
+    seen = []
+    for fn in ("jobs_git_refusal", "jobs_write_target"):
+        real = getattr(deny_floor, fn)
+        monkeypatch.setattr(deny_floor, fn, lambda *a, _real=real, _fn=fn, **k:
+                            seen.append((_fn, k.get("more"))) or _real(*a, **k))
+    deny_floor.refusal("echo x", workspace, home, more=deny_floor.MORE)
+    assert seen == [("jobs_git_refusal", deny_floor.MORE), ("jobs_write_target", deny_floor.MORE)]
+
+
 @pytest.mark.parametrize("template", JOBS_WRITES)
 def test_more_never_takes_a_refusal_away(roots, template):
     home, workspace, litetui, marked, plain = roots
@@ -2568,6 +2583,13 @@ def test_copy_into_a_folder_below_under(roots):
             [False, True, False, True], command
         assert _more_asked(command, workspace, home, OTHER_NAME, more=deny_floor.MORE) is None, \
             "without `under` a folder below `.agents` is not the data root"
+    # A folder that does not exist yet is a folder when the word ends in a
+    # separator (the copy makes it); without one the copy makes a FILE of that name.
+    new = (litetui / UNDER / "NewSeat").as_posix()
+    into = f"cp {plain.as_posix()}/{OTHER_NAME} {new}/"
+    assert _four_ways(into, workspace, home, deny_floor.COPY_INTO, OTHER_NAME, UNDER) == [False, True, False, True]
+    assert _more_asked(f"cp {plain.as_posix()}/{OTHER_NAME} {new}", workspace, home, OTHER_NAME, UNDER,
+                       deny_floor.MORE) is None
 
 
 def test_dollar_path_reaches_the_tool_path_and_the_delete_rules(roots):
@@ -2577,6 +2599,10 @@ def test_dollar_path_reaches_the_tool_path_and_the_delete_rules(roots):
     assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME) is None
     assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME,
                                     more=frozenset({deny_floor.DOLLAR_PATH}))
+    git = f'git checkout HEAD -- "{spelled}"'   # the Git question hands `more` on
+    assert deny_floor.jobs_git_refusal(git, workspace, home, name=OTHER_NAME) is None
+    assert deny_floor.jobs_git_refusal(git, workspace, home, name=OTHER_NAME,
+                                       more=frozenset({deny_floor.DOLLAR_PATH}))
     for command in (f'rm -rf "{home.as_posix()}::$INDEX_ALLOCATION"',
                     f'Remove-Item -Recurse "{home.as_posix()}:$I30:$INDEX_ALLOCATION"',
                     f'cd "{home.as_posix()}::$INDEX_ALLOCATION"; Remove-Item * -Recurse',
@@ -2631,6 +2657,16 @@ def test_pathspec_magic_names_the_file_from_the_repository_root(roots, monkeypat
     for left in (f"git checkout HEAD -- ':(icase){name}'", f"git checkout HEAD -- ':!{name}'",
                  f"git checkout HEAD -- ':(exclude){name}'", f"git diff -- :/{name}"):
         assert _more_asked(left, sub, home, name, more=deny_floor.MORE) is None, left
+    # An exclude names the file NOT written, even with top magic that would name
+    # the protected file. (From inside the root the default already refuses
+    # `':!NAME'`, an older over-block this keyword does not change.)
+    for left in (f"git checkout HEAD -- ':/!{name}'", f"git checkout HEAD -- ':/^{name}'",
+                 f"git checkout HEAD -- ':(top,exclude){name}'"):
+        assert _more_asked(left, sub, home, name, more=deny_floor.MORE) is None, left
+    # The Git question alone, as LiteTUI's rule and refusal() ask it first.
+    command = f"git checkout HEAD -- :/{name}"
+    assert deny_floor.jobs_git_refusal(command, sub, home, name=name) is None
+    assert deny_floor.jobs_git_refusal(command, sub, home, name=name, more=frozenset({deny_floor.PATHSPEC}))
 
 
 # ── the hook's COUNT-ONLY opt-in for the added recognitions (T0306-S) ──
