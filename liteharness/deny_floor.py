@@ -400,15 +400,12 @@ LINK_COPY = "link-copy"      # K: `cp -l DIR/NAME alias` makes a second name for
 PATHSPEC = "pathspec"        # N: `git checkout HEAD -- :/REL`, `:(top)REL`
 CALL_PATH = "call-path"      # E: `[IO.File]::WriteAllText('DIR/NAME','x')`
 MORE = frozenset({COPY_INTO, DOLLAR_PATH, SHORT_NAME, KEY_VALUE, LINK_COPY, PATHSPEC, CALL_PATH})
-#: A: heads that copy, move or link sources INTO a destination folder.
-_INTO_HEADS = frozenset({"cp", "copy", "copy-item", "cpi", "xcopy", "mv", "move", "move-item",
-                         "mi", "ln", "install", "rsync"})
 #: H: heads that write, move or delete the files they name (a finite list:
 #: resolving a word on disk is paid for these only).
 _WRITERS = frozenset({
     "rm", "del", "erase", "remove-item", "ri", "unlink", "shred", "truncate", "dd",
     "mv", "move", "move-item", "mi", "ren", "rename", "rename-item", "rni",
-    "cp", "copy", "copy-item", "cpi", "xcopy", "ln", "install", "rsync", "sed",
+    "cp", "copy", "copy-item", "cpi", "xcopy", "ln", "install", "sed",
     "set-content", "sc", "add-content", "ac", "clear-content", "clc", "out-file",
     "tee", "tee-object", "new-item", "ni",
 })
@@ -1060,6 +1057,8 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
             if CALL_PATH in more and re.search(r"[\\/]", words[0]):
                 # E: `(` ends a segment, so a .NET call's quoted path is the HEAD word of its own.
                 scan.insert(0, (None, words[0]))
+            # A command behind a wrapper head (`env cp ...`, `timeout 20 cp ...`), for A and H.
+            inner, inner_args, chdir = _unwrapped(words) if more else (head, args, None)
             for n, word in scan:
                 path = word
                 param = ""
@@ -1076,20 +1075,26 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
                     paths.append(magic)   # N, from the folder a `cd` moved to
                 # Literal paths retain spaces. Embedded interpreter code keeps
                 # the historical finite path scan (no inner-language execution).
+                # (raw, added): an added raw is one only `more` asks about.
                 raws = []
-                for path in paths:
+                for k, path in enumerate(paths):
                     for match in _jobs_word(name).finditer(path):
                         if match.end() == len(path) and match.start() >= 0:
-                            raws.append(path)
+                            raws.append((path, k > 0 or n is None))
                             continue
                         prefix = _PATH_TAIL.search(path[:match.start()]).group(0)
                         if prefix and prefix[-1] not in "\\/":
                             continue
-                        raws.append(prefix + name)
-                    if SHORT_NAME in more and head in _WRITERS and re.search(r"~\d", canonical_name(path)):
-                        raws.append(path)   # H: resolved on disk, an existing file's long name
-                for raw in raws:
-                    target = _resolve(dealias(raw), target_base, home, streams=streams)
+                        raws.append((prefix + name, k > 0 or n is None))
+                    if SHORT_NAME in more and inner in _WRITERS and re.search(r"~\d", canonical_name(path)):
+                        raws.append((path, True))   # H: resolved on disk, an existing file's long name
+                for raw, added in raws:
+                    try:
+                        target = _resolve(dealias(raw), target_base, home, streams=streams)
+                    except ValueError:   # a NUL: the default's own raws raise as before
+                        if added:
+                            continue
+                        raise
                     if not is_jobs_file(target, name, under):
                         continue
                     if head in _JOBS_COPIES:
@@ -1099,80 +1104,219 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
                         has_named_dest = any(a.lower().startswith("-destination") for a in args)
                         destination = named_dest or (not named_source and not has_named_dest and n == len(args) - 1)
                         # K: a linking copy of the file gives it a second name, written through later.
-                        linked = LINK_COPY in more and head == "cp" and any(
-                            a == "--link" or _CP_LINK.fullmatch(a) for a in args)
+                        linked = (LINK_COPY in more and dialect == "bash" and head == "cp"
+                                  and _gnu_options("cp", args)["link"])
                         if not destination and not linked:
                             continue
                     return target
-            if COPY_INTO in more and (target := _copied_into(head, args, target_base, home,
-                                                             name, under, streams)):
-                return target
+            if COPY_INTO in more:
+                copy_base = target_base
+                if chdir is not None:
+                    try:
+                        copy_base = _resolve(chdir, target_base, home, streams=streams)
+                    except ValueError:
+                        copy_base = None
+                if copy_base is not None and (target := _copied_into(
+                        dialect, inner, inner_args, copy_base, home, name, under, streams)):
+                    return target
     return None
 
 
-#: K: a cluster of GNU cp's short options holding `l` (`-l`, `-al`); PowerShell's
-#: `-Filter`, `-Include`, `-LiteralPath` hold letters cp has no option for.
-_CP_LINK = re.compile(r"-[abdfHiLnPpRrsuvxZ]*l[abdfHiLnPpRrsuvxZ]*")
-#: cmd's and robocopy's switches (`/Y`, `/MIR`, `/LEV:2`), which are not paths.
+#: Wrapper heads that run the command after their own words (T0306-S, fix 1),
+#: each with its options that take a value (GNU coreutils 8.32, sudo 1.9).
+#: `env` and `sudo` also take NAME=VALUE words; `timeout` takes a duration.
+_RUNNERS = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "command": set(),
+    "exec": {"-a"},
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+    "nohup": set(),
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "sudo": {"-u", "--user", "-g", "--group", "-C", "--close-from", "-D", "--chdir", "-h", "--host",
+             "-p", "--prompt", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U", "--other-user"},
+}
+#: The options that move the folder the wrapped command runs in.
+_CHDIRS = {("env", "-C"), ("env", "--chdir"), ("sudo", "-D"), ("sudo", "--chdir")}
+
+
+def _unwrapped(words: list[str]):
+    """(head, args, folder or None) of the command behind any wrapper heads.
+    `env -S STRING` (a command in one string) is not followed: nothing is left."""
+    chdir = None
+    while words:
+        head = words[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+        takes = _RUNNERS.get(head)
+        if takes is None or (head == "command" and words[1:2] in (["-v"], ["-V"])):
+            break
+        i = 1
+        while i < len(words):
+            word = words[i]
+            if word == "--":
+                i += 1
+                break
+            if head in ("env", "sudo") and re.fullmatch(r"[A-Za-z_]\w*=.*", word, re.S):
+                i += 1
+                continue
+            if not word.startswith("-") or word == "-":
+                break
+            option, eq, value = word.partition("=")
+            if option in takes and not eq:
+                value = words[i + 1] if i + 1 < len(words) else None
+                i += 2
+            else:
+                if not option.startswith("--") and option[:2] in takes and len(option) > 2:
+                    option, value = option[:2], word[2:]   # `-n5`, `-CDIR`
+                i += 1
+            if (head, option) in _CHDIRS:
+                chdir = value
+        if head == "timeout" and i < len(words):
+            i += 1   # the duration
+        words = words[i:]
+    if not words:
+        return "", [], chdir
+    return words[0].replace("\\", "/").rsplit("/", 1)[-1].lower(), words[1:], chdir
+
+
+#: A's GNU heads, from their `--help` in GNU coreutils 8.32 (Git for Windows):
+#: each long option and whether it takes a value ("" none, "=" required, "?"
+#: only as `--name=VALUE`), and the short options that take one.
+_GNU_INTO = {
+    "cp": ({"archive": "", "attributes-only": "", "backup": "?", "copy-contents": "", "force": "",
+            "interactive": "", "link": "", "dereference": "", "no-clobber": "", "no-dereference": "",
+            "preserve": "?", "no-preserve": "=", "parents": "", "recursive": "", "reflink": "?",
+            "remove-destination": "", "sparse": "=", "strip-trailing-slashes": "", "symbolic-link": "",
+            "suffix": "=", "target-directory": "=", "no-target-directory": "", "update": "", "verbose": "",
+            "one-file-system": "", "context": "?", "help": "", "version": ""}, "St"),
+    "mv": ({"backup": "?", "force": "", "interactive": "", "no-clobber": "", "strip-trailing-slashes": "",
+            "suffix": "=", "target-directory": "=", "no-target-directory": "", "update": "", "verbose": "",
+            "context": "", "help": "", "version": ""}, "St"),
+    "ln": ({"backup": "?", "directory": "", "force": "", "interactive": "", "logical": "",
+            "no-dereference": "", "physical": "", "relative": "", "symbolic": "", "suffix": "=",
+            "target-directory": "=", "no-target-directory": "", "verbose": "", "help": "", "version": ""}, "St"),
+    "install": ({"backup": "?", "compare": "", "directory": "", "group": "=", "mode": "=", "owner": "=",
+                 "preserve-timestamps": "", "strip": "", "strip-program": "=", "suffix": "=",
+                 "target-directory": "=", "no-target-directory": "", "verbose": "", "preserve-context": "",
+                 "context": "?", "help": "", "version": ""}, "gmoSt"),
+}
+#: The same options by their short letter.
+_GNU_SHORT = {"t": "target-directory", "T": "no-target-directory", "l": "link", "d": "directory"}
+
+
+def _gnu_options(head: str, args: list[str]) -> dict:
+    """GNU getopt's reading of a copy head's words: options anywhere before `--`,
+    a short cluster with an attached value (`-tDIR`, `-vtDIR`), a long option by
+    any unambiguous prefix (`--target=DIR`, `--li`), its value after `=` or as the
+    next word. An unknown or ambiguous option is skipped (GNU would stop: nothing
+    is written)."""
+    longs, short_values = _GNU_INTO[head]
+    seen = {"target-directory": None, "no-target-directory": False, "link": False, "directory": False}
+    operands, i = [], 0
+
+    def apply(option, value):
+        if option == "target-directory":
+            seen[option] = value
+        elif option in seen and (option != "link" or head == "cp") and (option != "directory" or head == "install"):
+            seen[option] = True
+
+    while i < len(args):
+        word = args[i]
+        i += 1
+        if word == "--":
+            operands += args[i:]
+            break
+        if word.startswith("--"):
+            given, eq, value = word[2:].partition("=")
+            names = [n for n in longs if n == given] or [n for n in longs if n.startswith(given)]
+            if len(names) != 1:
+                continue
+            if longs[names[0]] == "=" and not eq:
+                value = args[i] if i < len(args) else None
+                i += 1
+            apply(names[0], value)
+        elif word.startswith("-") and word != "-":
+            for j, letter in enumerate(word[1:], 2):
+                if letter in short_values:
+                    value = word[j:] or (args[i] if i < len(args) else None)
+                    i += not word[j:]
+                    apply(_GNU_SHORT.get(letter, letter), value)
+                    break
+                apply(_GNU_SHORT.get(letter, letter), None)
+        else:
+            operands.append(word)
+    return {"target": seen["target-directory"], "no_target": seen["no-target-directory"],
+            "link": seen["link"], "directory": seen["directory"], "operands": operands}
+
+
+#: A's PowerShell heads (Copy-Item, Move-Item and their aliases) and cmd's.
+_PS_INTO = frozenset({"copy-item", "cpi", "copy", "cp", "move-item", "mi", "move", "mv"})
+_CMD_INTO = frozenset({"copy", "xcopy", "move"})
+#: cmd's switches (`/Y`, `/V`), which are not paths.
 _SWITCH = re.compile(r"/[A-Za-z?][\w:-]*\Z")
 
 
-def _copied_into(head, args, base, home, name, under, streams) -> Path | None:
+def _copied_into(dialect, head, args, base, home, name, under, streams) -> Path | None:
     """A (T0306-S): the protected file a copy, move or link writes when its
     destination is a FOLDER: that folder / the source's last segment (a source
-    glob counts when it matches the name).
+    glob counts when it matches the name). The grammar is the dialect's:
 
-    The destination is `-t DIR`, `--target-directory[=]DIR`, PowerShell's
-    `-Destination[:]DIR` (3+ letters), else the last word that is not an option;
-    `ln` with one name links into the current folder. It is a folder when it
-    ends in a separator or exists as one. robocopy (M) names it second and the
-    files after it: `robocopy SRC DIR NAME`."""
+    - bash, `cp mv ln install`: GNU getopt (_gnu_options); `-t`/`--target-directory`
+      names the folder, else the last operand; `-T` means no folder; `install -d`
+      copies nothing; `ln` with one operand links into the current folder.
+    - powershell, Copy-Item and Move-Item: `-Destination[:]DIR` (3+ letters),
+      else the last word that is not a parameter; a comma array is split.
+    - cmd, `copy xcopy move`: the last word that is not a switch.
+
+    The sources' names are tested first; only a match resolves the folder (a
+    disk look). Any error resolving it is no answer: only `more` asks this."""
     head = head.removesuffix(".exe")
-    switches = head in {"copy", "xcopy", "move", "robocopy"}
-    if head == "robocopy":
-        words = []
-        for word in args:
-            if _SWITCH.fullmatch(word):
-                break   # the file list ends at the first switch (`/XF NAME` excludes)
-            words.append(word)
-        if len(words) < 3:
+    if dialect == "bash" and head in _GNU_INTO:
+        gnu = _gnu_options(head, args)
+        operands = gnu["operands"]
+        if gnu["no_target"] or gnu["directory"]:
             return None
-        dest, sources, into = words[1], words[2:], True
-    elif head in _INTO_HEADS:
+        if gnu["target"] is not None:
+            dest, sources = gnu["target"], operands
+        elif len(operands) >= 2:
+            dest, sources = operands[-1], operands[:-1]
+        else:
+            dest, sources = (".", operands) if head == "ln" and operands else (None, [])
+    elif dialect in ("powershell", "cmd") and head in (_PS_INTO if dialect == "powershell" else _CMD_INTO):
         dest, sources, i = None, [], 0
         while i < len(args):
             word, low = args[i], args[i].lower()
             option, colon, _ = low.partition(":")
-            if low in ("-t", "--target-directory") or (len(low) >= 4 and "-destination".startswith(low)):
+            if dialect == "cmd":
+                if not _SWITCH.fullmatch(word):
+                    sources.append(word)
+            elif len(low) >= 4 and "-destination".startswith(low):
                 dest = args[i + 1] if i + 1 < len(args) else None
-                i += 2
-                continue
-            if low.startswith("--target-directory="):
-                dest = word.partition("=")[2]
+                i += 1
             elif colon and len(option) >= 4 and "-destination".startswith(option):
                 dest = word.partition(":")[2]
             elif low.startswith("-") and colon:
                 sources.append(word.partition(":")[2])   # -Path:x
-            elif not low.startswith("-") and not (switches and _SWITCH.fullmatch(word)):
+            elif not low.startswith("-"):
                 sources.append(word)
             i += 1
         if dest is None:
-            dest = "." if head == "ln" and len(sources) == 1 else (sources.pop() if sources else None)
-        into = False
+            dest = sources.pop() if sources else None
+        if dialect == "powershell":
+            sources = [piece for source in sources for piece in source.split(",")]
     else:
         return None
-    if dest is None:
-        return None
-    folder = _resolve(dest, base, home, streams=streams)   # not dealias: it would cut `.` to nothing
-    if folder is None or not (into or dest.endswith(("/", "\\")) or folder.is_dir()):
-        return None
     wanted = name.lower()
-    for source in sources:
-        last = canonical_name(source)
-        if last == wanted or (re.search(r"[*?[]", last) and fnmatch.fnmatchcase(wanted, last)):
-            if is_jobs_file(folder / name, name, under):
-                return folder / name
-    return None
+    if dest is None or not any(
+            last == wanted or (re.search(r"[*?[]", last) and fnmatch.fnmatchcase(wanted, last))
+            for last in (canonical_name(source) for source in sources)):
+        return None
+    try:
+        folder = _resolve(dest, base, home, streams=streams)   # not dealias: it would cut `.` to nothing
+        if folder is None or not (dest.endswith(("/", "\\")) or folder.is_dir()):
+            return None
+        return folder / name if is_jobs_file(folder / name, name, under) else None
+    except (ValueError, OSError):
+        return None
 
 
 @_path_refusal
@@ -2072,7 +2216,8 @@ def _resolve(raw: str, base: Path | None, home: Path, *, streams: bool = False) 
         if low == name or low.startswith(name + "/"):
             text = str(home) + text[len(name):]
             break
-    if streams and "$" in text:
+    cut = streams and "$" in text
+    if cut:
         drive = text[:2] if re.match(r"[A-Za-z]:", text) else ""
         text = drive + "".join(part.split(":", 1)[0] for part in re.split(r"([\\/])", text[len(drive):]))
     if re.search(r"\$|%\w+%", text):

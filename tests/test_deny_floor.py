@@ -2467,9 +2467,35 @@ MORE_FORMS = [   # (class, command): {root} a data root, {src} a plain folder, N
     (deny_floor.COPY_INTO, "ln -s {src}/NAME {root}/"),
     (deny_floor.COPY_INTO, "cd {root} && ln -s {src}/NAME"),
     (deny_floor.COPY_INTO, "install -m 644 {src}/NAME {root}/"),
-    (deny_floor.COPY_INTO, "rsync -a {src}/NAME {root}/"),          # M, a copy head
-    (deny_floor.COPY_INTO, "robocopy {src} {root} NAME"),           # M, a copy head
-    (deny_floor.COPY_INTO, "robocopy {src} {root} NAME /R:0"),
+    # fix 1: GNU getopt's grammar, not a list of spellings
+    (deny_floor.COPY_INTO, "cp --target={root} {src}/NAME"),         # a prefix of --target-directory
+    (deny_floor.COPY_INTO, "cp --target {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp --t={root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "mv --targ={root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp -t{root} {src}/NAME"),                # attached
+    (deny_floor.COPY_INTO, "cp -vt{root} {src}/NAME"),               # in a cluster
+    (deny_floor.COPY_INTO, "cp -vt {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "ln -st {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "install -t {root} -m 644 {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp {src}/NAME -t {root}"),               # an option after the operands
+    (deny_floor.COPY_INTO, "cp -- {src}/NAME {root}/"),
+    # fix 1: a wrapper head in front
+    (deny_floor.COPY_INTO, "env cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "env -i A=1 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "env -C {root} cp {src}/NAME ."),
+    (deny_floor.COPY_INTO, "command cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "exec cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "nice -n 5 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "timeout 20 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "timeout -s KILL 20s cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "nohup cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "stdbuf -o0 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "sudo -u someone cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "sudo -D {root} cp {src}/NAME ."),
+    (deny_floor.COPY_INTO, "timeout 20 env cp {src}/NAME {root}/"),
+    # fix 1: a PowerShell comma array, the name first
+    (deny_floor.COPY_INTO, "Copy-Item {src}/NAME,{src}/x.json {root}"),
+    (deny_floor.COPY_INTO, "Copy-Item -Path {src}/x.json,{src}/NAME -Destination {root}"),
     # G: a stream suffix on a FOLDER of the path word
     (deny_floor.DOLLAR_PATH, 'echo x > "{root}::$INDEX_ALLOCATION/NAME"'),
     (deny_floor.DOLLAR_PATH, 'rm "{root}:$I30:$INDEX_ALLOCATION/NAME"'),
@@ -2483,6 +2509,8 @@ MORE_FORMS = [   # (class, command): {root} a data root, {src} a plain folder, N
     (deny_floor.LINK_COPY, "cp -l {root}/NAME {src}/alias"),
     (deny_floor.LINK_COPY, "cp --link {root}/NAME {src}/alias"),
     (deny_floor.LINK_COPY, "cp -fl {root}/NAME {src}/alias"),
+    (deny_floor.LINK_COPY, "cp --li {root}/NAME {src}/alias"),        # fix 1: prefixes of --link
+    (deny_floor.LINK_COPY, "cp --lin {root}/NAME {src}/alias"),
     # E: the path inside a .NET call is its segment's head word
     (deny_floor.CALL_PATH, "[IO.File]::WriteAllText('{root}/NAME','x')"),
     (deny_floor.CALL_PATH, '[System.IO.File]::Delete("{root}/NAME")'),
@@ -2495,6 +2523,11 @@ MORE_CONTROLS = [   # no class and no combination refuses these
     "cp {src}/other.json {root}/", "cp {src}/NAME.bak {root}/", "cp {src}/NAME {src}/sub/",
     "cp {src}/NAME {root}/renamed.json", "cp {root}/NAME {src}/", "mv {root}/other.json {src}/",
     "robocopy {src} {root} /XF NAME", "robocopy {src} {root}",
+    "robocopy {src} {root} NAME", "rsync {src}/NAME {root}/",        # M forms left to S2 (fix 1)
+    "ln -T {src}/NAME {root}", "install -d {root} {src}/NAME",       # no target folder; dirs only
+    "command -v cp {src}/NAME {root}/", "env -S 'cp {src}/NAME {root}/'",   # not a run; a string
+    "cp -S .bak {src}/x.json {root}/", "cp --suffix=NAME {src}/x.json {root}/",   # option values
+    "Copy-Item {src}/x.json,{src}/y.json {root}",
     'echo x > "{root}/$x/NAME"', 'echo x > "{src}::$INDEX_ALLOCATION/NAME"',
     "dd if={root}/NAME of={src}/copy", "dd if={root}/NAME",
     "cp {root}/NAME {src}/backup", "cp -r {root}/NAME {src}/backup",
@@ -2556,6 +2589,41 @@ def test_refusal_hands_more_to_both_jobs_questions(roots, monkeypatch):
                             seen.append((_fn, k.get("more"))) or _real(*a, **k))
     deny_floor.refusal("echo x", workspace, home, more=deny_floor.MORE)
     assert seen == [("jobs_git_refusal", deny_floor.MORE), ("jobs_write_target", deny_floor.MORE)]
+
+
+NUL_MORE_ONLY = [   # a NUL in a word only an added recognition reads (fix 1, R3)
+    "cp {src}/NAME {root}\x00/", "cp a b\x00", "Copy-Item {src}/NAME -Destination {root}\x00",
+    'echo x > "{root}::$INDEX\x00/NAME"', "rm {root}/SETTIN~1\x00.JSO", "dd of={root}/x\x00/NAME",
+    "git checkout HEAD -- :/x\x00/NAME", "[IO.File]::Delete('{root}/x\x00/NAME')",
+]
+
+
+@pytest.mark.parametrize("template", NUL_MORE_ONLY)
+def test_a_nul_only_more_reads_is_no_answer_and_never_an_error(roots, template):
+    """`more` may only add a refusal: where the default answers, `more` answers the
+    same or refuses; it never raises instead (R3: `cp a b<NUL>; echo x > FILE`)."""
+    home, workspace, litetui, _, plain = roots
+
+    def answer(ask):
+        try:
+            return ("answer", bool(ask()))
+        except ValueError:
+            return ("raised", None)
+
+    asked = 0
+    for name in (SCHEDULE, OTHER_NAME):
+        command = template.format(src=plain.as_posix(), root=litetui.as_posix()).replace("NAME", name)
+        for text in (command, f"{command} ; echo x > {litetui.as_posix()}/{name}"):
+            for ask in (lambda more: _more_asked(text, workspace, home, name, more=more),
+                        lambda more: deny_floor.refusal(text, workspace, home, more=more)):
+                default = answer(lambda: ask(frozenset()))
+                if default[0] == "raised":
+                    continue   # the base's own exception, unchanged
+                asked += 1
+                with_more = answer(lambda: ask(deny_floor.MORE))
+                assert with_more[0] == "answer", (text, "raised where the default answered")
+                assert with_more[1] or not default[1], (text, "refuse -> allow")
+    assert asked, "every form raised at the default: the row tests nothing"
 
 
 @pytest.mark.parametrize("template", JOBS_WRITES)
@@ -2704,7 +2772,7 @@ def test_count_only_is_on_for_one_value_only(counted, monkeypatch, value):
 
 
 @pytest.mark.parametrize("template", [
-    "cp {src}/jobs.json {root}/", "robocopy {src} {root} jobs.json", "dd if=/dev/null of={root}/jobs.json",
+    "cp {src}/jobs.json {root}/", "cp -t{root} {src}/jobs.json", "dd if=/dev/null of={root}/jobs.json",
     "cp -l {root}/jobs.json {src}/alias", "[IO.File]::WriteAllText('{root}/jobs.json','x')",
     'echo x > "{root}::$INDEX_ALLOCATION/jobs.json"', 'rm -rf "{home}::$INDEX_ALLOCATION"',
 ])
