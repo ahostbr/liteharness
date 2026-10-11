@@ -28,7 +28,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import occurrences
+from . import config, occurrences
 
 SCHEDULES_PATH = Path.home() / ".litesuite" / "agent" / "config" / "schedules.json"
 
@@ -74,6 +74,82 @@ def slot_for_daily_cron(expression: str, now: datetime) -> str | None:
     if fire > now:
         fire -= timedelta(days=1)
     return fire.strftime("%Y-%m-%dT%H:%M")
+
+
+# What the job's own model may look like. The app runner passes `action.model` to claude as
+# written, so the tick does too. An allowlist, because claude may be a .cmd shim on Windows,
+# where cmd.exe reads & | ; ^ % and friends as command syntax even inside an argv list.
+# Covers aliases (sonnet[1m], opusplan), full ids and provider-prefixed ids.
+_SAFE_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]*")
+
+
+def _own_text(action: dict, key: str) -> str | None:
+    value = action.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SystemExit(f"job {key} must be a string, got {value!r}.")
+    return value.strip() or None
+
+
+def _require_readable_config() -> None:
+    """A config file that exists but cannot be parsed is an error here, not "nothing
+    configured": `config.load()` reads it as {}, which would launch claude unpinned."""
+    path = config.CONFIG_PATH
+    if not path.exists():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"{path} exists but cannot be read ({exc.strerror or type(exc).__name__}); "
+                         "spawn_default_model / spawn_default_effort cannot be resolved.")
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise SystemExit(f"{path} exists but cannot be read as JSON ({exc}); "
+                         "spawn_default_model / spawn_default_effort cannot be resolved.")
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} must hold a JSON object (spawn_default_model lives there), "
+                         f"got {type(data).__name__}.")
+
+
+def _model_flags(action: dict) -> tuple[list[str], str | None]:
+    """(`--model` / `--effort` flags, note) for the headless claude.
+
+    The job's own model is passed as written after a plain safety check (the app runner does
+    the same); the configured spawn default (T0471) goes through the strict resolver
+    `liteharness spawn` uses, and is read only for a field the job leaves unset.
+    `action["effort"]` is a tick-only extension, validated against the spawn efforts.
+    The note is set when no model is pinned anywhere.
+
+    Raises SystemExit on a bad value; the caller refuses the tick rather than start claude
+    unpinned."""
+    from .cli import _SPAWN_EFFORTS, _spawn_defaults, _validate_model_id
+
+    model, effort = _own_text(action, "model"), _own_text(action, "effort")
+    default_model = default_effort = None
+    if model is None or effort is None:
+        _require_readable_config()
+        default_model, default_effort = _spawn_defaults()
+
+    flags: list[str] = []
+    note = None
+    if model is not None:
+        if not _SAFE_MODEL_RE.fullmatch(model):
+            raise SystemExit(f"job model {model!r} must start with a letter or digit and use "
+                             "only letters, digits and . _ : / @ + [ ] -")
+        flags += ["--model", model]
+    elif default_model:
+        flags += ["--model", _validate_model_id(default_model)]
+    else:
+        note = ("no model on the job and no spawn_default_model in the harness config: "
+                "claude will boot the model in its own settings.json")
+    effort = effort or default_effort
+    if effort:
+        if effort not in _SPAWN_EFFORTS:
+            raise SystemExit(f"Unknown effort: {effort!r}. Use one of: {', '.join(_SPAWN_EFFORTS)}.")
+        flags += ["--effort", effort]
+    return flags, note
 
 
 def run_tick(
@@ -129,10 +205,29 @@ def run_tick(
 
         action = job.get("action") or {}
         workdir = action.get("workdir") or str(Path.home())
-        argv = exec_argv or [
-            "claude", "-p", action.get("prompt", "/ls-librarian"),
-            "--permission-mode", "bypassPermissions",
-        ]
+        note = None
+        if exec_argv:
+            argv = exec_argv
+        else:
+            try:
+                flags, note = _model_flags(action)
+            except (SystemExit, Exception) as exc:
+                # A bad model or effort never falls back to an unpinned launch. The slot
+                # completes as failed, the same as a spawn that could not start; the ledger
+                # keeps the first line, stderr the whole message.
+                message = str(exc.code if isinstance(exc, SystemExit) else exc)
+                print(f"[librarian-tick] spawn-failed: {message} — claude was not started",
+                      file=sys.stderr)
+                first_line = (message.splitlines() or [""])[0]
+                occurrences.complete(conn, job_id, slot, owner,
+                                     f"spawn-failed: {first_line}", db_path=db)
+                return 1
+            if note:
+                print(f"[librarian-tick] Note: {note}.", file=sys.stderr)
+            argv = [
+                "claude", "-p", action.get("prompt", "/ls-librarian"),
+                "--permission-mode", "bypassPermissions", *flags,
+            ]
 
         stop = threading.Event()
 
@@ -152,6 +247,8 @@ def run_tick(
         try:
             proc = subprocess.run(argv, cwd=workdir)
             outcome = "success" if proc.returncode == 0 else f"exit-{proc.returncode}"
+            if note and proc.returncode == 0:
+                outcome = f"success ({note})"
         except FileNotFoundError as exc:
             outcome = f"spawn-failed: {exc}"
             proc = None
