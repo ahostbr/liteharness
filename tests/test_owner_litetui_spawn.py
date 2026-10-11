@@ -1,4 +1,6 @@
 """Owner launches use LiteTUI's memory mode, never a synthesized charter prompt."""
+import json
+import os
 import subprocess
 from unittest.mock import Mock
 
@@ -147,7 +149,7 @@ def test_held_title_refuses_with_successor_advice(seat, capsys):
     assert_refused(seat, capsys, "--takeover")
 
 
-def test_takeover_allows_successor_without_closing_old_seat(seat):
+def test_takeover_allows_saved_name_successor_without_registry_holder(seat):
     kwargs, bridge, place, _, _ = seat
     agent_names.resolve_name.return_value = {
         "name": "Alpha", "agent_id": OLD_ID, "convo_id": AGENT_ID, "cwd": kwargs["cwd"],
@@ -179,7 +181,91 @@ def test_owner_still_passes_the_fleet_policy_gate(seat, capsys):
 def test_owner_help_explains_memory_and_successor_identity():
     descriptions = {flag: description for flag, _, _, description in cli.SPAWN_FLAGS}
     assert "litetui" in descriptions["--owner"]
-    for text in ("--takeover", "old", "id", "NAME"):
+    for text in ("--takeover", "old", "id", "NAME", "live or uninspectable"):
         assert text in descriptions["--owner"]
     for text in ("absolute", "git", "SOUL.md", "DOMAIN.md", "NOW.md"):
         assert text in descriptions["--memory"]
+
+
+@pytest.mark.parametrize("takeover", [False, True])
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("existing_home", [False, True])
+def test_live_owner_refuses_before_resolution_and_preserves_state(
+    seat, capsys, takeover, indexed, existing_home
+):
+    kwargs, bridge, place, data, root = seat
+    registry = root / "agents"
+    registry.mkdir(parents=True)
+    presence = registry / f"{OLD_ID}.json"
+    presence.write_text(json.dumps({"agent_id": OLD_ID, "name": "aLPHa",
+                                    "session_pid": os.getpid()}), encoding="utf-8")
+    # Unrelated user-owned content must survive even when the proposed home exists.
+    home = data / ".agents" / "Alpha"
+    if existing_home:
+        home.mkdir(parents=True)
+        (home / "notes.md").write_text("user edits\n", encoding="utf-8")
+    before = presence.read_bytes()
+    if indexed:
+        agent_names.resolve_name.return_value = {
+            "name": "Alpha", "agent_id": OLD_ID, "convo_id": AGENT_ID, "cwd": kwargs["cwd"],
+        }
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_spawn(**kwargs, takeover=takeover)
+    assert exc.value.code == 2
+    output = capsys.readouterr().out
+    assert "held by another live owner" in output and "Nothing was spawned." in output
+    bridge.assert_not_called()
+    place.assert_not_called()
+    assert presence.read_bytes() == before
+    if existing_home:
+        assert sorted(p.name for p in home.iterdir()) == ["notes.md"]
+        assert (home / "notes.md").read_text(encoding="utf-8") == "user edits\n"
+    else:
+        assert not (data / ".agents").exists(), "refused attempt must not leave a stub"
+
+
+def test_uninspectable_owner_refuses_before_resolution(seat, capsys):
+    kwargs, bridge, place, data, root = seat
+    registry = root / "agents"
+    registry.mkdir(parents=True)
+    presence = registry / f"{OLD_ID}.json"
+    presence.write_text(json.dumps({"agent_id": OLD_ID, "name": "Alpha"}), encoding="utf-8")
+    before = presence.read_bytes()
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_spawn(**kwargs, takeover=True)
+    assert exc.value.code == 2
+    assert "inspectable owning PID" in capsys.readouterr().out
+    bridge.assert_not_called()
+    place.assert_not_called()
+    assert not (data / ".agents").exists() and presence.read_bytes() == before
+
+
+def test_dead_owner_saved_name_allows_explicit_successor(seat, monkeypatch):
+    from liteharness import strict_registration
+    kwargs, bridge, place, data, root = seat
+    registry = root / "agents"
+    registry.mkdir(parents=True)
+    presence = registry / f"{OLD_ID}.json"
+    presence.write_text(json.dumps({"agent_id": OLD_ID, "name": "Alpha", "session_pid": 123}),
+                        encoding="utf-8")
+    before = presence.read_bytes()
+    monkeypatch.setattr(strict_registration, "pid_alive", lambda _: False)
+    agent_names.resolve_name.return_value = {
+        "name": "Alpha", "agent_id": OLD_ID, "convo_id": AGENT_ID, "cwd": kwargs["cwd"],
+    }
+    cli.cmd_spawn(**kwargs, takeover=True)
+    assert bridge.call_count == 1 and place.call_count == 1
+    assert not (data / ".agents").exists() and presence.read_bytes() == before
+
+
+def test_unrelated_live_title_does_not_block_owner(seat):
+    kwargs, bridge, place, _, root = seat
+    registry = root / "agents"
+    registry.mkdir(parents=True)
+    presence = registry / f"{OLD_ID}.json"
+    presence.write_text(json.dumps({"agent_id": OLD_ID, "name": "Beta",
+                                    "session_pid": os.getpid()}), encoding="utf-8")
+    before = presence.read_bytes()
+    cli.cmd_spawn(**kwargs)
+    assert bridge.call_count == 1 and place.call_count == 1
+    assert presence.read_bytes() == before
