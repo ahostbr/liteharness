@@ -13,6 +13,9 @@ read only for a field the job leaves unset, and a config file that exists but ca
 is an error, never "nothing configured".
 """
 import json
+import sqlite3
+import sys
+import threading
 import types
 from datetime import datetime
 
@@ -253,7 +256,7 @@ def test_a_pinned_launch_records_a_plain_success(rig, capsys):
 def test_a_failing_unpinned_run_is_not_recorded_as_a_success(rig):
     rig.exit_code[0] = 1
     assert rig.tick() == 1
-    assert rig.ledger()["outcome"] == "exit-1"
+    assert rig.ledger()["outcome"] == "exit-1 (unpinned)"
 
 
 @pytest.mark.parametrize("blank",["", "   ", "\t"])
@@ -300,3 +303,160 @@ def test_a_job_that_pins_only_the_model_takes_the_effort_from_the_default(rig):
     rig.write_job(model="opusplan")
     assert rig.tick() == 0
     assert rig.launches == [BARE + ["--model", "opusplan", "--effort", "high"]]
+
+
+# ── T0486 N1: the broad except around _model_flags catches Exception, never an interrupt ────────
+
+def _raise(exc):
+    def raiser(_action):
+        raise exc
+    return raiser
+
+
+def test_an_unexpected_exception_from_model_flags_fails_the_slot_and_starts_nothing(
+        rig, monkeypatch, capsys):
+    monkeypatch.setattr(librarian_tick, "_model_flags", _raise(RuntimeError("boom")))
+    assert rig.tick() == 1
+    assert rig.launches == [], "claude was started although the model flags could not be built"
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and "spawn-failed" in err, err
+    row = rig.ledger()
+    assert row["completed_at"] and row["outcome"].startswith("spawn-failed"), row
+
+
+def test_a_failed_lazy_import_in_model_flags_fails_the_slot_and_starts_nothing(rig, monkeypatch):
+    monkeypatch.setitem(sys.modules, "liteharness.cli", None)  # `from .cli import ...` now raises
+    assert rig.tick() == 1
+    assert rig.launches == []
+    row = rig.ledger()
+    assert row["completed_at"] and row["outcome"].startswith("spawn-failed"), row
+
+
+def test_a_keyboard_interrupt_from_model_flags_is_not_swallowed(rig, monkeypatch):
+    monkeypatch.setattr(librarian_tick, "_model_flags", _raise(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        rig.tick()
+    assert rig.launches == []
+
+
+# ── T0486 N2: the allowlist's first character is a letter or digit, ASCII only ────────────────
+
+@pytest.mark.parametrize("model", ["_x", "éa", "Éa", "٣a", ".x", "/x", "[x]", "@x", ":x", "+x", "-x"])
+def test_a_model_may_not_start_with_anything_but_an_ascii_letter_or_digit(rig, model):
+    rig.write_job(model=model)
+    assert rig.tick() == 1
+    assert rig.launches == []
+    assert rig.ledger()["outcome"].startswith("spawn-failed")
+
+
+@pytest.mark.parametrize("model", ["x", "9", "9a", "A", "a_b", "a.b"])
+def test_a_model_starting_with_an_ascii_letter_or_digit_is_accepted_as_written(rig, model):
+    rig.write_job(model=model)
+    assert rig.tick() == 0
+    assert rig.launches == [BARE + ["--model", model]]
+
+
+# ── T0486 N3: the recorded failure says what failed, never an empty text or "None" ────────────
+
+def test_an_unexpected_exception_is_recorded_with_its_type(rig, monkeypatch, capsys):
+    monkeypatch.setattr(librarian_tick, "_model_flags", _raise(RuntimeError("boom")))
+    assert rig.tick() == 1
+    assert rig.ledger()["outcome"] == "spawn-failed: RuntimeError: boom"
+    assert "spawn-failed: RuntimeError: boom" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("exc", [RuntimeError(), RuntimeError(""), RuntimeError("  \n "), ValueError()])
+def test_an_exception_without_a_message_is_recorded_as_its_type(rig, monkeypatch, exc):
+    monkeypatch.setattr(librarian_tick, "_model_flags", _raise(exc))
+    assert rig.tick() == 1
+    assert rig.ledger()["outcome"] == f"spawn-failed: {type(exc).__name__}"
+
+
+@pytest.mark.parametrize("exit_args", [(), (None,), ("",), ("  ",)])
+def test_a_refusal_without_a_message_is_recorded_as_such(rig, monkeypatch, capsys, exit_args):
+    monkeypatch.setattr(librarian_tick, "_model_flags", _raise(SystemExit(*exit_args)))
+    assert rig.tick() == 1
+    assert rig.ledger()["outcome"] == "spawn-failed: refused without a message"
+    err = capsys.readouterr().err
+    assert "spawn-failed: refused without a message" in err and "None" not in err, err
+
+
+def test_a_multi_line_unexpected_exception_is_one_line_in_the_ledger_and_whole_on_stderr(
+        rig, monkeypatch, capsys):
+    monkeypatch.setattr(librarian_tick, "_model_flags", _raise(RuntimeError("first\nsecond")))
+    assert rig.tick() == 1
+    assert rig.ledger()["outcome"] == "spawn-failed: RuntimeError: first"
+    assert "second" in capsys.readouterr().err
+
+
+# ── T0486 N5: a non-zero exit says whether the run was pinned ─────────────────────────────────
+
+def test_a_failing_pinned_run_records_a_plain_exit_code(rig):
+    rig.write_config(spawn_default_model="claude-sonnet-5-5")
+    rig.exit_code[0] = 3
+    assert rig.tick() == 1
+    assert rig.ledger()["outcome"] == "exit-3"
+
+
+def test_a_failing_unpinned_run_records_the_exit_code_and_that_it_was_unpinned(rig, capsys):
+    rig.exit_code[0] = 3
+    assert rig.tick() == 1
+    outcome = rig.ledger()["outcome"]
+    assert outcome == "exit-3 (unpinned)" and "\n" not in outcome, outcome
+    assert "completed: exit-3 (unpinned)" in capsys.readouterr().out
+
+
+# ── T0486 N6: any OSError from starting claude completes the slot, with nothing left running ───
+
+def _refuse_to_start(monkeypatch, exc):
+    def fake_run(argv, **_kw):
+        raise exc
+    monkeypatch.setattr(librarian_tick.subprocess, "run", fake_run)
+
+
+def _track_ledger_connections(monkeypatch):
+    opened: list[sqlite3.Connection] = []
+    real = occurrences.open_ledger
+
+    def tracking(*a, **kw):
+        conn = real(*a, **kw)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(occurrences, "open_ledger", tracking)
+    return opened
+
+
+@pytest.mark.parametrize("exc, text", [
+    (PermissionError(13, "Permission denied"), "spawn-failed: PermissionError: "),
+    (OSError(193, "%1 is not a valid Win32 application"), "spawn-failed: OSError: "),
+    (FileNotFoundError(2, "No such file or directory"), "spawn-failed: FileNotFoundError: "),
+    (OSError("first\nsecond"), "spawn-failed: OSError: first"),
+])
+def test_an_os_refusal_to_start_claude_completes_the_slot_on_one_line(
+        rig, monkeypatch, capsys, exc, text):
+    _refuse_to_start(monkeypatch, exc)
+    assert rig.tick() == 1  # a Traceback would be an exception out of tick()
+    row = rig.ledger()
+    assert row["completed_at"] and row["outcome"].startswith(text), row
+    assert "\n" not in row["outcome"] and str(exc.args[-1]).splitlines()[0] in row["outcome"], row
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err and f"completed: {row['outcome']}" in captured.out
+
+
+def test_an_os_refusal_to_start_claude_leaves_no_thread_and_no_open_connection(rig, monkeypatch):
+    opened = _track_ledger_connections(monkeypatch)
+    before = set(threading.enumerate())
+    _refuse_to_start(monkeypatch, PermissionError(13, "Permission denied"))
+    assert rig.tick() == 1
+    assert set(threading.enumerate()) <= before, "the heartbeat thread outlived the tick"
+    assert len(opened) == 2, "expected the tick's connection and the heartbeat's"
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("select 1")
+
+
+def test_a_slot_completed_by_an_os_refusal_is_not_rerun(rig, monkeypatch):
+    _refuse_to_start(monkeypatch, PermissionError(13, "Permission denied"))
+    assert rig.tick() == 1
+    assert rig.tick() == 0  # the slot is history, like any other spawn-failed
