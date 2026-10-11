@@ -160,6 +160,14 @@ def resolve_prompts_dir() -> Tuple[Optional[Path], str]:
 # dir, then search ALL of them.
 _COG_TIER_DIRS = ("thinkers", "reviewers", "workers", "leaders", "orchestrator")
 
+# T0463-B: pure/ holds the bare architecture of every polymath, and for some (matas,
+# poirot) it is the ONLY copy, so a resolver blind to it booted those seats generic.
+# Searched only after every tier dir in every root: a tier file always wins.
+_COG_LAST_DIRS = ("pure",)
+
+# A fleet seat name carrying its card: Gamma-T0463-L, Carmack-T0306S-W2, Holmes-T0463-W.
+_CARD_SUFFIX = re.compile(r"^(.+?)-T\d+[A-Za-z0-9]*(?:-[^-]+)*$")
+
 _TIER_TO_COG_DIR = {
     "thinker": "thinkers",
     "reviewer": "reviewers",
@@ -181,45 +189,47 @@ def resolve_cognitive_file(name: str, tier: str | None = None) -> Optional[Path]
     # one: "The Warden" is written as `the-warden.md` and was looked up as `the warden.md`,
     # which silently fell through to the tier default. Invisible for "the orchestrator" — the one
     # name the author tested — and broken for the first user who picks two words.
-    slug = orchestrator_slug(name)
     if not name or not name.strip():
         return None
 
-    # USER OVERLAY FIRST. Generated architectures live in a user-owned directory that
-    # survives upgrades (see user_prompts_dir). Searched ahead of the shipped library so
-    # a personalised file always beats the shipped exemplar of the same name — and so
-    # write and read remain the same lookup, which is the property the old
-    # derive-write-from-read design was protecting.
-    preferred_dir = _TIER_TO_COG_DIR.get((tier or "").strip().lower())
-    user_base = user_prompts_dir() / "cognitive-architectures"
-    user_order = [preferred_dir] if preferred_dir else []
-    user_order += [d for d in _COG_TIER_DIRS if d != preferred_dir]
-    for d in user_order:
-        f = user_base / d / f"{slug}.md"
-        if f.is_file():
-            return f
-
-    # Nothing in the overlay: an older version may have written into a shipped tree, one
-    # upgrade from destruction. Rescue it rather than resolving through it.
-    # Only when the CALLER said orchestrator - never inferred - because every other tier
-    # resolves SHIPPED polymath files, and copying one of those into a user overlay would
-    # shadow the shipped version permanently and silently stop it receiving updates.
-    if (tier or "").strip().lower() == "orchestrator":
-        migrated = migrate_generated_architecture(name, "orchestrator")
-        if migrated is not None and migrated.is_file():
-            return migrated
-
-    pdir, _src = resolve_prompts_dir()
-    if pdir is None:
-        return None
-    base = pdir / "cognitive-architectures"
     preferred = _TIER_TO_COG_DIR.get((tier or "").strip().lower())
     order = [preferred] if preferred else []
     order += [d for d in _COG_TIER_DIRS if d != preferred]
-    for d in order:
-        f = base / d / f"{slug}.md"
-        if f.is_file():
-            return f
+    user_base = user_prompts_dir() / "cognitive-architectures"
+    libs: Optional[list[Path]] = None  # the shipped library, resolved once, on first need
+
+    # The full name first, everywhere; only on a full miss the name without its card
+    # suffix (T0463-B). A plain fleet name has no suffix and still misses quietly.
+    stem = card_suffix_stem(name)
+    for attempt in [name] + ([stem] if stem else []):
+        slug = orchestrator_slug(attempt)
+
+        # USER OVERLAY FIRST. Generated architectures live in a user-owned directory that
+        # survives upgrades (see user_prompts_dir). Searched ahead of the shipped library so
+        # a personalised file always beats the shipped exemplar of the same name — and so
+        # write and read remain the same lookup, which is the property the old
+        # derive-write-from-read design was protecting.
+        hit = _first_cognitive_file([user_base], order, slug)
+        if hit is not None:
+            return hit
+
+        # Nothing in the overlay: an older version may have written into a shipped tree, one
+        # upgrade from destruction. Rescue it rather than resolving through it.
+        # Only when the CALLER said orchestrator - never inferred - because every other tier
+        # resolves SHIPPED polymath files, and copying one of those into a user overlay would
+        # shadow the shipped version permanently and silently stop it receiving updates.
+        if attempt is name and preferred == "orchestrator":
+            migrated = migrate_generated_architecture(name, "orchestrator")
+            if migrated is not None and migrated.is_file():
+                return migrated
+
+        if libs is None:
+            pdir, _src = resolve_prompts_dir()
+            libs = [pdir / "cognitive-architectures"] if pdir is not None else []
+        hit = (_first_cognitive_file(libs, order, slug)
+               or _first_cognitive_file([user_base, *libs], _COG_LAST_DIRS, slug))
+        if hit is not None:
+            return hit
 
     # Tier default. An orchestrator MUST have an architecture — orchestrator-role.md calls
     # it "your operating system" and marks the read MANDATORY — so a user whose orchestrator
@@ -228,11 +238,37 @@ def resolve_cognitive_file(name: str, tier: str | None = None) -> Optional[Path]
     # Deliberately NARROW: only the PREFERRED tier, and only when that tier ships a
     # default.md. A worker named "BottleRender" still returns None, which the docstring
     # above promises and which a blanket fallback would have broken.
-    if preferred:
-        fallback = base / preferred / "default.md"
+    if preferred and libs:
+        fallback = libs[0] / preferred / "default.md"
         if fallback.is_file():
             return fallback
     return None
+
+
+def _first_cognitive_file(roots: list[Path], dirs, slug: str) -> Optional[Path]:
+    for root in roots:
+        for d in dirs:
+            f = root / d / f"{slug}.md"
+            if f.is_file():
+                return f
+    return None
+
+
+def card_suffix_stem(name: str) -> Optional[str]:
+    """'Gamma-T0463-L' -> 'Gamma'; None when the name carries no card suffix."""
+    m = _CARD_SUFFIX.match((name or "").strip())
+    return m.group(1) if m else None
+
+
+def list_cognitive_names() -> list[str]:
+    """Every name resolve_cognitive_file can answer for: the sorted union of file stems
+    over the user overlay and the shipped library, tier dirs and pure/ alike."""
+    roots = [user_prompts_dir() / "cognitive-architectures"]
+    pdir, _src = resolve_prompts_dir()
+    if pdir is not None:
+        roots.append(pdir / "cognitive-architectures")
+    return sorted({f.stem for root in roots for d in _COG_TIER_DIRS + _COG_LAST_DIRS
+                   if (root / d).is_dir() for f in (root / d).glob("*.md")})
 
 
 def orchestrator_slug(name: str) -> str:
