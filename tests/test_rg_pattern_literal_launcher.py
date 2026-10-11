@@ -13,6 +13,20 @@ import pytest
 
 from liteharness import deny_floor
 
+
+@pytest.fixture(autouse=True)
+def _native_search_heads(tmp_path, monkeypatch):
+    """rg/grep/egrep/findstr resolve to native stand-ins, never executed: the excuse
+    depends on the file the head resolves to (deny_floor._native_head)."""
+    folder = tmp_path / "native-bin"
+    folder.mkdir()
+    for name in ("rg", "grep", "egrep", "findstr"):
+        (folder / f"{name}.exe").write_bytes(b"stand-in")
+    monkeypatch.setenv("PATH", str(folder))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setattr(deny_floor, "_is_windows", lambda: True)
+
+
 DATA = [
     # the stored report shape: Set-Location, then two searches, one with a quoted path
     "Set-Location 'C:/ExampleProjects/Tree'; rg -n '_require_armed|_action_drag|hold_ms|duration_ms' "
