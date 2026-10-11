@@ -2942,6 +2942,130 @@ def test_fix4_r21_a_lone_quote_is_no_layer(roots, monkeypatch):
     assert any(raw.startswith("'//no-such-host") for raw in resolved), resolved
 
 
+#: Fix round 5: the rows of re-check 4 (review/r3i_empty_rc4.txt, r3i_seen_rc4.txt), verbatim but for the
+#: folders: (shell the row was written in, refused in its own slot, refused with no shell, command). Each
+#: really writes in PowerShell 7; round 0 and fix 1 refused it in the slots marked True.
+#: R26: an EMPTY value (`""`, `''`) after a valued parameter is an argument; fix 4 dropped every empty word
+#: (R20's backtick-newline leaves one too) and the parameter ate the source.
+FIX5_R26 = [
+    ("powershell", True, True, 'Copy-Item -Exclude "" {src}/NAME {root}'),
+    ("powershell", True, True, 'Copy-Item -Filter "" {src}/NAME {root}'),
+    ("powershell", True, True, 'Copy-Item -Include "" {src}/NAME {root}'),
+    ("powershell", True, True, 'Copy-Item -OutBuffer "" {src}/NAME {root}'),
+    ("powershell", True, False, "Copy-Item -Exclude '' {src}/NAME {root}"),
+    ("powershell", True, False, "Copy-Item -Filter '' {src}/NAME {root}"),
+    ("powershell", True, True, 'Move-Item -Exclude "" {src}/NAME {root} -Force'),
+    ("powershell", True, True, 'cpi -Exclude "" {src}/NAME {root}'),
+    ("powershell", True, True, 'mi -Exclude "" {src}/NAME {root} -Force'),
+    ("powershell", True, False, 'copy -Exclude "" {src}/NAME {root}'),
+    ("powershell", True, True, 'move -Exclude "" {src}/NAME {root} -Force'),
+    ("powershell", False, True, 'if ($true) { Copy-Item -Exclude "" {src}/NAME {root} }'),
+    ("powershell", False, True, 'foreach ($i in 1) { Copy-Item -Filter "" {src}/NAME {root} }'),
+    ("powershell", True, True, 'echo a; Copy-Item -Exclude "" {src}/NAME {root}'),
+    ("bash", True, True, 'pwsh -NoProfile -c \'Copy-Item -Exclude "" {src}/NAME {root}\''),
+    ("bash", True, True, 'pwsh -NoProfile -c "Copy-Item -Exclude \'\' {src}/NAME {root}"'),
+]
+#: R27: `-Name:` then a space: the parameter takes the NEXT word as its value.
+FIX5_R27 = [
+    ("powershell", True, True, "Copy-Item -Path: {src}/NAME {root}"),
+    ("powershell", True, True, "Move-Item -Path: {src}/NAME {root} -Force"),
+    ("powershell", True, True, "cpi -LiteralPath: {src}/NAME {root}"),
+    ("powershell", True, False, "copy -Path: {src}/NAME {root}"),
+    ("bash", True, True, "pwsh -NoProfile -c 'Copy-Item -Path: {src}/NAME {root}'"),
+]
+#: R28: U+2013, U+2014 and U+2015 are the dash of a PowerShell parameter.
+FIX5_R28 = [
+    ("powershell", True, True, "Copy-Item {src}/NAME –Destination {root}"),
+    ("powershell", True, True, "Copy-Item –Path {src}/NAME –Destination {root}"),
+    ("powershell", True, True, "Copy-Item {src}/NAME —Destination {root}"),
+    ("powershell", True, True, "Copy-Item {src}/NAME ―Destination {root}"),
+    ("powershell", True, True, "cpi {src}/NAME –Destination {root}"),
+    ("powershell", True, True, "Copy-Item –Exclude x.json {src}/NAME {root}"),
+    ("bash", True, True, "pwsh -NoProfile -c 'Copy-Item {src}/NAME –Destination {root}'"),
+]
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("shell, own, none, template", FIX5_R26 + FIX5_R27 + FIX5_R28)
+def test_fix5_rows_of_the_review(roots, shell, own, none, template, name):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / name).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    # A row lost only with no shell keeps its own slot open (a copy in a block asked AS PowerShell: stated).
+    for root in (litetui, marked):
+        command = _fix2(template, root, src, name)
+        for asked_as in ((shell,) if own else ()) + (None,):
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name,
+                                                more=into), (asked_as, command)
+
+
+#: The same three spellings over every head and both orders of the words (generated, fix 5): an empty
+#: value after each valued parameter, `-P: value`, and each Unicode dash, the destination named first too
+#: (R29's `-Destination: ROOT` and `–Destination ROOT` first, open at every round, fall out of R27/R28).
+#: And the spellings the splitter makes ONE word with R27's: `-P:''` / `-P:""` (an empty value, the next
+#: word free), which fix 4 refused and must still refuse; `-Force: $false` (a switch takes the next word).
+FIX5_MOVERS = {"Move-Item", "mi", "move", "mv"}
+
+
+def _fix5_forms():
+    forms = []
+    for head in FIX4_HEADS:
+        f = " -Force" if head in FIX5_MOVERS else ""
+        for param in ("-Exclude", "-Include", "-Filter", "-OutBuffer"):
+            for empty in ('""', "''", ":''", ': ""', ':""'):
+                sep = "" if empty.startswith(":") else " "
+                forms.append(f"{head} {param}{sep}{empty} {{src}}/NAME {{root}}{f}")
+        forms += [f"{head} -Path: {{src}}/NAME {{root}}{f}", f"{head} -LiteralPath: {{src}}/NAME {{root}}{f}",
+                  f"{head} {{src}}/NAME -Destination: {{root}}{f}", f"{head} -Destination: {{root}} {{src}}/NAME{f}",
+                  f"{head} -Path: {{src}}/NAME -Destination: {{root}}{f}", f"{head} -Exclude: x.json {{src}}/NAME {{root}}{f}",
+                  f"{head} -Force: $true {{src}}/NAME {{root}}", f"{head} {{src}}/NAME {{root}} -Force: $true"]
+        for dash in "–—―":
+            forms += [f"{head} {{src}}/NAME {dash}Destination {{root}}{f}",
+                      f"{head} {dash}Destination {{root}} {{src}}/NAME{f}",
+                      f"{head} {dash}Path {{src}}/NAME {dash}Destination {{root}}{f.replace('-', dash)}",
+                      f"{head} {dash}Exclude x.json {{src}}/NAME {{root}}{f}",
+                      f"{head} {dash}LiteralPath {{src}}/NAME {{root}}{f}"]
+    return forms
+
+
+def test_fix5_the_three_spellings_over_every_head(roots):
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    forms = _fix5_forms()
+    assert len(forms) == 8 * (4 * 5 + 8 + 3 * 5) == 344, len(forms)
+    open_ = []
+    for template in forms:
+        command = _fix2(template, litetui, src, OTHER_NAME)
+        for asked_as in ("powershell", None):
+            if not deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=OTHER_NAME, more=into):
+                open_.append((asked_as, command))
+    assert not open_, (len(open_), open_[:6])
+
+
+def test_fix5_the_readings_are_capped_at_four():
+    """The union binds every combination of the two ambiguous readings (empty words kept or dropped; a
+    `-P:` word taking the next word or not), not every subset of the words: 6 empty words and 2
+    trailing-colon parameters still give at most 4 readings, and a plain line gives exactly 1."""
+    words = ["", "-Exclude:", "", "SRC", "", "", "-Destination:", "", "ROOT", ""]
+    assert len(deny_floor._ps_binding(words)) <= 4
+    assert deny_floor._ps_binding(["SRC", "ROOT"]) == [("ROOT", ["SRC"])]
+
+
+def test_fix5_a_unicode_dash_is_powershells_only(roots):
+    """CONTROL: the dash is read as `-` only in PowerShell's reading. GNU's cp takes `–t` for a file name."""
+    home, workspace, litetui, _, plain = roots
+    into = frozenset({deny_floor.COPY_INTO})
+    gnu = deny_floor._gnu_options("cp", ["–t", "DIR", "SRC"])
+    assert gnu["target"] is None and gnu["operands"] == ["–t", "DIR", "SRC"]
+    assert deny_floor._ps_binding(["SRC", "—Destination", "DIR"]) == [("DIR", ["SRC"])]
+
+
 def test_the_gnu_grammar_alone_in_bash(roots):
     """Asked as bash only: `--` ends the options and the words after it are operands,
     even one that looks like `-t`. (Since fix 4 the PowerShell reading of `cp` is asked
