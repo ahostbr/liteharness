@@ -136,7 +136,7 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
                          pane: str | None, direction: str | None, name: str | None,
                          tier: str | None, model: str | None, backend: str | None,
                          thinking_level: str | None, spawned_by: str | None,
-                         prompt: str | None) -> None:
+                         prompt: str | None, cognitive: str | None = None) -> None:
     """Claude resolves sessions by project cwd; never substitute the caller's cwd."""
     from . import cli
     registry = _registry(entry["agent_id"])
@@ -170,14 +170,14 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
                   split_direction=direction, cwd=str(working_dir), name=entry["name"],
                   model=model or entry.get("model"), tier=tier or registry.get("tier"),
                   spawned_by=spawned_by if spawned_by is not None else registry.get("spawned_by"),
-                  prompt=prompt, additional_args=f"--resume {session_id}")
+                  prompt=prompt, cognitive=cognitive, additional_args=f"--resume {session_id}")
 
 
 def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None,
                  direction: str | None, cwd: str | None, name: str | None,
                  tier: str | None, model: str | None, backend: str | None,
                  thinking_level: str | None, spawned_by: str | None,
-                 kill_old: bool, prompt: str | None) -> None:
+                 kill_old: bool, prompt: str | None, cognitive: str | None = None) -> None:
     from . import owned_launch, owned_resume
     from .agent_store import AgentStore, StoreError
     try:
@@ -194,7 +194,8 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
             owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane,
                                direction=direction, cwd=cwd, name=name, tier=tier,
                                model=model, backend=backend, thinking_level=thinking_level,
-                               spawned_by=spawned_by, kill_old=kill_old, prompt=prompt)
+                               spawned_by=spawned_by, kill_old=kill_old, prompt=prompt,
+                               cognitive=cognitive)
             return
     from . import agent_names, cli
     if kill_old and not agent_id:
@@ -208,11 +209,12 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
         _spawn_claude_resume(entry, convo_id=convo_id, cwd=cwd, pane=pane,
                              direction=direction, name=name, tier=tier, model=model,
                              backend=backend, thinking_level=thinking_level,
-                             spawned_by=spawned_by, prompt=prompt)
+                             spawned_by=spawned_by, prompt=prompt, cognitive=cognitive)
         return
     # Existing Claude route above is unchanged. LiteTUI archives never become
     # writable resume targets: require the authoritative owned folder instead.
     owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane,
                        direction=direction, cwd=cwd, name=name, tier=tier,
                        model=model, backend=backend, thinking_level=thinking_level,
-                       spawned_by=spawned_by, kill_old=kill_old, prompt=prompt)
+                       spawned_by=spawned_by, kill_old=kill_old, prompt=prompt,
+                       cognitive=cognitive)
