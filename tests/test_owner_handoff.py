@@ -309,3 +309,22 @@ def test_a_now_saved_with_a_utf8_bom_passes(repo, capsys, spelling):
     (memory / "NOW.md").write_bytes(b"\xef\xbb\xbf" + spelling.encode("utf-8"))
     assert _handoff(memory) is None, capsys.readouterr().out
     assert "/compact" in capsys.readouterr().out
+
+
+# ── T0482: only an unindented `Name:` line is a plain heading ────────────────────────────────
+
+def test_an_indented_heading_line_is_body_text():
+    text = PLAIN_NOW.replace("3. Write the summary\n", "3. Write the summary\n  Doing now: indented, so body\n")
+    assert owner.validate_now(text) == []
+
+
+def test_an_indented_heading_line_does_not_supply_a_missing_heading():
+    text = PLAIN_NOW.replace("Doing now: Reconciling the widgets backlog.\n",
+                             "  Doing now: Reconciling the widgets backlog.\n")
+    assert any("Doing now" in p and "no" in p for p in owner.validate_now(text))
+
+
+def test_a_tab_indented_heading_line_is_body_text():
+    text = PLAIN_NOW.replace("Doing now: Reconciling the widgets backlog.\n",
+                             "\tDoing now: Reconciling the widgets backlog.\n")
+    assert any("Doing now" in p and "no" in p for p in owner.validate_now(text))
