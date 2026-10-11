@@ -122,6 +122,29 @@ def test_a_neighbouring_name_in_a_program_is_not_the_launcher(tmp_path, command,
     assert not _refused(command, tmp_path, shell), (shell, command)
 
 
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("command", [
+    # `run` + backslash + anything but a quote ends no token: a directory component, not the launcher
+    "awk \"BEGIN{print \\\"C:/x/run\\\\sub\\\"}\" f",
+    "awk \"BEGIN{print \\\"C:\\\\tools\\\\run\\\\bin\\\\x.exe\\\"}\" f",
+    "awk 'BEGIN{print \"C:/x/run.bat\\\\\"}' f",
+    "gawk \"BEGIN{x=\\\"run\\\\n\\\"}\" f",
+    "sed -e \"s/a/run\\\\1/\" f",
+])
+def test_run_before_a_backslash_that_is_not_an_escaped_quote_is_not_a_launch(tmp_path, command, shell):
+    assert not _refused(command, tmp_path, shell), (shell, command)
+
+
+@pytest.mark.parametrize("shell", [None, "bash"])
+@pytest.mark.parametrize("command", [
+    "awk \"BEGIN{system(\\\"run\\\")}\" f",        # \" ends the token
+    "awk $'BEGIN{system(\\'run\\')}' f",           # \' ends it too (ANSI-C quoting)
+    "awk \"BEGIN{system(\\\"run.bat\\\")}\" f",
+])
+def test_only_an_escaped_quote_ends_the_escaped_token(tmp_path, command, shell):
+    assert _refused(command, tmp_path, shell), (shell, command)
+
+
 @pytest.mark.parametrize("command", [
     "awk \"BEGIN{system(\\\"rerun\\\")}\" f",
     "awk \"BEGIN{system(\\\"myrun.bat\\\")}\" f",
@@ -200,10 +223,17 @@ def test_only_an_extension_pathext_lists_counts(tmp_path, monkeypatch, pathext, 
     assert _refused(PATTERN, tmp_path, "powershell") is refused
 
 
-def test_an_unset_pathext_uses_the_windows_default(tmp_path, monkeypatch):
+def test_an_unset_pathext_withdraws_it_and_invents_no_default(tmp_path, monkeypatch):
     _path(tmp_path, monkeypatch, {"rg.exe": "f"}, windows=True)
     monkeypatch.delenv("PATHEXT")
-    assert not _refused(PATTERN, tmp_path, "powershell")
+    assert deny_floor._native_head("rg") is False
+    assert _refused(PATTERN, tmp_path, "powershell")
+
+
+@pytest.mark.parametrize("pathext", [".COM;.EXE;.BAT;.CMD", ".EXE"])
+def test_a_set_pathext_still_resolves_a_native_exe(tmp_path, monkeypatch, pathext):
+    _path(tmp_path, monkeypatch, {"rg.exe": "f"}, windows=True, pathext=pathext)
+    assert deny_floor._native_head("rg") is True
 
 
 @pytest.mark.parametrize("name", ["sls", "select-string"])

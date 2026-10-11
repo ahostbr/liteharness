@@ -927,10 +927,12 @@ _INTERPRETER_CODE = re.compile(
     r'[ \t]+(?P<token>"[^"\r\n]*"|\'[^\'\r\n]*\')[ \t]*', re.IGNORECASE)
 #: Only this anchored code context also recognizes indexing/call adjacency.
 _CODE_LAUNCH = re.compile(r'(?i)(?<![\w])run(?:\.bat)?(?![\w])')
-#: `run` / `run.bat` right before a backslash: the escaped quote of `system(\"run\")`
-#: in a bash-quoted program. _LAUNCH needs a quote, space or operator after the name,
-#: so it never sees this spelling; only _script_head_launch can make it a launch.
-_ESCAPED_LAUNCH = re.compile(r'(?i)run(?:\.bat)?(?=\\)')
+#: `run` / `run.bat` ending in an ESCAPED QUOTE (`\"` or `\'`): the `run` in
+#: `system(\"run\")` of a bash-quoted program. _LAUNCH needs a quote, space or
+#: operator right after the name, so it never sees this spelling; only
+#: _script_head_launch can make it a launch. A backslash followed by anything else
+#: (`run\sub`: a directory) ends no token and is not matched.
+_ESCAPED_LAUNCH = re.compile(r'(?i)run(?:\.bat)?(?=\\["\'])')
 
 
 def _launcher_quoted_argument(command: str, start: int) -> bool:
@@ -1028,9 +1030,10 @@ def _native_head(name: str) -> bool:
     Windows: only an extension PATHEXT lists counts. A `.cmd`/`.bat`/other listed
     file, or a `.ps1`, in the same or an earlier PATH directory withdraws it (cmd
     re-parses the quoted text); a listed `.exe`/`.com` keeps it. An `.exe` PATHEXT
-    omits is not a command name, so it neither keeps nor blocks; no PATHEXT, or none
-    listed, withdraws. POSIX: any executable file keeps it, a `#!` wrapper included (argv is
-    passed intact). PowerShell cmdlets are named, not resolved.
+    omits is not a command name, so it neither keeps nor blocks; an unset PATHEXT, or
+    one that lists none, withdraws (no default list is assumed).
+    POSIX: any executable file keeps it, a `#!` wrapper included (argv is passed
+    intact). PowerShell cmdlets are named, not resolved.
     """
     if name in _PATTERN_CMDLETS:
         return True
@@ -1039,8 +1042,10 @@ def _native_head(name: str) -> bool:
         if not _is_windows():
             return any((folder / name).is_file() and os.access(folder / name, os.X_OK)
                        for folder in folders)
-        listed = {ext.strip().lower() for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
-                  if ext.strip()}
+        raw = os.environ.get("PATHEXT")
+        if raw is None:
+            return False
+        listed = {ext.strip().lower() for ext in raw.split(";") if ext.strip()}
         native = tuple(ext for ext in (".exe", ".com") if ext in listed)
         others = (listed - set(native)) | {".ps1"}
         if not native:
