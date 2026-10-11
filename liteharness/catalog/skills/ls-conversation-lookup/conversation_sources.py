@@ -153,17 +153,58 @@ def identity(file):
     return provider, file.stem, project
 
 
+NON_HUMAN_PROMPT_PREFIXES = ('<task-notification>', '[LITEHARNESS]', '[SYSTEM NOTIFICATION', '<system-reminder>')
+
+
+def queued_human_prompt(record):
+    """Text of a message the human typed while a turn was running, else None.
+
+    Claude Code stores it as an attachment of type queued_command, the same way
+    it queues task notifications. commandMode and origin say which is which; on
+    2026-10-10 every one of 19,644 local records carried at least one of them.
+    Only a record with neither falls back to the text prefix test. Pasted images
+    arrive as blocks beside the text and are never returned.
+    """
+    attachment = record.get('attachment')
+    if record.get('type') != 'attachment' or not isinstance(attachment, dict) \
+            or attachment.get('type') != 'queued_command':
+        return None
+    prompt = attachment.get('prompt')
+    if isinstance(prompt, list):
+        prompt = '\n'.join(block.get('text', '') for block in prompt
+                           if isinstance(block, dict) and block.get('type') == 'text')
+    if not isinstance(prompt, str):
+        return None
+    mode, origin = attachment.get('commandMode'), attachment.get('origin')
+    if mode is None and origin is None:
+        human = not prompt.lstrip().startswith(NON_HUMAN_PROMPT_PREFIXES)
+    else:
+        human = mode in (None, 'prompt') and (origin is None or (
+            isinstance(origin, dict) and origin.get('kind') == 'human'))
+    return prompt if human else None
+
+
 def normalized_records(file, budget=None):
-    """Adapt Codex response items to Claude's message envelope.
+    """Adapt Codex response items and queued human prompts to Claude's message envelope.
 
     Ignore Codex event_msg mirrors, system/developer instructions and reasoning
     records. response_item is the authoritative source for visible messages and
-    tool exchanges, so messages are not indexed twice.
+    tool exchanges, so messages are not indexed twice. A Claude message typed
+    mid-turn exists only as a queued_command attachment (its queue-operation
+    lines are the queue's log, not a delivery), so it becomes a user record here.
     """
     for number, record in enumerate(records(file, budget=budget)):
         kind = record.get('type')
         if kind in ('user', 'assistant'):
             yield record
+            continue
+        if kind == 'attachment':
+            text = queued_human_prompt(record)
+            if text is not None:
+                attachment = record['attachment']
+                yield {**record, 'type': 'user', 'message': {'content': text},
+                       'uuid': record.get('uuid') or attachment.get('source_uuid', ''),
+                       'timestamp': record.get('timestamp') or attachment.get('timestamp', '')}
             continue
         if kind != 'response_item':
             continue

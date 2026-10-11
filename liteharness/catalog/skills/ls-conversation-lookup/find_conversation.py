@@ -67,6 +67,13 @@ EVIDENCE_SCAN_MAX_BYTES = 8 * 1024 * 1024
 EVIDENCE_SCAN_MAX_SECONDS = 1.0
 INDEX_STALENESS_SEC = 300  # 5 minutes
 
+# The index skips a file whose mtime has not moved, so a parser change never
+# reaches it. Version 2 reads queued_command attachments (messages typed
+# mid-turn); every file holding one is re-parsed once, whatever its mtime.
+# A file without the marker yields the same rows under either version.
+PARSER_VERSION = '2'
+PARSER_REPARSE_MARKER = b'queued_command'
+
 
 def _check_and_auto_index():
     """Re-index if staleness file is missing or older than INDEX_STALENESS_SEC."""
@@ -422,6 +429,33 @@ def parse_jsonl_messages(file_path):
                "type": obj.get("type"), "text": text, "line_number": obj.get("_line_number"), **{k[1:]: v for k, v in obj.items() if k in ("_byte_offset", "_byte_length", "_record_hash", "_source_signature")}}
 
 
+def _contains(path, marker):
+    with open(path, 'rb') as stream:
+        tail = b''
+        while block := stream.read(1 << 20):
+            if marker in tail + block:
+                return True
+            tail = block[1 - len(marker):]
+    return False
+
+
+def _stale_files(conn, done_table, version_key):
+    """Files whose rows are missing, older than the source, or from an older parser."""
+    done = dict(conn.execute(f"SELECT file_path, mtime FROM {done_table}"))
+    row = conn.execute("SELECT value FROM index_meta WHERE key = ?", (version_key,)).fetchone()
+    old_parser = row is None or row[0] != PARSER_VERSION
+    all_files = list(conversation_files())
+    print(f"Found {len(all_files)} conversation files")
+    return done, [f for f in all_files
+                  if str(f) not in done or done[str(f)] < f.stat().st_mtime
+                  or (old_parser and _contains(f, PARSER_REPARSE_MARKER))]
+
+
+def _record_parser_version(conn, version_key):
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)", (version_key, PARSER_VERSION))
+
+
 @serialized_index
 def cmd_index(force=False):
     """Build or incrementally update the FTS5 search index."""
@@ -434,14 +468,9 @@ def cmd_index(force=False):
                 "DELETE FROM indexed_files; DELETE FROM index_meta;")
             conn.commit()
 
-        indexed = dict(conn.execute("SELECT file_path, mtime FROM indexed_files"))
-
-        all_files = list(conversation_files())
-        print(f"Found {len(all_files)} conversation files")
-
-        to_index = [f for f in all_files
-                    if str(f) not in indexed or indexed[str(f)] < f.stat().st_mtime]
+        indexed, to_index = _stale_files(conn, "indexed_files", "parser_version")
         if not to_index:
+            _record_parser_version(conn, "parser_version")
             print("Index is up to date.")
             _print_stats(conn)
             conn.close()
@@ -491,6 +520,7 @@ def cmd_index(force=False):
         conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_indexed', ?)",
                      (datetime.now().isoformat(),))
         conn.commit()
+        _record_parser_version(conn, "parser_version")
         print(f"\nDone: {total_msgs:,} messages from {len(to_index)} files in {time.time()-t0:.1f}s")
         _print_stats(conn)
         conn.close()
@@ -676,14 +706,9 @@ def cmd_index_embeddings(force=False):
             conn.executescript("DELETE FROM embeddings; DELETE FROM embedded_files;")
             conn.commit()
 
-        embedded = dict(conn.execute("SELECT file_path, mtime FROM embedded_files").fetchall())
-
-        all_files = list(conversation_files())
-        print(f"Found {len(all_files)} conversation files")
-
-        to_embed = [f for f in all_files
-                    if str(f) not in embedded or embedded[str(f)] < f.stat().st_mtime]
+        _, to_embed = _stale_files(conn, "embedded_files", "embedding_parser_version")
         if not to_embed:
+            _record_parser_version(conn, "embedding_parser_version")
             print("Embeddings are up to date.")
             _print_embedding_stats(conn)
             conn.close()
@@ -720,6 +745,7 @@ def cmd_index_embeddings(force=False):
         with conn:
             conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('last_embedded', ?)",
                          (datetime.now().isoformat(),))
+        _record_parser_version(conn, "embedding_parser_version")
         print(f"Done: {total_chunks:,} chunks in {time.time()-t0:.1f}s")
         _print_embedding_stats(conn)
         conn.close()
