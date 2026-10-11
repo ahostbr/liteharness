@@ -3,8 +3,18 @@ Claude Code status line for LiteHarness.
 
 Reads the status JSON Claude Code writes to stdin and prints ONE line:
 
-    O-5-1M  high  develop*  [ 43% 430K/1M ]  5h13% 7d41%
-    model   effort branch    context bar      rate limits
+    43% 1M SwiftRelay 1f09ba64 O-5-1M high BUILDER develop* 0.8x 5h13% 7d41% 90h2m 0.7%/h
+    bar     name       id       model  effort role  branch   rate limits
+
+The three mode orders below are the three orders of a PowerShell status line script. The
+mode comes from LITEHARNESS_STATUSLINE_MODE (a user setting), else
+~/.claude/statusline-mode, else "full". The agent id comes from the payload's session_id,
+else LITEHARNESS_AGENT_ID (`liteharness spawn` blanks that variable, so an inherited id
+never outranks the session's own); the role from LITEHARNESS_ROLE:
+
+    full     bar name id model effort role branch rates
+    compact  name id bar effort branch rates
+    minimal  bar effort branch rates
 
 Wire it up in settings.json:
 
@@ -32,6 +42,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+from pathlib import Path
 
 ESC = "\x1b"
 RESET = f"{ESC}[0m"
@@ -44,6 +56,8 @@ FG_GREEN = f"{ESC}[38;5;114m"
 FG_AMBER = f"{ESC}[38;5;220m"
 FG_RED = f"{ESC}[38;5;196m"
 FG_DIM = f"{ESC}[38;5;245m"
+FG_FAINT = f"{ESC}[38;5;240m"
+FG_NAME = f"{ESC}[38;5;219m"
 FG_BLUE = f"{ESC}[38;2;96;165;250m"
 
 # Colour is opt-out: some terminals and most CI logs render raw escapes as garbage.
@@ -69,9 +83,9 @@ def agent_badge(session_id: str | None) -> str:
     WHY THIS EXISTS. Every other segment describes the MODEL or the REPO; none of them
     said WHO. On a machine running several agents at once - which is the entire point of
     the harness - four identical status lines is not a status line, it is wallpaper. The
-    PowerShell status line this module replaced had carried the name and id for months,
-    so the packaged version was a REGRESSION nobody noticed, because the two are never
-    on screen at the same time.
+    PowerShell status line script this layout follows had carried the name and id for
+    months, so the packaged version silently lacked them, because the two are never on
+    screen at the same time.
 
     `session_id` is already in the payload Claude Code writes to stdin. It was read by
     nothing here, so the id was present and discarded on every refresh.
@@ -83,9 +97,20 @@ def agent_badge(session_id: str | None) -> str:
     easily turn off, so a traceback here does not fail once, it papers the terminal
     forever. Degrade to the bare id, then to silence.
     """
-    if not isinstance(session_id, str) or not session_id:
+    # The id's source order: the payload's session_id, then LITEHARNESS_AGENT_ID only when
+    # the payload carries none. `liteharness spawn` blanks that variable because an
+    # inherited agent id belongs to somebody else, so it must never outrank the session's
+    # own id. The NAME always comes from session_id.
+    has_sid = isinstance(session_id, str) and bool(session_id)
+    env_id = os.environ.get("LITEHARNESS_AGENT_ID", "").strip()
+    if has_sid:
+        short = session_id[:8]
+    elif env_id:
+        short = env_id.split("_")[-1][:8]
+    else:
         return ""
-    short = session_id[:8]
+    if not has_sid:
+        return short
     try:
         from liteharness.naming import get_name
 
@@ -94,8 +119,9 @@ def agent_badge(session_id: str | None) -> str:
         # A name is a nicety; the id is the part that actually disambiguates.
         name = ""
     if name:
-        return f"{_c(FG_BLUE, name)} {_c(FG_DIM, short)}"
-    return _c(FG_DIM, short)
+        # Name before id: who (name, id) reads before what (model).
+        return f"{_c(FG_NAME, name)} {short}"
+    return short
 
 
 def _fmt_tokens(n: int) -> str:
@@ -106,7 +132,7 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
-def context_bar(ctx: dict) -> str:
+def context_bar(ctx: dict, model: str = "") -> str:
     """
     Percentage-filled bar with the numbers written INSIDE it.
 
@@ -116,11 +142,13 @@ def context_bar(ctx: dict) -> str:
     """
     if not isinstance(ctx, dict):
         return ""
-    window = ctx.get("context_window_size") or 200_000
+    # Trust the payload's window; without one, 4.5/4.6 models ran 1M (as the PowerShell script does).
+    fallback = 1_000_000 if re.search(r"4\.[56]", model) else 200_000
+    window = ctx.get("context_window_size") or fallback
     try:
         window = int(window)
     except (TypeError, ValueError):
-        window = 200_000
+        window = fallback
 
     used_pct = ctx.get("used_percentage")
     if used_pct is not None:
@@ -135,7 +163,7 @@ def context_bar(ctx: dict) -> str:
             used = 0
 
     pct = round((used / window) * 100, 1) if window else 0.0
-    text = f" {pct}% {_fmt_tokens(used)}/{_fmt_tokens(window)} "
+    text = f" {pct:g}% {_fmt_tokens(window)} "
     if NO_COLOR:
         return text.strip()
 
@@ -158,7 +186,7 @@ def git_branch(cwd: str | None) -> str:
             return ""
         branch = head.stdout.strip()
         dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             capture_output=True, text=True, timeout=2, cwd=cwd or None,
         )
         if dirty.returncode == 0 and dirty.stdout.strip():
@@ -173,11 +201,16 @@ def _pct_colour(pct: float) -> str:
     return FG_RED if pct >= 80 else FG_AMBER if pct >= 50 else FG_GREEN
 
 
-def rate_limits(limits: dict) -> str:
-    """5h / 7d usage. Plain percentages — no burn-rate projection."""
+def rate_limits(limits: dict, now: float | None = None) -> str:
+    """[ratio] 5hN% 7dN% [XhYm] [N%/h] - the rate block of the PowerShell status line script.
+
+    ratio = 7d used% / elapsed% of the 168h window: 1.0x is exactly sustainable, above
+    runs dry before reset. N%/h = remaining 7d % / hours to reset = the safe spend rate.
+    """
     if not isinstance(limits, dict):
         return ""
-    parts = []
+    now = time.time() if now is None else now
+    parts, ratio, burn = [], "", ""
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
         window = limits.get(key)
         if not isinstance(window, dict):
@@ -189,35 +222,99 @@ def rate_limits(limits: dict) -> str:
             pct = round(float(pct))
         except (TypeError, ValueError):
             continue
-        parts.append(_c(_pct_colour(pct), f"{label}{pct}%"))
-    return " ".join(parts)
+        text = f"{label}{pct}%"
+        try:
+            secs = max(0, int(window["resets_at"]) - int(now)) if key == "seven_day" else None
+        except (KeyError, TypeError, ValueError):
+            secs = None
+        if secs is not None:
+            # As in the PowerShell script: the countdown sits inside the 7d span, uncoloured.
+            text += f" {'' if NO_COLOR else RESET}{secs // 3600}h{(secs % 3600) // 60}m"
+            elapsed = 168.0 - secs / 3600.0
+            if elapsed > 0.5 and pct > 0:
+                r = round(pct / (elapsed / 168.0 * 100), 2)
+                ratio = _c(FG_RED if r >= 1.5 else FG_AMBER if r >= 1.0 else FG_GREEN, f"{r:g}x")
+            hours = round(secs / 3600, 1)
+            if hours > 0:
+                b = round((100 - pct) / hours, 1)
+                burn = _c(FG_GREEN if b >= 1.0 else FG_AMBER if b >= 0.5 else FG_RED, f"{b:g}%/h")
+        parts.append(_c(_pct_colour(pct), text))
+    if not parts:
+        return ""
+    return " ".join(p for p in (ratio, *parts, burn) if p)
 
 
-def effort_badge(effort: dict) -> str:
+def _shimmer(text: str, stops: list[tuple[int, int, int]], phase: float) -> str:
+    """Cyclic truecolor gradient whose phase rides wall-clock time, so each refresh
+    renders it rotated - a shimmer on the existing refresh cadence, no timer."""
+    if NO_COLOR:
+        return text
+    out, k, n = "", len(stops), len(text)
+    for i, ch in enumerate(text):
+        seg = ((i / n + phase) % 1.0) * k
+        idx = int(seg) % k
+        a, b, f = stops[idx], stops[(idx + 1) % k], seg - int(seg)
+        r, g, bl = (int(a[j] + (b[j] - a[j]) * f) for j in range(3))
+        out += f"{ESC}[1;38;2;{r};{g};{bl}m{ch}"
+    return out + RESET
+
+
+_MAX_STOPS = [(38, 222, 200), (120, 130, 235), (200, 96, 240)]  # teal->blue->magenta
+_ULTRA_STOPS = [(210, 180, 255), (124, 58, 237)]  # bright<->deep purple
+
+
+def effort_badge(effort: dict, session_id: str | None = None) -> str:
     if not isinstance(effort, dict):
         return ""
     level = str(effort.get("level") or "").lower()
+    phase = (int(time.time() * 1000) % 4000) / 4000.0
+    if level == "max":
+        return _shimmer("max", _MAX_STOPS, phase)
+    if level == "xhigh":
+        # Ultracode reports "xhigh". The agent drops ~/.claude/ultracode/<session_id>
+        # while it is on; CLAUDE_CODE_WORKFLOWS is the explicit always-on path.
+        ultra = bool(os.environ.get("CLAUDE_CODE_WORKFLOWS"))
+        if not ultra and session_id:
+            try:
+                ultra = (Path.home() / ".claude" / "ultracode" / session_id).exists()
+            except Exception:
+                ultra = False
+        return _shimmer("ultra" if ultra else "xhigh", _ULTRA_STOPS, phase)
     return {
-        "max": _c(FG_RED, "max"),
-        "xhigh": _c(FG_AMBER, "xhigh"),
         "high": _c(FG_BLUE, "high"),
         "medium": _c(FG_DIM, "med"),
-        "low": _c(FG_DIM, "low"),
+        "low": _c(FG_FAINT, "low"),
     }.get(level, "")
 
 
-def build_line(data: dict) -> str:
-    segments = [
-        short_model((data.get("model") or {}).get("display_name", "")),
-        effort_badge(data.get("effort") or {}),
-        # Identity sits between the model and the repo, matching the PowerShell line this
-        # module replaced: what am I / WHO am I / where am I / how full / how throttled.
-        agent_badge(data.get("session_id")),
-        git_branch((data.get("workspace") or {}).get("current_dir") or data.get("cwd")),
-        context_bar(data.get("context_window") or {}),
-        rate_limits(data.get("rate_limits") or {}),
-    ]
-    return "  ".join(s for s in segments if s)
+def display_mode() -> str:
+    mode = os.environ.get("LITEHARNESS_STATUSLINE_MODE", "")
+    if not mode:
+        try:
+            mode = (Path.home() / ".claude" / "statusline-mode").read_text(encoding="utf-8")
+        except Exception:
+            mode = ""
+    return mode.strip().lower() or "full"
+
+
+def build_line(data: dict, mode: str | None = None) -> str:
+    model = short_model((data.get("model") or {}).get("display_name", ""))
+    bar = context_bar(data.get("context_window") or {}, model)
+    badge = agent_badge(data.get("session_id"))
+    effort = effort_badge(data.get("effort") or {}, data.get("session_id"))
+    role = os.environ.get("LITEHARNESS_ROLE", "").upper()
+    branch = git_branch((data.get("workspace") or {}).get("current_dir") or data.get("cwd"))
+    rates = rate_limits(data.get("rate_limits") or {})
+    mode = mode or display_mode()
+    if mode == "minimal":
+        segments = [bar, effort, branch, rates]
+    elif mode == "compact":
+        segments = [badge, bar, effort, branch, rates]
+    else:
+        # The bar leads: it is the one field a reader acts on, so nothing variable-length
+        # may push it off the end of a narrow pane. Then WHO (name, id) before WHAT (model).
+        segments = [bar, badge, model, effort, role, branch, rates]
+    return " ".join(s for s in segments if s)
 
 
 def main() -> None:
