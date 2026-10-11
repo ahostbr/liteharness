@@ -24,7 +24,7 @@ def _refused(command, tmp_path, shell):
     return bool(reason) and "[owner-launcher]" in reason
 
 
-def _path(tmp_path, monkeypatch, *folders, windows):
+def _path(tmp_path, monkeypatch, *folders, windows, pathext=".COM;.EXE;.BAT;.CMD"):
     made = []
     for n, files in enumerate(folders):
         folder = tmp_path / f"bin{n}"
@@ -34,7 +34,7 @@ def _path(tmp_path, monkeypatch, *folders, windows):
             (folder / name).chmod(0o755 if mode in ("x", "shebang") else 0o644)
         made.append(str(folder))
     monkeypatch.setenv("PATH", os.pathsep.join(made))
-    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setenv("PATHEXT", pathext)
     monkeypatch.setattr(deny_floor, "_is_windows", lambda: windows)
 
 
@@ -74,6 +74,62 @@ SCRIPT_LAUNCHES = [
 @pytest.mark.parametrize("command", SCRIPT_LAUNCHES)
 def test_the_launcher_name_in_an_awk_or_sed_program_is_a_launch(tmp_path, command, shell):
     assert _refused(command, tmp_path, shell), (shell, command)
+
+
+#: bash's backslash-escaped quote right after the name: the _LAUNCH word end never sees it.
+ESCAPED_QUOTE = [
+    "awk \"BEGIN{system(\\\"run\\\")}\" f",
+    "awk \"BEGIN{system(\\\"run.bat\\\")}\" f",
+    "gawk \"BEGIN{system(\\\"./run.bat\\\")}\" f",
+    "awk \"BEGIN{x=1; system(\\\"run\\\")}\" f",
+    "awk \"BEGIN{print 1 | \\\"cat\\\"; system(\\\"run\\\")}\" f",
+    "env awk \"BEGIN{system(\\\"run\\\")}\" f",
+    "C:/tools/awk.exe \"BEGIN{system(\\\"run\\\")}\" f",
+    "sed -e \"e run\\\"\" f",
+]
+
+
+@pytest.mark.parametrize("shell", [None, "bash"])
+@pytest.mark.parametrize("command", ESCAPED_QUOTE)
+def test_an_escaped_quote_after_the_name_does_not_hide_the_launch(tmp_path, command, shell):
+    assert _refused(command, tmp_path, shell), (shell, command)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("command", [
+    # a bash program carried as ONE PowerShell word, or inside another shell's -c
+    "bash -c 'awk \"BEGIN{system(\\\"run\\\")}\"'",
+    "sh -c 'gawk \"BEGIN{x=1; system(\\\"run.bat\\\")}\" f'",
+    "env bash -c 'sed -e \"e run\\\"\" f'",
+])
+def test_a_wrapped_bash_program_with_escaped_quotes_is_a_launch(tmp_path, command, shell):
+    assert _refused(command, tmp_path, shell), (shell, command)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("command", [
+    # another name, not the launcher: the exact-name guard runs before the program rule
+    "awk 'BEGIN{system(\"rerun\")}' f",
+    "awk 'BEGIN{system(\"myrun.bat\")}' f",
+    "awk 'BEGIN{system(\"prerun\")}' f",
+    "awk 'BEGIN{system(\"run2\")}' f",
+    "awk 'BEGIN{system(\"x_run.bat\")}' f",
+    "sed -e 'e rerun' f",
+    "gawk 'BEGIN{print \"rerun.bat\"}' f",
+    "env awk 'BEGIN{system(\"myrun\")}' f",
+])
+def test_a_neighbouring_name_in_a_program_is_not_the_launcher(tmp_path, command, shell):
+    assert not _refused(command, tmp_path, shell), (shell, command)
+
+
+@pytest.mark.parametrize("command", [
+    "awk \"BEGIN{system(\\\"rerun\\\")}\" f",
+    "awk \"BEGIN{system(\\\"myrun.bat\\\")}\" f",
+    "bash -c 'awk \"BEGIN{system(\\\"rerun\\\")}\"'",
+])
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_neighbouring_name_before_an_escaped_quote_is_not_the_launcher(tmp_path, command, shell):
+    assert not _refused(command, tmp_path, shell), (shell, command)
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -121,6 +177,32 @@ def test_a_batch_shim_or_unresolved_head_withdraws_the_excuse_on_windows(tmp_pat
 
 def test_an_exe_earlier_on_path_than_a_shim_keeps_it(tmp_path, monkeypatch):
     _path(tmp_path, monkeypatch, {"rg.exe": "f"}, {"rg.cmd": "f"}, windows=True)
+    assert not _refused(PATTERN, tmp_path, "powershell")
+
+
+@pytest.mark.parametrize("pathext, folders, refused", [
+    # only an extension PATHEXT lists is a command name; anything unsure withdraws
+    (".CMD", [{"rg.exe": "f"}, {"rg.cmd": "f"}], True),         # the exe is not runnable by name; a later .cmd is
+    (".CMD;.BAT", [{"rg.exe": "f"}], True),                      # native extension omitted, nothing else resolves
+    (".COM;.CMD", [{"rg.exe": "f"}], True),                      # .exe omitted, no rg.com
+    (".EXE;.CMD", [{"rg.cmd": "f"}, {"rg.exe": "f"}], True),     # a listed shim earlier on PATH
+    (".EXE;.CMD", [{"rg.exe": "f"}, {"rg.cmd": "f"}], False),    # the listed exe is earlier
+    (".EXE", [{"rg.exe": "f"}], False),
+    (".COM;.EXE;.BAT;.CMD", [{"rg.com": "f"}], False),
+    (".exe;.cmd", [{"rg.exe": "f"}], False),                     # case of PATHEXT does not matter
+    (" .EXE ;.CMD", [{"rg.exe": "f"}], False),
+    ("", [{"rg.exe": "f"}], True),                               # empty PATHEXT: nothing listed
+    (";;", [{"rg.exe": "f"}], True),
+], ids=["omit-exe-later-cmd", "omit-native", "omit-exe-no-com", "listed-cmd-first", "listed-exe-first",
+        "exe-only", "com", "case", "padded", "empty", "separators"])
+def test_only_an_extension_pathext_lists_counts(tmp_path, monkeypatch, pathext, folders, refused):
+    _path(tmp_path, monkeypatch, *folders, windows=True, pathext=pathext)
+    assert _refused(PATTERN, tmp_path, "powershell") is refused
+
+
+def test_an_unset_pathext_uses_the_windows_default(tmp_path, monkeypatch):
+    _path(tmp_path, monkeypatch, {"rg.exe": "f"}, windows=True)
+    monkeypatch.delenv("PATHEXT")
     assert not _refused(PATTERN, tmp_path, "powershell")
 
 

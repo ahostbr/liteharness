@@ -872,6 +872,7 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
     steps = sorted([*((m.start(), m) for m in _CD.finditer(command)),
                     *((m.start(), m) for m in _VERB.finditer(command)),
                     *((m.start(), m) for m in _LAUNCH.finditer(command)),
+                    *((m.start(), m) for m in _ESCAPED_LAUNCH.finditer(command)),
                     *((m.start(), m) for m in code_launches)],
                    key=lambda step: step[0])
     for _, match in steps:
@@ -881,7 +882,7 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
             if not in_data:
                 launcher_base = _cd_target(command[match.end():], launcher_base, home)
             continue
-        if match.re in (_LAUNCH, _CODE_LAUNCH):
+        if match.re in (_LAUNCH, _CODE_LAUNCH, _ESCAPED_LAUNCH):
             if in_data:
                 continue
             if _owner_launch(command, match, launcher_base, home, shell=shell):
@@ -926,6 +927,10 @@ _INTERPRETER_CODE = re.compile(
     r'[ \t]+(?P<token>"[^"\r\n]*"|\'[^\'\r\n]*\')[ \t]*', re.IGNORECASE)
 #: Only this anchored code context also recognizes indexing/call adjacency.
 _CODE_LAUNCH = re.compile(r'(?i)(?<![\w])run(?:\.bat)?(?![\w])')
+#: `run` / `run.bat` right before a backslash: the escaped quote of `system(\"run\")`
+#: in a bash-quoted program. _LAUNCH needs a quote, space or operator after the name,
+#: so it never sees this spelling; only _script_head_launch can make it a launch.
+_ESCAPED_LAUNCH = re.compile(r'(?i)run(?:\.bat)?(?=\\)')
 
 
 def _launcher_quoted_argument(command: str, start: int) -> bool:
@@ -1020,9 +1025,11 @@ def _native_head(name: str) -> bool:
     Reads PATH (and PATHEXT on Windows), executes nothing. Fail-closed: a file or a
     PATH entry can only REMOVE an exemption, never create one, and any error, or a
     name that does not resolve, is "not native" so the original scan runs.
-    Windows: a `.cmd`/`.bat`/`.ps1`/other PATHEXT file in the same or an earlier
-    PATH directory withdraws it (cmd re-parses the quoted text); only `.exe`/`.com`
-    keeps it. POSIX: any executable file keeps it, a `#!` wrapper included (argv is
+    Windows: only an extension PATHEXT lists counts. A `.cmd`/`.bat`/other listed
+    file, or a `.ps1`, in the same or an earlier PATH directory withdraws it (cmd
+    re-parses the quoted text); a listed `.exe`/`.com` keeps it. An `.exe` PATHEXT
+    omits is not a command name, so it neither keeps nor blocks; no PATHEXT, or none
+    listed, withdraws. POSIX: any executable file keeps it, a `#!` wrapper included (argv is
     passed intact). PowerShell cmdlets are named, not resolved.
     """
     if name in _PATTERN_CMDLETS:
@@ -1032,10 +1039,12 @@ def _native_head(name: str) -> bool:
         if not _is_windows():
             return any((folder / name).is_file() and os.access(folder / name, os.X_OK)
                        for folder in folders)
-        native = (".exe", ".com")
-        others = {ext.lower() for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
-                  if ext} - set(native)
-        others.add(".ps1")
+        listed = {ext.strip().lower() for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+                  if ext.strip()}
+        native = tuple(ext for ext in (".exe", ".com") if ext in listed)
+        others = (listed - set(native)) | {".ps1"}
+        if not native:
+            return False
         for folder in folders:
             if any((folder / (name + ext)).is_file() for ext in others):
                 return False
@@ -1225,9 +1234,6 @@ def _owner_launch(command: str, match: re.Match, base: Path | None, home: Path,
     start = match.start()
     if _launcher_quoted_argument(command, start):
         return False
-    # awk/sed RUN their quoted program: the name inside it is a launch, not data.
-    if _script_head_launch(command, start, shell):
-        return True
     # Leading non-nested comments can precede argv0. Only a trusted PowerShell
     # context may excuse a match IN the comment; unknown shells keep scanning.
     comments = re.match(r"[ \t]*(?:<#(?:(?!<#|#>).)*#>[ \t]*)+", command, re.DOTALL)
@@ -1244,6 +1250,11 @@ def _owner_launch(command: str, match: re.Match, base: Path | None, home: Path,
         prefix = prefix.partition(":")[2]
     if prefix and prefix[-1] not in "\\/":
         return False   # `rerun`, `myrun.bat`: another name
+    # awk/sed RUN their quoted program: the exact name inside it is a launch, not data.
+    if _script_head_launch(command, start, shell):
+        return True
+    if match.re is _ESCAPED_LAUNCH:
+        return False   # found only to feed the check above; never a launch by itself
     if match.re is _CODE_LAUNCH:
         # No new general brace boundary: only anchored richer interpreter CODE
         # mentioning the launcher takes this D1 branch, without identity narrowing.
