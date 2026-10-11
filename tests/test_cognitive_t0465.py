@@ -148,3 +148,21 @@ def test_control_an_owned_litetui_resume_without_cognitive_sends_none(owned_seat
     cli.cmd_spawn(split_mode=True, resume_agent_id="QuietHelm", resume_convo_id=CID,
                   cwd=str(project), tier="worker", spawned_by=BID)
     assert len(resolved) == 1 and "cognitive" not in resolved[0]
+
+
+# ── the orchestrator tier default.md is a NAME fallback, never an explicit --cognitive ──
+
+def test_an_unknown_cognitive_on_an_orchestrator_is_refused_not_defaulted(routes, capsys):
+    calls, _ = routes
+    assert _spawn(cognitive="bogus", name="Gustave", tier="orchestrator") == 2
+    out = capsys.readouterr().out
+    assert "SPAWN REFUSED: --cognitive 'bogus' matches no cognitive architecture" in out
+    assert calls == []
+
+
+def test_control_an_orchestrator_name_miss_still_boots_default(split, lib):
+    calls, _, _ = split
+    root, _ = lib
+    _spawn(name="Gustave", tier="orchestrator")
+    assert (f"$env:LITEHARNESS_COGNITIVE_FILE='{root / 'orchestrator' / 'default.md'}'"
+            in _launch(calls))

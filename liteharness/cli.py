@@ -4185,7 +4185,8 @@ def cmd_spawn(
     # litetui and resume routes pass through it too (codex refuses --cognitive above).
     try:
         from . import prompts as _prompts_mod
-        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", tier or "worker")
+        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", tier or "worker",
+                                                   tier_default=not cognitive)
     except Exception as _cog_exc:  # noqa: BLE001 — a name-only miss never kills a spawn
         if cognitive:
             print(f"SPAWN REFUSED: --cognitive {cognitive!r} could not be resolved "

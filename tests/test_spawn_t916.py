@@ -125,7 +125,7 @@ def test_the_typed_split_launch_carries_tier_name_cognitive_and_parent(split, mo
     arch = tmp_path / "turing.md"
     arch.write_text("x", encoding="utf-8")
     from liteharness import prompts
-    monkeypatch.setattr(prompts, "resolve_cognitive_file", lambda _n, _t: arch)
+    monkeypatch.setattr(prompts, "resolve_cognitive_file", lambda _n, _t, **_k: arch)
     _run(split_mode=True, split_pane="canvas-pane-26", prompt="x",
          name="PassLink-Turing", cognitive="turing", tier="worker")
     launch = _typed_launch(calls)

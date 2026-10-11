@@ -186,7 +186,7 @@ def test_an_unknown_cognitive_never_evicts_a_name_holder(split, monkeypatch):
 def test_a_raising_resolution_with_cognitive_is_refused(split, monkeypatch, capsys):
     calls, made, _ = split
 
-    def boom(_n, _t):
+    def boom(_n, _t, **_k):
         raise OSError("library unreadable")
 
     monkeypatch.setattr(prompts, "resolve_cognitive_file", boom)
@@ -199,7 +199,7 @@ def test_a_raising_resolution_with_cognitive_is_refused(split, monkeypatch, caps
 def test_control_a_raising_resolution_without_cognitive_still_spawns(split, monkeypatch):
     calls, _, _ = split
 
-    def boom(_n, _t):
+    def boom(_n, _t, **_k):
         raise OSError("library unreadable")
 
     monkeypatch.setattr(prompts, "resolve_cognitive_file", boom)
