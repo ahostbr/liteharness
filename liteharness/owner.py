@@ -79,7 +79,9 @@ REQUIRED_HEADINGS = ("Updated", "Doing now", "Next 3 steps", "Waiting on", "Crew
 
 _HEADING = re.compile(r"^#{1,6}\s*(.*?)\s*$")
 #: The plain spelling of the template: a line that starts with the heading name and a colon
-#: (`Doing now: text`). Not indented, so list items and body lines never match.
+#: (`Doing now: text`). Not indented, so list items and body lines never match. A name the file
+#: also heads with a markdown `## Name` takes that heading, and a plain line of the same name
+#: is body text; in a file with no markdown heading for the name, every such line is a heading.
 _PLAIN_HEADINGS = [(name, re.compile(re.escape(name) + r"\s*:\s*(.*?)\s*$", re.IGNORECASE))
                    for name in REQUIRED_HEADINGS]
 
@@ -93,6 +95,19 @@ def _plain_heading(line: str) -> tuple[str, str] | None:
     return None
 
 
+def _markdown_heading(line: str) -> tuple[str, str] | None:
+    """(required heading, text after its name) when `line` is a markdown `## Heading` line."""
+    match = _HEADING.match(line)
+    if not match:
+        return None
+    title = match.group(1).lower()
+    for name in REQUIRED_HEADINGS:
+        key = name.lower()
+        if title == key or re.match(re.escape(key) + r"\b", title):
+            return name, title[len(key):].lstrip(" :-\u2014")
+    return None
+
+
 def validate_now(text: str) -> list[str]:
     """The reasons NOW.md fails the template; an empty list means it passes."""
     problems: list[str] = []
@@ -103,23 +118,22 @@ def validate_now(text: str) -> list[str]:
     sections: dict[str, list[str]] = {}
     current: list[str] | None = None
     seen: dict[str, int] = {}
+    # Decided per name, not per line: a name the file heads with `## Name` is never also
+    # headed by a plain `Name: text` line (that line is body text under whatever is above it).
+    markdown_names = {found[0] for found in map(_markdown_heading, lines) if found}
     for line in lines:
-        match = _HEADING.match(line)
-        if match:
+        if _HEADING.match(line):
             current = None
-            title = match.group(1).lower()
-            for name in REQUIRED_HEADINGS:
-                key = name.lower()
-                if title == key or re.match(re.escape(key) + r"\b", title):
-                    seen[name] = seen.get(name, 0) + 1
-                    rest = title[len(key):].lstrip(" :-\u2014")
-                    current = sections.setdefault(name, [])
-                    if rest:
-                        current.append(rest)
-                    break
+            found = _markdown_heading(line)
+            if found:
+                name, rest = found
+                seen[name] = seen.get(name, 0) + 1
+                current = sections.setdefault(name, [])
+                if rest:
+                    current.append(rest)
             continue
         plain = _plain_heading(line)
-        if plain:
+        if plain and plain[0] not in markdown_names:
             name, rest = plain
             seen[name] = seen.get(name, 0) + 1
             current = sections.setdefault(name, [])

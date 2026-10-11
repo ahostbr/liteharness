@@ -140,8 +140,36 @@ def test_a_duplicate_plain_heading_is_refused():
     assert any("Doing now" in p and "2 times" in p for p in owner.validate_now(text))
 
 
-def test_a_plain_heading_duplicating_a_markdown_one_is_refused():
+def test_a_markdown_heading_makes_a_plain_line_of_the_same_name_body_text():
+    # Decided per NAME: once the file has a markdown heading for a name, a `Name: text` line is
+    # that section's body, not a second heading (the previous rule counted it as a duplicate).
     text = GOOD_NOW + "Waiting on: someone else\n"
+    assert owner.validate_now(text) == []
+
+
+def test_body_lines_named_like_headings_in_a_markdown_file_are_body():
+    # The shipped template spells every heading `## Name`; a body line that starts with one of
+    # the names and a colon is prose under the heading above it.
+    text = (GOOD_NOW.replace("Reconciling the widgets backlog.",
+                             "Reconciling the widgets backlog.\nWaiting on: the reviewer")
+            .replace("2026-10-11 14:00", "2026-10-11 14:00\nUpdated: parser only")
+            .replace("The audit of the widgets index (done, see DOMAIN.md)",
+                     "The audit of the widgets index\nDo NOT redo: the cache"))
+    assert "Waiting on: the reviewer" in text and "Updated: parser only" in text
+    assert "Do NOT redo: the cache" in text
+    assert owner.validate_now(text) == []
+
+
+def test_two_markdown_headings_of_one_name_are_still_two_headings():
+    text = GOOD_NOW + "\n## Crew alive\nnone\n"
+    assert any("Crew alive" in p and "2 times" in p for p in owner.validate_now(text))
+
+
+def test_a_plain_body_line_naming_another_heading_is_a_second_heading_in_a_plain_file():
+    # The documented cost of the plain spelling: with no markdown heading to anchor the name,
+    # an unindented `Name: text` line IS the heading.
+    text = PLAIN_NOW.replace("Doing now: Reconciling the widgets backlog.\n",
+                             "Doing now: Reconciling the widgets backlog.\nWaiting on: x\n")
     assert any("Waiting on" in p and "2 times" in p for p in owner.validate_now(text))
 
 
