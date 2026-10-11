@@ -13,7 +13,7 @@ import re
 import time
 from pathlib import Path
 
-from . import config, fleet_policy, naming
+from . import config, fleet_policy, naming, roles
 from .cli import _bridge_request, _rename_canvas_seat
 
 INIT_SKILL = "/liteharness:ls-init-liteharness"
@@ -75,7 +75,7 @@ def bootstrap(name: str, cwd: str, *, wait: float = 90, sleep=time.sleep, clock=
         return {"ok": False, "error": refusal}
     try:
         resolved = _bridge_request("POST", "/harness/spawn/resolve", {
-            "cli": "claude", "name": name, "tier": "orchestrator",
+            "cli": "claude", "name": name, "tier": roles.wire_tier("orchestrator"),
             "cwd": str(target), "prompt": f"{INIT_SKILL} {name}",
         })
     except Exception as exc:
@@ -97,7 +97,7 @@ def bootstrap(name: str, cwd: str, *, wait: float = 90, sleep=time.sleep, clock=
     # The owner-minted ID, not an ambient parent ID. The child's hook uses
     # this identity; an empty spawned_by overrides inherited agent ancestry.
     env.update({"LITEHARNESS_AGENT_ID": agent_id, "LITEHARNESS_REQUESTED_NAME": name,
-                "LITEHARNESS_TIER": "orchestrator", "LITEHARNESS_SPAWN_MODE": "canvas",
+                "LITEHARNESS_ROLE": "orchestrator", "LITEHARNESS_TIER": roles.wire_tier("orchestrator"), "LITEHARNESS_SPAWN_MODE": "canvas",
                 "LITEHARNESS_SPAWNED_BY": ""})
     try:
         created = _bridge_request("POST", "/pty/create", {
@@ -125,7 +125,7 @@ def bootstrap(name: str, cwd: str, *, wait: float = 90, sleep=time.sleep, clock=
         cwd_matches = (isinstance(registered_cwd, str) and bool(registered_cwd)
                        and Path(registered_cwd).is_absolute()
                        and Path(registered_cwd).resolve() == target)
-        if row.get("name") and (row["name"] != name or row.get("tier") != "orchestrator"
+        if row.get("name") and (row["name"] != name or roles.row_role(row, "") != "orchestrator"
                                 or row.get("spawned_by") or not cwd_matches):
             return _cleanup(session_id, f"Accepted identity mismatch: requested {name!r}, registered {row['name']!r}")
         if view and row.get("name") == name:

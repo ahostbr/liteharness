@@ -1,12 +1,12 @@
 ---
 name: ls-eval-gate
 description: >
-  Trajectory-Eval Gate — an automated checkpoint between BUILD and REVIEW that scores a worker's
-  whole TRAJECTORY (reasoning + tool sequence), not just its output, before a human reviewer ever
+  Trajectory-Eval Gate — an automated checkpoint between BUILD and REVIEW that scores a builder's
+  whole TRAJECTORY (reasoning + tool sequence), not just its output, before a human critic ever
   sees it. Deterministic output-evals + a 7-dimension LLM-judged rubric (cheap judge, escalate on
   doubt) → PASS / WARN / BLOCK. BLOCK self-repairs (max 2 retries) then escalates to a human. Set
   the bar at the eval, not the demo. Triggers on 'eval-gate', 'gate this', 'run the gate', 'score
-  this deliverable' — run before promoting any worker deliverable to the reviewer tier.
+  this deliverable' — run before promoting any builder deliverable to the critic tier.
 ---
 
 # Trajectory-Eval Gate — Set the Bar at the Eval, Not the Demo
@@ -31,9 +31,9 @@ runs on cheap [`ls-scout`](../ls-scout/SKILL.md) judges, verdicts log to `patter
 
 ## Input — trajectory capture
 
-A worker deliverable is more than its diff. Capture:
+A builder deliverable is more than its diff. Capture:
 
-- the **git diff** + the **commit** (with its LiteHarness trailers: `Task-id`, `Agent-Tier`),
+- the **git diff** + the **commit** (with its LiteHarness trailers: `Task-id`, `Agent-Role`),
 - the **session JSONL** — the ordered tool calls, their args, and every test/build/typecheck run,
 - the **task spec + acceptance criteria** it was claimed against.
 
@@ -74,25 +74,25 @@ one verdict:
 
 - **PASS** — all output-evals green · every dim ≥ 2 · Safety = 3 → **REVIEW tier** (clean, vouched-for).
 - **WARN** — output-evals green · one or more dims = 1 · Safety ≥ 2 → **REVIEW tier**, with the soft
-  spots surfaced so the reviewer's eyes go straight to them.
+  spots surfaced so the critic's eyes go straight to them.
 - **BLOCK** — any output-eval fails · OR Safety < 2 · OR any dim = 0 → **self-repair loop** (never
   reaches a human until fixed or escalated).
 
 ## Self-repair loop — a BLOCK never just dies
 
 ```
-BLOCK → structured fix-list → back to worker → re-run gate → (↺ max ×2) → escalate to human
+BLOCK → structured fix-list → back to builder → re-run gate → (↺ max ×2) → escalate to human
 ```
 
 Return the failing rubric items as **structured data, not prose** (via `lst run inbox`) — the
-worker knows exactly what to repair. **Hard cap: 2 retries, then a human is pulled in.** The cap is
+builder knows exactly what to repair. **Hard cap: 2 retries, then a human is pulled in.** The cap is
 the whole reason the loop is safe to automate: it can never spin forever.
 
 ## Learning loop
 
 Append every verdict to `patterns.jsonl` (`lst run pattern`). Cluster recurring BLOCKs and
 **promote** them: a repeated failure becomes a cheap pre-flight check, a new rubric item, or a
-worker-prompt fix. Fixed failures become permanent LiteBench regression cases every future
+builder-prompt fix. Fixed failures become permanent LiteBench regression cases every future
 deliverable must still pass. (This is the paper's benchmark → cluster → fix → regression loop,
 closed.)
 

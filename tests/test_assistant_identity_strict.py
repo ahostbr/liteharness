@@ -181,3 +181,21 @@ def test_process_dependency_absence(case, monkeypatch):
 def test_duplicate_registry_identity_refuses(case):
     (case.directory / 'duplicate.json').write_text(json.dumps(case.row))
     assert case.resolve() is None
+
+
+def test_a_row_that_carries_only_role_resolves(case):
+    case.row.pop('tier')
+    case.write({'role': 'orchestrator'})
+    assert case.resolve() == ('own', 'pane-own')
+
+
+def test_a_role_only_row_that_is_not_the_orchestrator_does_not_resolve(case):
+    case.row.pop('tier')
+    case.write({'role': 'builder'})
+    assert case.resolve() is None
+
+
+def test_a_row_with_no_role_at_all_is_still_refused(case):
+    case.row.pop('tier')
+    case.write({})
+    assert case.resolve() is None

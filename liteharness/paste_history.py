@@ -17,6 +17,13 @@ import urllib.parse
 import urllib.request
 import uuid
 
+
+def _wire_tier(presence: dict) -> str:
+    """The seat's role in the word the desktop bridge knows (role-or-tier, old tier word)."""
+    from . import roles
+    return roles.wire_tier(roles.row_role(presence, "")) or "unknown"
+
+
 SCAN_BYTES = 16 * 1024 * 1024
 IMAGE_BYTES = 5 * 1024 * 1024
 STORAGE_BYTES = 256 * 1024 * 1024
@@ -145,7 +152,7 @@ def _open(project: Path, agent_id: str, agents_dir: Path, leaf_id: str | None) -
         raise CaptureError("bridge token unavailable; images retained locally")
     body = {"projectDir": str(project), "pageId": "pastes", "title": "Pasted images",
             "owner": {"id": agent_id, "name": str(presence.get("name") or agent_id[:8]),
-                      "tier": str(presence.get("tier") or "unknown")},
+                      "tier": _wire_tier(presence)},
             "leafId": leaf_id}
     request = urllib.request.Request(url.rstrip("/") + "/theater/open",
                                      data=json.dumps(body).encode(), method="POST",

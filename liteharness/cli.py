@@ -13,6 +13,7 @@ from importlib import resources
 from pathlib import Path
 
 from . import inbox, config
+from . import roles as _roles
 
 
 def is_inside_litesuite() -> bool:
@@ -798,6 +799,36 @@ _INSTALLERS = {
 _SCRIPT_CLIS = {"codex-cli", "copilot-cli"}
 
 
+def cmd_owner_handoff(argv: list[str]) -> None:
+    """`liteharness owner-handoff --memory <dir>`: the owner's rolling self-handoff.
+
+    Validates NOW.md against the template, commits NOW.md and DOMAIN.md with an
+    `Agent-Role: owner` trailer, then prints `/compact` and the reload pointer."""
+    from . import naming, owner
+
+    memory = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--memory" and i + 1 < len(argv):
+            memory = argv[i + 1]
+            i += 2
+        else:
+            print(f"HANDOFF REFUSED: owner-handoff does not know {argv[i]!r}. Usage: "
+                  "liteharness owner-handoff --memory <dir>")
+            sys.exit(2)
+    if not memory:
+        print("HANDOFF REFUSED: --memory <dir> is required. Usage: liteharness owner-handoff --memory <dir>")
+        sys.exit(2)
+    agent_id = config.get_agent_id()
+    try:
+        lines = owner.handoff(memory, agent_id=agent_id, agent_name=naming.get_name(agent_id))
+    except owner.OwnerError as exc:
+        print(f"HANDOFF REFUSED: {exc}. Nothing was committed.")
+        sys.exit(2)
+    for line in lines:
+        print(line)
+
+
 def cmd_install_statusline() -> None:
     """Install ONLY the status line into Claude Code settings.json.
 
@@ -1086,15 +1117,15 @@ def _not_a_leader_warning(sender_id: str, recipient_id: str) -> str | None:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    if row(sender_id).get("tier") != "orchestrator":
+    if _roles.row_role(row(sender_id), "") != "orchestrator":
         return None
     target = row(recipient_id)
-    if not target or target.get("tier") == "leader":
+    if not target or _roles.row_role(target) == "owner":
         return None
     return (f"T918 guard (warn only): {target.get('name') or recipient_id} ({recipient_id}) "
-            f"is tier {target.get('tier') or 'unknown'!r}, not leader. THE LOOP 2/5: the "
-            "orchestrator talks to leaders only; re-spawn a restarted seat with "
-            "`liteharness spawn --split --pane <fleet> --tier leader`.")
+            f"is role {_roles.row_role(target, 'unknown')!r}, not owner. THE LOOP 2/5: the "
+            "orchestrator talks to owners only; re-spawn a restarted seat with "
+            "`liteharness spawn --split --pane <fleet> --tier owner`.")
 
 
 def cmd_send(
@@ -1255,9 +1286,16 @@ def cmd_inbox(count: int = 10, agent: str | None = None, all_agents: bool = Fals
         sys.stdout.buffer.write((text + "\n").encode("utf-8", "replace"))
 
 
-VALID_TIERS = ("orchestrator", "leader", "worker", "thinker", "reviewer")
-#: T0236-T4: tiers that must be given an explicit --cwd on a fresh spawn.
-CWD_REQUIRED_TIERS = ("worker", "leader")
+def _role_doctrine_file(role: str) -> str:
+    """The doctrine file a role reads, in the prompt library. The table is keyed by the file
+    families that predate the rename, so a role is resolved through prompts._family() first."""
+    from . import prompts
+    return prompts.TIER_FILES.get(prompts._family(role), prompts.FALLBACK_TIER_FILE)
+
+
+VALID_TIERS = _roles.ROLES
+#: T0236-T4: roles that must be given an explicit --cwd on a fresh spawn.
+CWD_REQUIRED_TIERS = _roles.CWD_REQUIRED_ROLES
 
 # T1027: takeover liveness uses the SAME bar as is_name_taken. It mirrored
 # discover's 600 s roll-call freshness, and so evicted a holder whose pid was
@@ -1459,13 +1497,17 @@ def cmd_register(
     if spawned_by:
         presence["spawned_by"] = spawned_by
 
-    if tier and tier in VALID_TIERS:
-        presence["tier"] = tier
+    role = _roles.normalize_role(tier) if tier else None
+    if role:
+        presence.update(_roles.presence_fields(role))
+        if _roles.deprecation_note(tier):
+            print(_roles.deprecation_note(tier), file=sys.stderr)
     elif tier:
-        print(f"Warning: invalid tier '{tier}', must be one of {VALID_TIERS}. Defaulting to 'worker'.")
-        presence.setdefault("tier", "worker")
-    elif "tier" not in presence:
-        presence["tier"] = "worker"
+        print(f"Warning: invalid role '{tier}', must be one of {_roles.ROLES}. Defaulting to '{_roles.DEFAULT_ROLE}'.")
+        if "tier" not in presence and "role" not in presence:
+            presence.update(_roles.presence_fields(_roles.DEFAULT_ROLE))
+    elif "tier" not in presence and "role" not in presence:
+        presence.update(_roles.presence_fields(_roles.DEFAULT_ROLE))
 
     if team:
         presence["team"] = team
@@ -1558,7 +1600,7 @@ def cmd_register(
         announce_registration(presence, event=f"took the name {resolved_name} (was {old_name})")
     team_str = f", team={presence['team']}" if presence.get("team") else ""
     spatial_str = f", pane={pane_id}" if pane_id else ""
-    print(f"Registered agent {agent_id}: cli={presence.get('cli', '?')}, model={presence.get('model', '?')}, tier={presence.get('tier', 'worker')}, name={resolved_name}{team_str}{spatial_str}")
+    print(f"Registered agent {agent_id}: cli={presence.get('cli', '?')}, model={presence.get('model', '?')}, role={_roles.row_role(presence)}, name={resolved_name}{team_str}{spatial_str}")
     if strict_identity:
         print("Folder-owned identity: " + json.dumps({key: presence.get(key) for key in
               ("agent_id", "name", "backend", "model", "thinking_level", "session_pid")}))
@@ -2648,7 +2690,8 @@ BOOTSTRAP_HARNESS_SECTION_END = "<!-- End LiteHarness Bootstrap -->"
 BOOTSTRAP_HARNESS_CONTENT = """\
 # LiteHarness — Active
 
-This project uses [LiteHarness](https://litesuite.dev) — a five-tier AI agent orchestration system.
+This project uses [LiteHarness](https://litesuite.dev) — a five-role AI agent orchestration system
+(orchestrator, owner, builder, scout, critic).
 
 `liteharness bootstrap` creates the `.liteharness/` scaffold and an empty `patterns.jsonl`.
 Config and prompt files are optional and are absent on a fresh install — treat a missing
@@ -2667,8 +2710,9 @@ one as "defaults apply", never as an error, and never block on it.
 1. Run `lst run environment` for project context — needs no files, always works
 2. Run `lst run pattern action=query query="<task>"` for relevant history
 3. Read `.liteharness/config.yaml` if it exists
-4. Follow the tier the harness assigned you — **do not assume you are the orchestrator**;
-   spawning, merging and dispatching are orchestrator/leader actions
+4. Follow the role the harness assigned you — **do not assume you are the orchestrator**;
+   spawning, merging and dispatching are orchestrator/owner actions
+5. Every commit you make carries `Agent-Role:` (your role), `Agent-Name:` and `Agent-ID:` trailers
 """
 
 
@@ -3042,14 +3086,14 @@ def _generate_bootstrap(
     # a --tier leader canvas spawn got the WORKER preamble and measurably ran
     # the wrong doctrine until corrected. Until the bridge forwards env, the
     # brief is the only post-boot channel that reliably arrives.
-    spawn_tier = context_env.get("LITEHARNESS_TIER", "").strip()
-    if spawn_tier and spawn_tier != "worker":
-        lines.append(f"YOUR TIER: {spawn_tier.upper()}.")
+    spawn_tier = _roles.env_role(context_env)
+    if spawn_tier and spawn_tier != _roles.DEFAULT_ROLE:
+        lines.append(f"YOUR ROLE: {spawn_tier.upper()}.")
         lines.append(
-            f"If your injected '## Tier Preamble' header says a DIFFERENT tier "
+            f"If your injected '## Tier Preamble' header says a DIFFERENT role "
             f"(canvas-spawn delivery gap), your real doctrine is "
-            f"resources/liteharness-plugin/prompts/preambles/{spawn_tier}-preamble.md "
-            f"(orchestrator: orchestrator-role.md, same prompts dir) — READ IT "
+            f"{_role_doctrine_file(spawn_tier)} "
+            f"in the harness prompts dir — READ IT "
             f"BEFORE acting; it overrides the injected one."
         )
 
@@ -3116,7 +3160,7 @@ def _generate_bootstrap(
     lines.append("3) Start inbox monitor: Monitor({ description: \"LiteHarness inbox\", persistent: true, timeout_ms: 3600000, command: \"python -m liteharness.hooks watch --agent-id <YOUR-AGENT-ID>\" })")
 
     # Role-based memory injection
-    tier = context_env.get("LITEHARNESS_TIER", "worker")
+    tier = _roles.env_role(context_env, _roles.DEFAULT_ROLE)
     project = os.path.basename(target_dir)
     try:
         from liteharness.rag.engine import litesuite_rag as _rag
@@ -3393,7 +3437,7 @@ SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
     ("--permission-mode", "permission_mode", True, "claude --permission-mode"),
     ("--prompt", "prompt", True, "the brief"),
     ("--name", "name", True, "the seat's name"),
-    ("--tier", "tier", True, "worker | leader | thinker | reviewer | orchestrator"),
+    ("--tier", "tier", True, "role: orchestrator | owner | builder | scout | critic (old tier words are accepted, deprecated)"),
     ("--cognitive", "cognitive", True, "cognitive architecture (default: tried from --name)"),
     ("--team", "team", True, "team"),
     ("--thread-id", "thread_id", True, "thread id"),
@@ -3408,6 +3452,8 @@ SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
     ("--spawned-by", "spawned_by", True, "explicit requesting agent id (fresh or resumed spawn)"),
     ("--args", "additional_args", True, "extra arguments appended to the claude command"),
     ("--new-window", "new_window", False, "accepted for old callers; has no effect"),
+    ("--owner", "owner_title", True, "boot a standing owner named TITLE from --memory (role owner; the seat is named by its title)"),
+    ("--memory", "memory_dir", True, "with --owner: the folder holding SOUL.md, DOMAIN.md and NOW.md"),
 )
 
 
@@ -3916,8 +3962,9 @@ def _spawn_litetui_agent(
     if not (pty_mode or split_mode) or (pty_mode and split_mode):
         print("SPAWN REFUSED: LiteTUI requires exactly one of --pty or --split.")
         sys.exit(2)
-    if not name or not tier or tier not in VALID_TIERS:
-        print("SPAWN REFUSED: LiteTUI requires --name and a valid --tier.")
+    if not name or not tier or tier not in _roles.ROLES:
+        print("SPAWN REFUSED: LiteTUI requires --name and a valid --tier (a role: "
+              + ", ".join(_roles.ROLES) + ").")
         sys.exit(2)
     caller = (spawned_by or os.environ.get("LITEHARNESS_AGENT_ID") or "").strip()
     if not caller:
@@ -3955,7 +4002,7 @@ def _spawn_litetui_agent(
         print(pre)
         sys.exit(2)
     resolved = _bridge_request("POST", "/harness/spawn/resolve", {
-        "cli": "litetui", "name": name, "tier": tier,
+        "cli": "litetui", "name": name, "tier": _roles.wire_tier(tier),
         **({"model": model} if model else {}),
         **({"backend": backend} if backend else {}),
         **({"thinkingLevel": thinking_level} if thinking_level else {}),
@@ -4191,6 +4238,8 @@ def cmd_spawn(
     spawned_by: str | None = None,
     spawn_cli: str = "claude",
     takeover: bool = False,
+    owner_title: str | None = None,
+    memory_dir: str | None = None,
 ) -> None:
     """Spawn a new Claude Code session or resume a Claude Code or LiteTUI split.
 
@@ -4204,6 +4253,37 @@ def cmd_spawn(
     if spawn_cli not in ("claude", "litetui", "codex"):
         print("SPAWN REFUSED: --cli must be claude, litetui or codex. Nothing was spawned.")
         sys.exit(2)
+    if owner_title or memory_dir:
+        from . import owner as _owner
+        if not (owner_title and memory_dir):
+            print(f"SPAWN REFUSED: {'--memory' if owner_title else '--owner'} is also required: "
+                  "--owner <Title> --memory <dir> go together. Nothing was spawned.")
+            sys.exit(2)
+        if (spawn_cli != "claude" or prompt or cognitive or resume_agent_id or resume_convo_id
+                or (tier and _roles.normalize_role(tier) != "owner")
+                or (name and name != owner_title)):
+            print("SPAWN REFUSED: --owner takes its prompt from SOUL.md and its name from the title, so it "
+                  "cannot be combined with --prompt, --cognitive, --name, --resume, --convo, a --tier other "
+                  "than owner, or --cli other than claude (resume an owner with `--resume <Title>` alone). "
+                  "Nothing was spawned.")
+            sys.exit(2)
+        try:
+            prompt = _owner.owner_prompt(owner_title, memory_dir)
+        except _owner.OwnerError as exc:
+            print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
+            sys.exit(2)
+        name, tier = owner_title, "owner"
+    _tier_note = None
+    if tier:
+        _role = _roles.normalize_role(tier)
+        if _role is None:
+            print(f"SPAWN REFUSED: --tier {tier!r} is not a role; use one of "
+                  f"{', '.join(_roles.ROLES)}. Nothing was spawned.")
+            sys.exit(2)
+        _tier_note = _roles.deprecation_note(tier)
+        tier = _role
+    if tier and _tier_note and spawn_cli != "codex":
+        print(_tier_note, file=sys.stderr)
     if spawn_cli == "codex":
         # T0088-C (this branch only). Codex runs no liteharness hook, so it takes no tier, brief or
         # cognitive architecture, and --pty is closed to it (a second daemon start is not allowed).
@@ -4230,8 +4310,10 @@ def cmd_spawn(
     # litetui and resume routes pass through it too (codex refuses --cognitive above).
     try:
         from . import prompts as _prompts_mod
-        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", tier or "worker",
-                                                   tier_default=not cognitive)
+        # An owner's name is its title, not a polymath: the charter in SOUL.md is its identity,
+        # so --owner "Feynman" must not pick up the Feynman architecture by name.
+        _cog = None if owner_title else _prompts_mod.resolve_cognitive_file(
+            cognitive or name or "", tier or _roles.DEFAULT_ROLE, tier_default=not cognitive)
     except Exception as _cog_exc:  # noqa: BLE001 — a name-only miss never kills a spawn
         if cognitive:
             print(f"SPAWN REFUSED: --cognitive {cognitive!r} could not be resolved "
@@ -4251,8 +4333,8 @@ def cmd_spawn(
         # T0236-T4: a worker or leader is born in an explicit repo root. Falling back to
         # the CALLER's cwd is how seats ended up in the wrong tree. Resume takes its cwd
         # from the name index.
-        if not cwd and (tier or "worker") in CWD_REQUIRED_TIERS:
-            print(f"SPAWN REFUSED: pass --cwd <repo root>; a {tier or 'worker'}-tier spawn never "
+        if not cwd and (tier or _roles.DEFAULT_ROLE) in _roles.CWD_REQUIRED_ROLES:
+            print(f"SPAWN REFUSED: pass --cwd <repo root>; a {tier or _roles.DEFAULT_ROLE} spawn never "
                   "inherits the caller's cwd. Nothing was spawned.")
             sys.exit(2)
     if spawn_cli == "litetui" and not (resume_agent_id or resume_convo_id):
@@ -4357,14 +4439,15 @@ def cmd_spawn(
     # LITESUITE_PROJECT_ID — canonical name per the spatial plan; matches the
     # TS write side and hooks.py's presence reader (drift fixed 2026-08-06).
     resolved_project = project_id or os.environ.get("LITESUITE_PROJECT_ID", "")
-    resolved_tier = tier or "worker"
+    resolved_tier = tier or _roles.DEFAULT_ROLE
     if resolved_thread:
         context_env["LITEHARNESS_THREAD_ID"] = resolved_thread
     if resolved_workspace:
         context_env["LITEHARNESS_WORKSPACE_ID"] = resolved_workspace
     if resolved_project:
         context_env["LITESUITE_PROJECT_ID"] = resolved_project
-    context_env["LITEHARNESS_TIER"] = resolved_tier
+    context_env["LITEHARNESS_ROLE"] = resolved_tier
+    context_env["LITEHARNESS_TIER"] = _roles.wire_tier(resolved_tier)
     if team:
         context_env["LITEHARNESS_TEAM"] = team
 
@@ -4605,8 +4688,8 @@ def cmd_spawn(
                 pdata["name"] = naming.get_name(new_uuid)
             if my_id and not pdata.get("spawned_by"):
                 pdata["spawned_by"] = my_id
-            if resolved_tier and resolved_tier != "worker":
-                pdata["tier"] = resolved_tier
+            if resolved_tier and resolved_tier != _roles.DEFAULT_ROLE:
+                pdata.update(_roles.presence_fields(resolved_tier))
             pdata["spawn_mode"] = actual_spawn_mode
             pdata["canvas_session_id"] = new_session
             # Spatial identity: presence.pane_id is what the bridge's self-alias
@@ -5536,7 +5619,7 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
 
     # Parent tier is lineage evidence, even when its row is stale or outside the
     # display limit. Capture it before filtering so restarted children stay visible.
-    orchestrator_ids = {a.get("agent_id") for a in agents if a.get("tier") == "orchestrator"}
+    orchestrator_ids = {a.get("agent_id") for a in agents if _roles.row_role(a, "") == "orchestrator"}
 
     # Sort by most recent, then apply liveness filter (unless include_all).
     agents.sort(key=lambda a: a.get("_age_seconds", float("inf")))
@@ -5628,8 +5711,8 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
         from . import naming
         agent_name = naming.get_name(a.get('agent_id', ''))
         loop2_flag = (
-            "  ⚠ started by the orchestrator but not a leader (THE LOOP 2)"
-            if a.get("spawned_by") in orchestrator_ids and a.get("tier") != "leader"
+            "  ⚠ started by the orchestrator but not an owner (THE LOOP 2)"
+            if a.get("spawned_by") in orchestrator_ids and _roles.row_role(a, "") != "owner"
             else ""
         )
 
@@ -5648,7 +5731,7 @@ def cmd_discover(count: int = 100, include_all: bool = False) -> None:
             if spawn_mode == "pty":
                 handle_info = f" pty{handle_info}"
 
-        tier = a.get("tier", "worker")
+        tier = _roles.row_role(a)
         # Show spatial data if available
         spatial = a.get("spatial", {})
         spatial_info = ""
@@ -5848,6 +5931,8 @@ def main() -> None:
         print("Commands:")
         print("  bootstrap <path>               Bootstrap harness for a project (global init + scaffold)")
         print("  init                           Initialize LiteHarness (global only)")
+        print("  owner-handoff --memory DIR     An owner's rolling self-handoff: check NOW.md, commit it and")
+        print("                                 DOMAIN.md, print /compact and the reload pointer")
         print("  install-statusline             Install ONLY the status line (for callers that")
         print("                                 already wrote their own hooks, e.g. the wizard)")
         print("  update-scripts [--cli name]    Update watcher scripts for Codex/Copilot")
@@ -5958,6 +6043,8 @@ def main() -> None:
         cmd_init()
     elif cmd == "install-statusline":
         cmd_install_statusline()
+    elif cmd == "owner-handoff":
+        cmd_owner_handoff(sys.argv[2:])
     elif cmd == "update-scripts":
         cli_filter = None
         if "--cli" in sys.argv:

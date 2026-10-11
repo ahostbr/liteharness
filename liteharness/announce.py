@@ -16,7 +16,7 @@ import os
 import time
 from datetime import datetime
 
-from . import config, inbox
+from . import config, inbox, roles
 
 # Mirrors cmd_discover / DEFAULT_PRESENCE_STALE_MS: a heartbeat older than this
 # is not a live seat, whatever its pid says.
@@ -36,7 +36,7 @@ def live_orchestrators(exclude_id: str) -> list[dict]:
         if f.name.endswith(".tmp"):
             continue
         row = _read_presence(f)
-        if not row or row.get("tier") != "orchestrator":
+        if not row or roles.row_role(row, "") != "orchestrator":
             continue
         if row.get("agent_id") == exclude_id or row.get("exited_at"):
             continue
@@ -76,7 +76,7 @@ def announce_registration(presence: dict, *, event: str) -> list[str]:
         return []
     body = (
         f"NEW ON THE BOARD: {presence.get('name') or '?'} ({agent_id}) {event}. "
-        f"tier {presence.get('tier') or '?'}, {presence.get('cli') or '?'}/{presence.get('model') or '?'}, "
+        f"role {roles.row_role(presence, '?')}, {presence.get('cli') or '?'}/{presence.get('model') or '?'}, "
         f"cwd {presence.get('cwd') or os.getcwd()}, "
         f"spawned by {presence.get('spawned_by') or 'nobody (started directly)'}."
     )

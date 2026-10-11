@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ..roles import ROLES, ROLE_ALIASES
+
 
 def register_rag_tool(registry: Any) -> None:
     """Register litesuite_rag as an MCP tool with the given registry."""
@@ -74,9 +76,9 @@ def register_rag_tool(registry: Any) -> None:
                 },
                 "tier": {
                     "type": "string",
-                    "enum": ["orchestrator", "leader", "worker", "thinker", "reviewer"],
-                    "default": "worker",
-                    "description": "Agent tier for query_by_tier",
+                    "enum": list(ROLES) + list(ROLE_ALIASES),
+                    "default": "builder",
+                    "description": "Agent role for query_by_tier (old tier words are deprecated aliases)",
                 },
                 "source": {
                     "type": "string",

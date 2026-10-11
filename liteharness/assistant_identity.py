@@ -8,8 +8,9 @@ from pathlib import Path
 import re
 import sys
 
+from . import roles
+
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
-_TIERS = frozenset({"orchestrator", "leader", "worker", "thinker", "reviewer"})
 
 
 def _positive_number(value):
@@ -31,7 +32,7 @@ def _read(path):
         raise ValueError("registry object required")
     agent_id = row.get("agent_id")
     if (not isinstance(agent_id, str) or not _ID.fullmatch(agent_id)
-            or path.stem != agent_id or row.get("tier") not in _TIERS):
+            or path.stem != agent_id or roles.row_role(row, "") not in roles.ROLES):
         raise ValueError("registry identity required")
     return row
 
@@ -90,8 +91,8 @@ def _live_row(api, row):
 
 
 def _fields(row):
-    return tuple(row.get(key) for key in (
-        "agent_id", "tier", "pane_id", "session_pid", "session_process_started_at"))
+    return (row.get("agent_id"), roles.row_role(row, ""), row.get("pane_id"),
+            row.get("session_pid"), row.get("session_process_started_at"))
 
 
 def _own_assistant_proof(hook_input, root, *, process_api=None, hook_pid=None):
@@ -115,7 +116,7 @@ def _own_assistant_proof(hook_input, root, *, process_api=None, hook_pid=None):
         own_path = directory / (agent_id + ".json")
         own = _read(own_path)
         pane_id = own.get("pane_id")
-        if (own.get("tier") != "orchestrator" or not isinstance(pane_id, str)
+        if (roles.row_role(own, "") != "orchestrator" or not isinstance(pane_id, str)
                 or not pane_id.strip() or type(own.get("session_pid")) is not int
                 or own["session_pid"] != pid
                 or not _positive_number(own.get("session_process_started_at"))
@@ -127,7 +128,7 @@ def _own_assistant_proof(hook_input, root, *, process_api=None, hook_pid=None):
             if path.suffix != ".json":
                 continue
             row = _read(path)
-            if row["tier"] == "orchestrator" and _live_row(process_api, row):
+            if roles.row_role(row, "") == "orchestrator" and _live_row(process_api, row):
                 live.append(row["agent_id"])
         if live != [agent_id]:
             return None

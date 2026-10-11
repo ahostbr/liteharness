@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import config
+from . import config, roles
 from .cli import _dedupe_by_session_pid
 from .hooks import _cc_tasks_db_path, _pid_alive
 
@@ -55,8 +55,9 @@ def read_snapshot(
     if superseded:
         warnings.append(f"{len(superseded)} superseded presence row(s) excluded")
     agent_count = len(agents)
-    agents = [{key: str(row.get(key) or "")[:512] for key in
-               ("agent_id", "name", "tier", "model", "cwd")}
+    agents = [{**{key: str(row.get(key) or "")[:512] for key in
+                  ("agent_id", "name", "model", "cwd")},
+               "tier": roles.row_role(row, "")[:512]}
               for row in agents[:LIMIT]]
 
     tasks = []

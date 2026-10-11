@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from .. import roles as _roles
 from .storage import RagStorage
 
 logger = logging.getLogger(__name__)
@@ -96,18 +97,18 @@ KNOWLEDGE_PATTERNS: list[str] = [
 
 TIER_ROOTS: dict[str, list[str]] = {
     "orchestrator": ["Docs", "CLAUDE.md", "AGENTS.md"],
-    "leader": ["packages", "apps/server"],
-    "worker": ["apps/web/src", "apps/desktop/src/litesuite", "packages"],
-    "thinker": ["packages/contracts", "packages/shared"],
-    "reviewer": ["apps/web/src", "apps/desktop/src/litesuite"],
+    "owner": ["packages", "apps/server"],
+    "builder": ["apps/web/src", "apps/desktop/src/litesuite", "packages"],
+    "scout": ["packages/contracts", "packages/shared"],
+    "critic": ["apps/web/src", "apps/desktop/src/litesuite"],
 }
 
 TIER_TOKEN_BUDGETS: dict[str, int] = {
     "orchestrator": 4000,
-    "leader": 6000,
-    "worker": 8000,
-    "thinker": 5000,
-    "reviewer": 6000,
+    "owner": 6000,
+    "builder": 8000,
+    "scout": 5000,
+    "critic": 6000,
 }
 
 
@@ -1104,10 +1105,7 @@ def _action_query_by_tier(
         return {"ok": False, "error_code": "MISSING_PARAM", "message": "query is required"}
 
     query = query.strip()
-    tier = tier.lower()
-
-    if tier not in TIER_ROOTS:
-        tier = "worker"
+    tier = _roles.normalize_role(tier) or _roles.DEFAULT_ROLE
 
     project_root = Path(root).resolve() if root else _get_project_root()
     token_budget = TIER_TOKEN_BUDGETS.get(tier, 6000)

@@ -100,7 +100,7 @@ def test_a_compaction_reinjects_the_card_not_the_doctrine(root, monkeypatch, cap
     assert "FULL-DOCTRINE" in boot and "Inter-agent messaging active" in boot  # control
     _register("compact", LITEHARNESS_TIER="leader")
     out = capsys.readouterr().out
-    assert "## Tier card: leader" in out
+    assert "## Role card: owner" in out
     assert "FULL-DOCTRINE" not in out and "Inter-agent messaging active" not in out
     assert len(out.encode("utf-8")) <= prompts.TIER_CARD_MAX_BYTES + 400  # card + one identity line
 
@@ -201,7 +201,7 @@ def test_c_the_orchestrator_addressing_a_non_leader_is_flagged(root):
     _seat(root, ORCH, "orchestrator")
     _seat(root, SEAT, "worker", name="Carmack", spawned_by=ORCH)
     warn = cli._not_a_leader_warning(ORCH, SEAT)
-    assert warn and "not leader" in warn and "Carmack" in warn
+    assert warn and "not owner" in warn and "Carmack" in warn
 
 
 def test_c_control_a_leader_or_a_non_orchestrator_sender_is_silent(root):
@@ -235,7 +235,7 @@ def test_c_cmd_send_from_the_orchestrator_to_a_worker_prints_the_warning(root, c
     _seat(root, SEAT, "worker", name="Carmack", spawned_by=ORCH)
     cli.cmd_send(SEAT, "hello", from_id=ORCH, force=True)
     out = capsys.readouterr().out
-    assert "Sent message" in out and "T918 guard (warn only)" in out and "not leader" in out
+    assert "Sent message" in out and "T918 guard (warn only)" in out and "not owner" in out
 
 
 @pytest.mark.parametrize("tier", ["worker", "thinker", "leader"])
@@ -292,6 +292,6 @@ def test_compact_does_not_replay_pending_boot_architecture_or_brief(root, tmp_pa
               LITEHARNESS_COGNITIVE_FILE=str(cognitive), LITEHARNESS_SPAWN_BRIEF=str(brief))
     out = capsys.readouterr().out
     assert "METHOD-MARKER" not in out and "BRIEF-MARKER" not in out
-    assert "## Tier card: leader" in out
+    assert "## Role card: owner" in out
     assert brief.exists()  # compact must not consume a pending startup brief
     assert len(out.encode("utf-8")) <= 2448

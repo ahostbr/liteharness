@@ -33,7 +33,19 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple
 
+from . import roles as _roles
+
 # ── Composition tables ───────────────────────────────────────────────────────
+
+# The tables below are keyed by the doctrine FILE families (preambles/leader-preamble.md,
+# cognitive-architectures/workers/...) whose names predate the role rename. Every public
+# entry point takes a role OR an old tier word and resolves it with `_family()`.
+
+
+def _family(tier, default: str = "") -> str:
+    """A role or an old tier word -> the key the tables below use ('' / default if empty)."""
+    word = (tier or "").strip().lower()
+    return _roles.wire_tier(word) or default
 
 #: tier → the role/preamble file that defines it. Unknown tiers fall back to the
 #: worker preamble — a REAL file (the old TS fallback pointed at "worker.md",
@@ -193,7 +205,7 @@ def resolve_cognitive_file(name: str, tier: str | None = None, *,
     if not name or not name.strip():
         return None
 
-    preferred = _TIER_TO_COG_DIR.get((tier or "").strip().lower())
+    preferred = _TIER_TO_COG_DIR.get(_family(tier))
     order = [preferred] if preferred else []
     order += [d for d in _COG_TIER_DIRS if d != preferred]
     user_base = user_prompts_dir() / "cognitive-architectures"
@@ -315,7 +327,7 @@ def user_prompts_dir() -> Path:
 
 
 def _user_architecture_path(name: str, tier: str = "orchestrator") -> Path:
-    tier_dir = _TIER_TO_COG_DIR.get((tier or "").strip().lower(), "orchestrator")
+    tier_dir = _TIER_TO_COG_DIR.get(_family(tier), "orchestrator")
     return user_prompts_dir() / "cognitive-architectures" / tier_dir / f"{orchestrator_slug(name)}.md"
 
 
@@ -339,7 +351,7 @@ def migrate_generated_architecture(name: str, tier: str = "orchestrator") -> Opt
 
     Returns the overlay path when a migration happened, else None.
     """
-    if (tier or "").strip().lower() != "orchestrator":
+    if _family(tier) != "orchestrator":
         return None
     slug = orchestrator_slug(name)
     if slug == "default":
@@ -527,7 +539,7 @@ def compose(tier: str, mode: str) -> str:
             f"this delivery failure to your orchestrator/human immediately."
         )
 
-    tier_key = (tier or "").strip().lower()
+    tier_key = _family(tier)
     tier_file = TIER_FILES.get(tier_key)
     warn = ""
     if tier_file is None:
@@ -565,7 +577,7 @@ def compose(tier: str, mode: str) -> str:
         "need a running LiteSuite; your doctrine is inlined below in full"
     )
     header = (
-        f"## Tier Preamble — {tier_key or 'worker'} ({mode})\n"
+        f"## Tier Preamble — {_roles.canonical(tier_key)} ({mode})\n"
         f"You are running {where}.\n"
         f"Tool access is NOT tier-gated (manifests deleted 496dbdd9): these rules are "
         f"your ONLY constraint — a thinker/reviewer edits nothing because doctrine says "
@@ -599,14 +611,15 @@ def tier_card(tier: str) -> str:
     import json
 
     data = json.loads(TIER_CARDS_FILE.read_text(encoding="utf-8"))
-    key = (tier or "worker").strip().lower()
+    key = _family(tier, "worker")
     entry = data.get("tiers", {}).get(key, {})
-    lines = [f"## Tier card: {key} (after compaction; the full doctrine is one Read away)"]
+    shown = _roles.canonical(key)
+    lines = [f"## Role card: {shown} (after compaction; the full doctrine is one Read away)"]
     if entry.get("include_loop"):
         lines.append("THE LOOP (outranks everything):")
         lines += [f"{i}. {r['rule']}" for i, r in enumerate(data.get("loop", []), 1)]
     if entry.get("rules"):
-        lines.append(f"Your {key} rules:")
+        lines.append(f"Your {shown} rules:")
         lines += [f"{i}. {r['rule']}" for i, r in enumerate(entry["rules"], 1)]
     prompts_dir, source = resolve_prompts_dir()
     doctrine = entry.get("doctrine") or TIER_FILES.get(key) or FALLBACK_TIER_FILE
@@ -772,7 +785,7 @@ def diagnose(name: str, tier: str = "orchestrator") -> str:
         return "no prompt library resolved in ANY known location"
 
     for label, root in roots:
-        tier_dir = root / "cognitive-architectures" / (_TIER_TO_COG_DIR.get(tier, tier))
+        tier_dir = root / "cognitive-architectures" / (_TIER_TO_COG_DIR.get(_family(tier), tier))
         present = sorted(p.stem for p in tier_dir.glob("*.md")) if tier_dir.is_dir() else []
         mark = "HIT " if slug in present else "miss"
         lines.append(f"  [{mark}] {label:<22} {tier_dir}")

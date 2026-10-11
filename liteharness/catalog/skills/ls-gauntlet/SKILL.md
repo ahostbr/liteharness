@@ -38,7 +38,7 @@ goal + examples + rules -> figure out what GREAT actually looks like    <- re-pl
   INNER GAUNTLET, per piece:
     see it the way the USER will          (experience pass - run it, use it, before any critique)
     -> a separate critic finds the FLAWS  (absolute critique, no bar yet)
-    -> ANOTHER reviewer compares with the examples   (the bar judge - a second, distinct seat)
+    -> ANOTHER critic compares with the examples   (the bar judge - a second, distinct seat)
     -> truly good enough?
          No  -> explain what falls short -> build again
          Yes -> KEEP THE PIECE AND SAVE THE EVIDENCE   (pattern record happens here)
@@ -46,7 +46,7 @@ goal + examples + rules -> figure out what GREAT actually looks like    <- re-pl
   OUTER GAUNTLET, on the whole:
     put all accepted pieces together -> test the COMPLETE result
     -> a separate critic looks for problems in the whole
-    -> another reviewer compares the WHOLE with the examples
+    -> another critic compares the WHOLE with the examples
     -> does the complete result truly hold up?
          Yes                  -> FINISHED WITH PROOF
          one piece failed     -> find the piece OR CONNECTION causing it -> that piece's build loop
@@ -59,10 +59,10 @@ goal + examples + rules -> figure out what GREAT actually looks like    <- re-pl
 What the shape buys, each with its doctrine home:
 - **The outer gauntlet guards against per-piece green with an unowned join** — Phase 5 aggregate-and-gate + closure gates on the merged result.
 - **Flaw-finder and bar-judge are different seats** — T5 polymathic review vs the Issue↔Plan↔Implementation↔Review comparison. Collapsing them loses the flaws the bar never tests.
-- **The experience pass comes first** — the E2E "app must demonstrably work" gate: run it as a user before critiquing it as a reviewer.
+- **The experience pass comes first** — the E2E "app must demonstrably work" gate: run it as a user before critiquing it as a critic.
 - **Failure attribution routes to the CAUSE** — escalation routing; one failed join re-enters one build loop, a failed PLAN re-enters at "what does great look like" (STUCK→change-approach / Andon Cord).
 - 🔴 **"ACCEPTED" IS A BARRIER, AND IT IS THE ONLY ONE.** The flow reads *put all the **accepted** pieces together* — the word is load-bearing. Everything else in this skill pipelines happily; this one node must not. **Measured in run-01, by the lead, against its own skill:** the inner critics were dispatched and the assembly built immediately after, without waiting for the builders' DONE reports. Piece B was rewritten **37 seconds after** the assembly, so both integration seats judged a stale artifact; piece A had been measured mid-write and reported 478 bytes short. The damage happened to be trivial (64 bytes of factual annotation) only because the builder's real bug fix — a grid blowout overflowing 108 elements at 375px — had already landed. **A file existing is a file being written.** The completion signal is the builder's own DONE report, never the file's presence on disk. Two cheap guards, both of which worked: require every builder to report a BYTE COUNT (a number that disagrees with yours is a free integrity check on the lead), and assert `piece in assembled` before trusting any integration verdict.
-- **Honest exhaustion is a first-class terminal** — the budget-exhaustion hard stop: pause, summarize spent/remaining, notify the human. Success itself is *finished with proof* — the workers-cannot-declare-DONE-without-evidence law, verbatim.
+- **Honest exhaustion is a first-class terminal** — the budget-exhaustion hard stop: pause, summarize spent/remaining, notify the human. Success itself is *finished with proof* — the builders-cannot-declare-DONE-without-evidence law, verbatim.
 
 ## The bar is the whole trick
 
@@ -86,7 +86,7 @@ Prefer the hardest bar the agent can genuinely reach — a soft bar exits the lo
 
 **RULING (the user, 2026-08-21): "no blind critics by design thats my call, with proper prompting they will not be sympatheic."**
 
-The original skill blinds its critics — output only, labels stripped, never the code or the builder's reasoning — on the theory that a critic who watches the builder starts sympathising. This house runs the counter-example daily: fleet reviewers read the commits, the evidence, and the reasoning, and are MORE adversarial for it. Context is what catches a 4/4 claim whose gate never stamped the ledger.
+The original skill blinds its critics — output only, labels stripped, never the code or the builder's reasoning — on the theory that a critic who watches the builder starts sympathising. This house runs the counter-example daily: fleet critics read the commits, the evidence, and the reasoning, and are MORE adversarial for it. Context is what catches a 4/4 claim whose gate never stamped the ledger.
 
 So independence is bought differently here, and it costs the critic work, not information:
 
@@ -236,13 +236,13 @@ is not cosmetic:
 | path | `~/.claude/plugins/.../agents/polymathic-<name>.md` | `<prompts>/cognitive-architectures/<tier>/<name>.md` |
 | carries the cognitive method | ✅ yes | ✅ yes |
 | **kanban mandate** (`lst run tasks` at every transition) | ❌ **absent** | ✅ present |
-| **inbox protocol** (report to leader, `from=` on every send) | ❌ **absent** | ✅ present |
+| **inbox protocol** (report to owner, `from=` on every send) | ❌ **absent** | ✅ present |
 | **worktree discipline** (isolated branch, never merge) | ❌ **absent** | ✅ present |
-| **commit trailers** (`Task-id`/`Agent-Tier`/`Agent-Name`/`Agent-ID`) | ❌ **absent** | ✅ present |
+| **commit trailers** (`Task-id`/`Agent-Role`/`Agent-Name`/`Agent-ID`) | ❌ **absent** | ✅ present |
 | **tier composition** | ❌ one flat file per polymath | ✅ `pure/` + tier preamble, per tier |
 
 **Measured on disk 2026-08-22:** `pure/ogilvy.md` = 20,417 B. `workers/ogilvy.md` = **30,356 B** —
-the same method plus ~10 KB of worker-tier operational glue, and the two files differ by 271 diff
+the same method plus ~10 KB of builder-tier operational glue, and the two files differ by 271 diff
 lines. The roster is **tier-composed**; the plugin agent file is not.
 
 ### What it cost, measured
@@ -295,7 +295,7 @@ When the run happens on a LiteSuite box, the gauntlet's abstract roles map onto 
 | Gauntlet role | LiteSuite system | Verified anchor |
 |---|---|---|
 | Lead agent | you, the session running this skill | — |
-| **Casting** | Every seat is cast from the SHIPPED cognitive-architecture roster — 91 files under `prompts/cognitive-architectures/` (14 workers · 12 thinkers · 5 reviewers · 11 leaders · 47 pure · orchestrator). Builders from `workers/`+`pure/` by piece domain (`prompts/agent-pool-guide.md` is the routing table); the flaw-finder from `thinkers/`+pure investigators; the bar-judge from `reviewers/`+pure taste; integration seats fresh from the same pools. Spawn idiom: *Read `<prompts>/cognitive-architectures/<tier>/<name>.md`, adopt it, then the brief.* 🔴 RESOLVE `<prompts>` at runtime — `liteharness.prompts.resolve_prompts_dir()` (`prompts.py:93`: env override → repo → sibling → packaged → plugin cache) — never hardcode one station. The roster rides the same plugin artifact as this skill, so end-user gauntlets get the identical cast with zero private dependencies | roster counted on disk 2026-08-22 |
+| **Casting** | Every seat is cast from the SHIPPED cognitive-architecture roster — 91 files under `prompts/cognitive-architectures/` (the folders keep the older tier names: 14 in `workers/` = builders · 12 in `thinkers/` = scouts · 5 in `reviewers/` = critics · 11 in `leaders/` = owners · 47 pure · `orchestrator/` = orchestrator). Builders from `workers/`+`pure/` by piece domain (`prompts/agent-pool-guide.md` is the routing table); the flaw-finder from `thinkers/`+pure investigators; the bar-judge from `reviewers/`+pure taste; integration seats fresh from the same pools. Spawn idiom: *Read `<prompts>/cognitive-architectures/<tier>/<name>.md`, adopt it, then the brief.* 🔴 RESOLVE `<prompts>` at runtime — `liteharness.prompts.resolve_prompts_dir()` (`prompts.py:93`: env override → repo → sibling → packaged → plugin cache) — never hardcode one station. The roster rides the same plugin artifact as this skill, so end-user gauntlets get the identical cast with zero private dependencies | roster counted on disk 2026-08-22 |
 | Builder / critic fan-out | 🔴 **NEVER probe this verb with `--help`. `spawn --help` DOES NOT PRINT HELP — IT SPAWNS.** The argv scan drops the unknown flag and falls through to the spawn, printing `Spawned Claude session` and exiting 0. Measured 2026-08-22: two probes created two unattended `--permission-mode bypassPermissions` sessions that registered themselves as fleet agents. Read the source or run the verb deliberately; an unparsed flag is an *absent* flag, and absent arguments mean "do the default thing." | `liteharness spawn` — a real terminal agent per seat, fresh context by construction; canvas pane inside LiteSuite, PTY daemon (`--pty`, :7460) or Windows Terminal otherwise | spawn branch `cli.py:3758`; mode table in 05-LiteHarness |
 | Per-piece state | `lst run tasks` kanban. **Seven columns:** `queued → thinking → building → reviewing → fixing → merging → done` (`task_store.py:18` VALID_STATUSES; CHECK constraint `:37`). **Nine actions:** `list, claim, complete, unclaim, create, update, heartbeat, sweep, help` (`tasks.py:22`). `claim` moves queued→thinking; move a piece with `update status=building/reviewing/fixing`; `complete` lands it in done. `merging` exists for the lead's integration step — a piece that needs no merge skips it. The human watches this live; an unmoved card is invisible work | `packages/litesuite-tools/litesuite_tools/tools/{task_store,tasks}.py` |
 | **Seat reconciliation** | 🔴 **RECONCILE SEATS DISPATCHED AGAINST VERDICTS RECEIVED, BY COUNT, before any integration step or any report of results.** An idle notification is NOT a report. Measured in run-01, final tally across 10 dispatches: **5 of 9 completed seats delivered nothing until asked BY NAME — more than half**, and every one answered in full when asked (one had been idle ~20 minutes; one returned the run's best report). The rate rules out *"that seat had nothing to say"* and confirms the channel. Silent seats included — **including BOTH flaw-finders**, the seats that hunt fabrication and absolute defects. The work existed; only delivery failed. Asked directly, one of them returned a full BAR verdict with six evidenced findings, four of which the lead had missed. 🔴 **An absent critique is indistinguishable from a clean one**, so silence makes the machine report its best result exactly when it has failed to run — and a partially working channel (three seats reported normally) is more misleading than a dead one. Asking costs one message and every queried seat answered in full. When you ask, say *send what you concluded, do not re-derive it, do not pad it because a lead asked twice* — a second request is pressure, and pressure manufactures answers | run-01, 2026-08-22 |
@@ -334,7 +334,7 @@ The `litesuite-tools` registry holds **36 tools** (count derived from `NAME` exp
 
 ### Paths, git, and worktrees — prereqs every spawned builder inherits
 
-Branching, trailers, worker/leader commit discipline, and the kanban contract are DOCTRINE — `prompts/bootstrap-harness.md` + `prompts/protocols/github-issue-protocol.md`. Follow them; do not re-learn them from this file. What stays inline is only what ships nowhere else:
+Branching, trailers, builder/owner commit discipline, and the kanban contract are DOCTRINE — `prompts/bootstrap-harness.md` + `prompts/protocols/github-issue-protocol.md`. Follow them; do not re-learn them from this file. What stays inline is only what ships nowhere else:
 
 - **Structure.** Apps live at `<projects>/<app>`; scripts → `<root>/scripts`; E2E + artifacts → `<root>/e2e/` (always `--max-failures=1`; Playwright has no `--bail`); temp → the session scratchpad, never `/tmp` (a POSIX path handed to a Windows writer forks the file into `C:\tmp` while reporting success). `pnpm` everywhere except LiteSuite/LiteEditor (Bun). `python`, never `python3`.
 - **The human gate — RESCINDED FOR PUSHES (ruling 2026-08-24).** Commit and push freely and often; do not ask. ⚠️ Still true as a FACT rather than a gate: a site that **deploys on push** turns a push into a deploy — know what you are shipping. HITL survives for genuinely irreversible, outward-facing actions, which a push to a private repo is not.
@@ -403,7 +403,7 @@ First figure out what great actually looks like from the examples and these rule
 decomposition — and give each piece to a specialist builder.
 
 For each piece: first experience it the way the user will. Then a separate critic finds
-the flaws — no bar, just what is wrong. Then ANOTHER reviewer compares it with the real
+the flaws — no bar, just what is wrong. Then ANOTHER critic compares it with the real
 examples. Both get everything — output, code, reasoning — and must measure their own
 side: run it themselves, screenshot both at the same viewport, fetch the bar themselves.
 A claim they did not check is not evidence. Verdicts are binary — ours or the bar, plus
@@ -411,7 +411,7 @@ the single biggest gap — or UNEVALUABLE with the reason. No scores. Praise is 
 A piece that passes is kept WITH its evidence saved.
 
 Then run the same gauntlet on the WHOLE: assemble the accepted pieces, test the complete
-result, a separate critic hunts problems, another reviewer compares the whole against
+result, a separate critic hunts problems, another critic compares the whole against
 the examples. If one piece fails, find the piece or connection that caused it and rework
 that — never restart everything. If the plan itself failed, go back to what great looks
 like and re-derive it. If time or budget runs out, stop honestly and say why.

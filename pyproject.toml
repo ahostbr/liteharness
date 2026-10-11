@@ -52,6 +52,7 @@ liteharness = [
   "hooks_configs/CLAUDE_INSTALL_CONTRACT.md",
   "nudge_bot_default.yaml",
   "tier_cards.json",
+  "owner_templates/*.md",
   "hooks_configs/*.ts",
   "cli_scripts/**/*.py",
   "cli_scripts/**/*.md",

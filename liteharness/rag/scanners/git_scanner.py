@@ -1,7 +1,7 @@
 """GitScanner — indexes git commit history as searchable chunks.
 
 Each commit becomes one chunk: subject + body + trailer metadata.
-Extracts Agent-Name, Agent-ID, Agent-Tier, Task-id trailers.
+Extracts Agent-Name, Agent-ID, Agent-Role (or the older Agent-Tier), Task-id trailers.
 """
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ import subprocess
 import time
 from pathlib import Path
 
+from ... import roles
 from .base import BaseScanner
 
 logger = logging.getLogger(__name__)
 
-_TRAILER_KEYS = ["Agent-Name", "Agent-ID", "Agent-Tier", "Task-id"]
+_TRAILER_KEYS = ["Agent-Name", "Agent-ID", "Agent-Role", "Agent-Tier", "Task-id"]
 _VIRTUAL_PATH = "__git_log__"
 
 
@@ -41,7 +42,7 @@ class GitScanner(BaseScanner):
             result = subprocess.run(
                 [
                     "git", "log",
-                    "--format=COMMIT:%H%n%(trailers:key=Agent-Name,key=Agent-ID,key=Agent-Tier,key=Task-id,separator=%x00)%nEND_COMMIT",
+                    "--format=COMMIT:%H%n%(trailers:key=Agent-Name,key=Agent-ID,key=Agent-Role,key=Agent-Tier,key=Task-id,separator=%x00)%nEND_COMMIT",
                     "--stat",
                     "--max-count=500",
                     "--all",
@@ -94,14 +95,14 @@ def _build_chunk(commit: dict, body_lines: list[str], mtime: float) -> dict:
     sha = commit.get("sha", "unknown")
     body = "\n".join(body_lines).strip()
     agent_name = commit.get("agent_name", "")
-    agent_tier = commit.get("agent_tier", "")
+    agent_role = roles.canonical(commit.get("agent_role") or commit.get("agent_tier"), "")
     task_id = commit.get("task_id", "")
 
     meta_parts = []
     if agent_name:
         meta_parts.append(f"Agent: {agent_name}")
-    if agent_tier:
-        meta_parts.append(f"Tier: {agent_tier}")
+    if agent_role:
+        meta_parts.append(f"Role: {agent_role}")
     if task_id:
         meta_parts.append(f"Task: {task_id}")
 

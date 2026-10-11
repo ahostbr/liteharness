@@ -1,0 +1,162 @@
+"""Standing owners: the identity files a seat boots from and carries across compactions.
+
+An owner's memory folder holds three files:
+
+  SOUL.md    the charter (who the owner is and how it works with peers)
+  DOMAIN.md  what the owner knows about its area
+  NOW.md     where the owner is right now (rewritten at every handoff)
+
+`liteharness spawn --owner <Title> --memory <dir>` boots a seat from them; the seat is named
+by its title, and `spawn --resume <Title>` returns to the same conversation.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+OWNER_FILES = ("SOUL.md", "DOMAIN.md", "NOW.md")
+MAX_TITLE = 64
+
+
+class OwnerError(ValueError):
+    """The owner identity cannot be built; the message says why and what to fix."""
+
+
+def check_title(title) -> str:
+    if (not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE
+            or title != title.strip() or any(c in title for c in '"\'`$\\') or not title.isprintable()):
+        raise OwnerError(
+            f"owner title {title!r} is not usable: 1-{MAX_TITLE} printable characters, "
+            "no quotes, backticks, '$' or backslash, no leading or trailing space")
+    return title
+
+
+def memory_files(memory_dir) -> dict[str, Path]:
+    """SOUL.md / DOMAIN.md / NOW.md of `memory_dir`, all required."""
+    root = Path(str(memory_dir)).expanduser()
+    if not root.is_dir():
+        raise OwnerError(f"--memory {str(memory_dir)!r} is not a directory")
+    root = root.resolve()
+    missing = [name for name in OWNER_FILES if not (root / name).is_file()]
+    if missing:
+        raise OwnerError(f"--memory {str(root)!r} is missing {', '.join(missing)}; "
+                         f"an owner folder holds {', '.join(OWNER_FILES)}")
+    return {name: root / name for name in OWNER_FILES}
+
+
+def render_template(name: str, project: str, date: str | None = None) -> str:
+    """A shipped skeleton (SOUL.md charter, DOMAIN.md, NOW.md) with {{project}} / {{date}} filled in."""
+    if name not in OWNER_FILES:
+        raise OwnerError(f"no owner template {name!r}; the templates are {', '.join(OWNER_FILES)}")
+    text = (Path(__file__).parent / "owner_templates" / name).read_text(encoding="utf-8")
+    stamp = date or datetime.now().strftime("%Y-%m-%d %H:%M")
+    return text.replace("{{project}}", project).replace("{{date}}", stamp)
+
+
+def owner_prompt(title, memory_dir) -> str:
+    """The spawn prompt: the charter, then the order to read NOW.md and DOMAIN.md first."""
+    check_title(title)
+    files = memory_files(memory_dir)
+    charter = files["SOUL.md"].read_text(encoding="utf-8").strip()
+    if not charter:
+        raise OwnerError(f"{files['SOUL.md']} is empty: an owner needs its charter")
+    return (
+        f"{charter}\n\n"
+        f"Your name is {title}. Before anything else, read {files['NOW.md']} and then "
+        f"{files['DOMAIN.md']}."
+    )
+
+
+# ── rolling self-handoff ─────────────────────────────────────────────────────────
+
+MAX_NOW_LINES = 60
+#: NOW.md must carry these headings, each once, each with something under it.
+REQUIRED_HEADINGS = ("Updated", "Doing now", "Next 3 steps", "Waiting on", "Crew alive", "Do NOT redo")
+
+_HEADING = re.compile(r"^#{1,6}\s*(.*?)\s*$")
+
+
+def validate_now(text: str) -> list[str]:
+    """The reasons NOW.md fails the template; an empty list means it passes."""
+    problems: list[str] = []
+    lines = text.splitlines()
+    if len(lines) > MAX_NOW_LINES:
+        problems.append(f"NOW.md has {len(lines)} lines; the limit is {MAX_NOW_LINES} (cut it, "
+                        "move lasting knowledge into DOMAIN.md)")
+    sections: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    seen: dict[str, int] = {}
+    for line in lines:
+        match = _HEADING.match(line)
+        if match:
+            current = None
+            title = match.group(1).lower()
+            for name in REQUIRED_HEADINGS:
+                key = name.lower()
+                if title == key or re.match(re.escape(key) + r"\b", title):
+                    seen[name] = seen.get(name, 0) + 1
+                    rest = title[len(key):].lstrip(" :-\u2014")
+                    current = sections.setdefault(name, [])
+                    if rest:
+                        current.append(rest)
+                    break
+        elif current is not None and line.strip():
+            current.append(line.strip())
+    for name in REQUIRED_HEADINGS:
+        if name not in seen:
+            problems.append(f"NOW.md has no '{name}' heading")
+        elif seen[name] > 1:
+            problems.append(f"NOW.md has the '{name}' heading {seen[name]} times")
+        elif not sections[name]:
+            problems.append(f"NOW.md section '{name}' is empty")
+    return problems
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
+
+
+def _unstage(base: Path) -> None:
+    """Undo only what this command staged: the two files, never anything else in the index."""
+    _git(base, "reset", "-q", "--", "NOW.md", "DOMAIN.md")
+
+
+def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
+    """Validate NOW.md, commit NOW.md and DOMAIN.md, return the pointer lines to print."""
+    files = memory_files(memory_dir)
+    base = files["NOW.md"].parent
+    problems = validate_now(files["NOW.md"].read_text(encoding="utf-8"))
+    if problems:
+        raise OwnerError("NOW.md does not pass the template: " + "; ".join(problems))
+    if _git(base, "rev-parse", "--show-toplevel").returncode != 0:
+        raise OwnerError(f"{base} is not inside a git repository; the handoff is a commit")
+    tracked = _git(base, "ls-files", "--error-unmatch", "--", "NOW.md").returncode == 0
+    changed = _git(base, "status", "--porcelain", "--", "NOW.md").stdout.strip()
+    if tracked and not changed:
+        raise OwnerError("NOW.md has not changed since the last commit; rewrite it for this "
+                         "handoff first, a stale NOW.md would reload the wrong state")
+    added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
+    if added.returncode != 0:
+        _unstage(base)
+        raise OwnerError("git add failed: " + (added.stderr.strip() or added.stdout.strip()))
+    message = (
+        "chore(handoff): rolling handoff of NOW.md and DOMAIN.md\n\n"
+        f"Agent-Role: owner\nAgent-Name: {agent_name}\nAgent-ID: {agent_id}\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
+        handle.write(message)
+        message_file = handle.name
+    try:
+        committed = _git(base, "commit", "-q", "-F", message_file, "--", "NOW.md", "DOMAIN.md")
+    finally:
+        os.unlink(message_file)
+    if committed.returncode != 0:
+        _unstage(base)
+        raise OwnerError("git commit failed: " + (committed.stderr.strip() or committed.stdout.strip())
+                         + " (the index for NOW.md and DOMAIN.md was restored; your edits are untouched)")
+    here = base.as_posix()
+    return ["/compact", f"Reload: read {here}/NOW.md then {here}/DOMAIN.md"]

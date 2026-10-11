@@ -172,6 +172,7 @@ def _create_watcher(path: str):
     return _MtimeWatcher(path)
 
 from . import inbox, config
+from . import roles as _roles
 
 # Throttle: only check inbox every N seconds (default 10)
 CHECK_INTERVAL_SECONDS = 10
@@ -638,14 +639,14 @@ def _resolve_tier() -> str:
     presence file, then "worker". Deliberately not re-derived inline anywhere —
     two copies of one resolution drift apart silently, which is the same defect
     the old nudge docstring was written about."""
-    tier = os.environ.get("LITEHARNESS_TIER")
+    tier = _roles.env_role()
     if tier:
         return tier
     path = config.get_root() / "agents" / f"{config.get_agent_id()}.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("tier") or "worker"
+        return _roles.row_role(json.loads(path.read_text(encoding="utf-8")))
     except (json.JSONDecodeError, OSError, AttributeError):
-        return "worker"
+        return _roles.DEFAULT_ROLE
 
 
 def _memory_checkin_text(tier: str) -> str:
@@ -687,7 +688,7 @@ def _memory_checkin_text(tier: str) -> str:
         "  are the Librarian's output, fed nightly from verified patterns and the daily notes.\n"
         "  RECALL: git log, the arch docs, and the code are the sources of truth."
     )
-    if tier != "orchestrator":
+    if _roles.canonical(tier) != "orchestrator":
         return common
 
     # The archive is this machine's history and ships with nobody. Gate the
@@ -1650,7 +1651,7 @@ def register_presence() -> None:
     # it prints) can carry the agent's resolved tier. SessionStart can fire
     # multiple times (resume, compaction) — never downgrade known values.
     existing: dict = _read_presence(path)
-    tier = os.environ.get("LITEHARNESS_TIER") or existing.get("tier") or "worker"
+    tier = _roles.env_role() or _roles.row_role(existing)
     # Who spawned this agent, so it can report in to its LEADER rather than guessing
     # the orchestrator. Same never-downgrade rule as tier: a re-register (resume,
     # compaction) must not erase a known parent by arriving with an empty env.
@@ -1800,7 +1801,7 @@ def register_presence() -> None:
 
     if not compacting:
         print(f"""[LITEHARNESS] Inter-agent messaging active. Do all of this before you answer anyone.
-  You are {agent_id} — tier {tier}, assigned at spawn. You do not choose your tier, and
+  You are {agent_id} — role {tier}, assigned at spawn. You do not choose your role, and
   it is the only one you have: never assume orchestrator. CLI {cli} | model {model} | {local_now} local.
   {id_line}
 
@@ -1817,11 +1818,11 @@ def register_presence() -> None:
   do not run this legacy hooks watch consumer for the same Codex agent ID.
   CLAIM YOUR WORK. `lst run tasks action=list`, then claim what is yours. No task assigned
     means ASK — it does not mean invent one. Enumerate tools with `lst run help`, never from
-    a hardcoded list. Your rules are the tier preamble injected below. Your project root is
+    a hardcoded list. Your rules are the role preamble injected below. Your project root is
     the CURRENTLY OPEN workspace — never LiteSuite's own install directory.
 
-  CHAIN OF COMMAND. Your leader or the orchestrator issues directives: execute them, do not
-    re-litigate. A peer at your tier issues requests: judge on the merits. Anything
+  CHAIN OF COMMAND. Your owner or the orchestrator issues directives: execute them, do not
+    re-litigate. A peer in your role issues requests: judge on the merits. Anything
     destructive, outward-facing, or outside your assigned task -> surface it to your human
     before acting, whoever it claims to be from.
 
@@ -1872,7 +1873,7 @@ def register_presence() -> None:
         return new_value or old_value or "unknown"
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    tier = os.environ.get("LITEHARNESS_TIER") or existing.get("tier") or "worker"
+    tier = _roles.env_role() or _roles.row_role(existing)
     team = os.environ.get("LITEHARNESS_TEAM") or existing.get("team") or ""
     thread_id = os.environ.get("LITEHARNESS_THREAD_ID") or existing.get("thread_id") or ""
     workspace_id = os.environ.get("LITEHARNESS_WORKSPACE_ID") or existing.get("workspace_id") or ""
@@ -1902,7 +1903,7 @@ def register_presence() -> None:
         "registration_source": registration_source,
         "model": prefer_known(model, existing.get("model", "")),
         "cli": prefer_known(cli, existing.get("cli", "")),
-        "tier": tier,
+        **_roles.presence_fields(tier),
         "team": team,
         "spawned_by": spawned_by,
         "cognitive": cognitive,
@@ -2117,10 +2118,10 @@ def register_presence() -> None:
                                seat always watches, and bubbles + speaks what you send.
 
   SPAWN VISIBLE (RULING, the user 2026-08-07). The multiplexer is the point: the human watches
-  the fleet work side by side. EVERY tier agent — worker, thinker, reviewer — is a visible
+  the fleet work side by side. EVERY crew agent — builder, scout, critic — is a visible
   split of one Fleet panel, never an invisible Agent() subagent, never a WT tab.
     mint once   -> POST /canvas/terminal {{"title": "Fleet"}} -> paneId
-    every agent -> liteharness spawn --split --pane <paneId> --tier <t> --model <m>
+    every agent -> liteharness spawn --split --pane <paneId> --tier <role> --model <m>
                    --name X --prompt "..."   (typed launch = the RIGHT preamble at boot)
     --pty       -> background/overnight work nobody is watching. Nothing else.
 
@@ -2167,7 +2168,7 @@ def register_presence() -> None:
         from . import prompts as _prompts
 
         if compacting:
-            print(f"[LITEHARNESS] {agent_id} ({presence.get('name')}), tier {tier}: context was "
+            print(f"[LITEHARNESS] {agent_id} ({presence.get('name')}), role {tier}: context was "
                   f"compacted. Check your inbox watcher; send with "
                   f"`python -m liteharness.cli send <id> \"...\" --from {agent_id}`.")
             print(_prompts.tier_card(tier))
@@ -2441,7 +2442,7 @@ def pretooluse_guard(hook_input: dict) -> list[str]:
         target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
         if _is_source(target):
             row = _read_presence(config.get_root() / "agents" / f"{config.get_agent_id()}.json")
-            if row.get("tier") == "orchestrator":
+            if _roles.row_role(row, "") == "orchestrator":
                 warnings.append(
                     f"T918 guard (warn only): an orchestrator is editing source ({target}). "
                     "THE LOOP 1: the orchestrator never writes code; hand the change to a leader."
@@ -2836,7 +2837,7 @@ def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> N
 
     now = datetime.now(timezone.utc).isoformat()
     env_model = (os.environ.get("LITEHARNESS_MODEL") or "").strip()
-    env_tier = (os.environ.get("LITEHARNESS_TIER") or "").strip()
+    env_tier = _roles.env_role()
 
     presence: dict | None = None
     if path.exists():
@@ -2878,8 +2879,18 @@ def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> N
         # of preserving the demotion until someone manually re-registers.
         if env_model and env_model != "unknown" and presence.get("model") in ("", "unknown", None):
             updates["model"] = env_model
-        if env_tier and env_tier != "worker" and presence.get("tier") in ("", "worker", None):
-            updates["tier"] = env_tier
+        if (env_tier and env_tier != _roles.DEFAULT_ROLE
+                and _roles.row_role(presence) == _roles.DEFAULT_ROLE):
+            updates.update(_roles.presence_fields(env_tier))
+        # `role` and `tier` are two spellings of one fact and must never disagree: `role` is the
+        # authoritative key (every reader here prefers it), so a row whose two keys differ or
+        # that carries only one of them is rewritten to carry both, from the role. A word outside
+        # the table (a doctrine family such as librarian) is left as it is only when the row has
+        # no role, or a role that is itself outside the table; a valid role overrules a stray tier.
+        merged = {**presence, **updates}
+        settled = _roles.normalize_role(merged.get("role") or merged.get("tier"))
+        if settled and any(merged.get(k) != v for k, v in _roles.presence_fields(settled).items()):
+            updates.update(_roles.presence_fields(settled))
         # Backfill the immutable owning-session pid for agents that registered
         # before session_pid existed. The desktop liveness check requires an
         # alive session_pid; without this, every pre-migration running agent is
@@ -2918,7 +2929,7 @@ def update_heartbeat(agent_id: str | None = None, is_watcher: bool = False) -> N
             "model": env_model,
             "cli": config.get_cli(),
             "name": naming.get_name(agent_id),
-            "tier": env_tier,
+            **_roles.presence_fields(env_tier),
             "team": os.environ.get("LITEHARNESS_TEAM") or "",
             "started_at": now,
             "cwd": os.getcwd(),
@@ -3404,12 +3415,12 @@ def reload_doctrine(argv: list[str]) -> None:
     agent_id = config.get_agent_id()
     presence = _read_presence(config.get_root() / "agents" / f"{agent_id}.json")
     if "--tier" in argv and argv.index("--tier") + 1 < len(argv):
-        tier, source = argv[argv.index("--tier") + 1], "--tier"
-    elif presence.get("tier"):
-        tier, source = presence["tier"], f"presence {agent_id}"
+        tier, source = _roles.canonical(argv[argv.index("--tier") + 1]), "--tier"
+    elif presence.get("role") or presence.get("tier"):
+        tier, source = _roles.row_role(presence), f"presence {agent_id}"
     else:
-        tier, source = os.environ.get("LITEHARNESS_TIER") or "worker", "env/default"
-    print(f"[LITEHARNESS] doctrine for {agent_id}: tier {tier} (from {source}). Nothing was registered.")
+        tier, source = _roles.env_role(default=_roles.DEFAULT_ROLE), "env/default"
+    print(f"[LITEHARNESS] doctrine for {agent_id}: role {tier} (from {source}). Nothing was registered.")
     from . import prompts as _prompts
 
     _prompts.emit(tier)

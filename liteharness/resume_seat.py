@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config
+from . import config, roles
 
 
 def _convo_root() -> Path:
@@ -168,7 +168,7 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
     # Clearing the native resume fields avoids recursing back into this dispatcher.
     cli.cmd_spawn(spawn_cli="claude", split_mode=True, split_pane=pane,
                   split_direction=direction, cwd=str(working_dir), name=entry["name"],
-                  model=model or entry.get("model"), tier=tier or registry.get("tier"),
+                  model=model or entry.get("model"), tier=tier or roles.normalize_role(registry.get("role") or registry.get("tier")),
                   spawned_by=spawned_by if spawned_by is not None else registry.get("spawned_by"),
                   prompt=prompt, cognitive=cognitive, additional_args=f"--resume {session_id}")
 

@@ -329,3 +329,22 @@ def test_helper_does_not_swallow_interrupts(env, monkeypatch):
     monkeypatch.setattr(pastes, "capture", lambda *a: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
         pastes.handle(payload, "check", "seat", agents)
+
+
+def test_a_role_only_presence_row_is_sent_to_the_bridge_with_its_wire_word(env, monkeypatch):
+    """Critic round 1, N2: the page owner's tier comes from role-or-tier, in the word the bridge knows."""
+    _, _, _, _, payload, agents = env
+    (agents / "seat.json").write_text('{"name":"Fixture","role":"owner"}')
+    monkeypatch.setattr(Path, "home", lambda: agents.parent / "fixture-home")
+    token_file = Path.home() / ".litesuite" / "bridge-token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text("fixture-current-token")
+    monkeypatch.setenv("LITESUITE_BRIDGE_URL", "http://127.0.0.1:7423")
+    sent = []
+    def urlopen(request, timeout):
+        sent.append(json.loads(request.data))
+        return io.BytesIO(b'{"ok":true}')
+    from types import SimpleNamespace
+    monkeypatch.setattr(pastes.urllib.request, "build_opener", lambda *a: SimpleNamespace(open=urlopen))
+    assert REAL_OPEN(Path(payload["cwd"]), "seat", agents, "fixture-leaf")
+    assert sent[0]["owner"]["tier"] == "leader"

@@ -1,7 +1,9 @@
 // Pure data/brief rules only. All Mods API calls belong in register.mjs.
 export const FLEET_PANE = 'liteharness-fleet'
 export const FLEET_LIMIT = 100
-const TIERS = new Set(['orchestrator', 'leader', 'worker', 'thinker', 'reviewer'])
+const ROLES = new Set(['orchestrator', 'owner', 'builder', 'scout', 'critic'])
+// Older tier words stay accepted: a brief written before the rename must still spawn.
+const OLD_TIERS = new Set(['orchestrator', 'leader', 'worker', 'thinker', 'reviewer'])
 const clean = value => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, 512)
 
 export function fleetSnapshot(text) {
@@ -33,9 +35,12 @@ export function normalizedCwd(value) {
 }
 
 export function spawnDenial(e, ownedCwd) {
-  // The host has no tier property. An explicit canonical brief line is required.
-  const tiers = typeof e.prompt === 'string' ? [...e.prompt.matchAll(/^Agent-Tier: ([a-z]+)\r?$/gm)] : []
-  if (tiers.length !== 1 || !TIERS.has(tiers[0][1]) || (e.prompt.match(/Agent-Tier:/g) || []).length !== 1) return 'Spawn requires exactly one Agent-Tier: orchestrator|leader|worker|thinker|reviewer brief line.'
+  // The host has no role property. An explicit canonical brief line is required:
+  // Agent-Role (orchestrator|owner|builder|scout|critic) or the older Agent-Tier, exactly one.
+  const lines = typeof e.prompt === 'string' ? [...e.prompt.matchAll(/^Agent-(Role|Tier): ([a-z]+)\r?$/gm)] : []
+  const mentions = typeof e.prompt === 'string' ? (e.prompt.match(/Agent-(Role|Tier):/g) || []).length : 0
+  const valid = lines.length === 1 && (lines[0][1] === 'Role' ? ROLES : OLD_TIERS).has(lines[0][2])
+  if (!valid || mentions !== 1) return 'Spawn requires exactly one Agent-Role: orchestrator|owner|builder|scout|critic brief line (the older Agent-Tier: orchestrator|leader|worker|thinker|reviewer is still accepted).'
   if (!SPAWN_MODELS.has(e.model)) {
     return 'Spawn requires an explicit full Claude model id ending in [1m]; aliases and inherit are refused.'
   }

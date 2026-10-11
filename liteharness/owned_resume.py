@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 
 from .agent_store import AgentStore, StoreError, _unlinked, valid_id
-from . import owned_launch
+from . import owned_launch, roles
 
 
 def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
@@ -46,7 +46,8 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
             raise StoreError('Conversation absent from selected agent; archive is read-only')
     if not cwd or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
         raise StoreError('Owned resume requires explicit absolute existing --cwd')
-    if tier not in cli.VALID_TIERS:
+    tier = roles.normalize_role(tier)
+    if tier not in roles.ROLES:
         raise StoreError('Owned resume requires explicit valid --tier')
     caller = spawned_by or os.environ.get('LITEHARNESS_AGENT_ID')
     if not caller:
@@ -67,7 +68,7 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     if any(row.get('harnessAgentId') == agent.agent_id for row in rows['sessions']):
         raise StoreError('Live owned seat exists; message it instead')
     resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {
-        'cli': 'litetui', 'name': agent.name, 'tier': tier, 'model': saved['model'],
+        'cli': 'litetui', 'name': agent.name, 'tier': roles.wire_tier(tier), 'model': saved['model'],
         'backend': saved['backend'], 'thinkingLevel': saved['thinking_level'],
         'cwd': cwd, 'spawnedBy': caller, **({'prompt': prompt} if prompt is not None else {}),
         **({'cognitive': cognitive} if cognitive else {}),

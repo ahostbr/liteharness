@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import config, inbox
+from . import config, inbox, roles
 
 logger = logging.getLogger("nudge-bot")
 
@@ -253,7 +253,7 @@ class NudgeBot:
             presence = json.loads((config.get_root() / "agents" / f"{sender}.json").read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             raise ValueError("sender_id requires an existing orchestrator UUID presence") from exc
-        if not isinstance(presence, dict) or presence.get("agent_id") != sender or presence.get("tier") != "orchestrator":
+        if not isinstance(presence, dict) or presence.get("agent_id") != sender or roles.row_role(presence, "") != "orchestrator":
             raise ValueError("sender_id presence must identify the same orchestrator UUID")
 
     def _send_reply(self, to_agent: str, body: str):

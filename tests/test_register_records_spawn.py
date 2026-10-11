@@ -157,7 +157,7 @@ def test_doctrine_reprints_tier_and_architecture_and_writes_nothing(root, tmp_pa
     monkeypatch.setattr(prompts, "resolve_cognitive_file", lambda n, t: arch if n == "turing" else None)
     assert _hooks_main(monkeypatch, "doctrine") == 0
     out = capsys.readouterr().out
-    assert "tier leader" in out and "PREAMBLE<leader>" in out
+    assert "role owner" in out and "PREAMBLE<owner>" in out
     assert "# POLYMATHIC TURING body" in out
     assert row.read_bytes() == before
 
