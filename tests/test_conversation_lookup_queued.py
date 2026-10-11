@@ -35,7 +35,7 @@ FIXTURE = [
     queued('q-notification', '<task-notification> <task-id>b1</task-id> monitor event',
            commandMode='task-notification', origin={'kind': 'task-notification'}),
     queued('q-liteharness', '[LITEHARNESS] 2 message(s) received'),
-    queued('q-coordinator', 'Ryan has added context: three runtimes', origin={'kind': 'coordinator'}),
+    queued('q-coordinator', 'The user has added context: three runtimes', origin={'kind': 'coordinator'}),
     {'type': 'user', 'uuid': 'u-plain', 'timestamp': '2026-10-11T01:30:00Z',
      'message': {'content': 'ive picked the crouched idle 3 times'}},
     {'type': 'assistant', 'uuid': 'a-reply', 'message': {'content': [{'type': 'text', 'text': 'Moving them up now'}]}},
