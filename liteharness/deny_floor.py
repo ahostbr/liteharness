@@ -197,7 +197,7 @@ _WRAPPERS = frozenset({
 _READERS = frozenset({
     "cat", "type", "gc", "get-content", "more", "less", "head", "tail", "bat",
     "grep", "egrep", "rg", "findstr", "select-string", "sls", "wc", "git",
-    "diff", "fc", "code", "notepad", "vim", "vi", "nano", "sed", "awk", "ls",
+    "diff", "fc", "code", "notepad", "vim", "vi", "nano", "ls",
     "dir", "get-item", "gi", "get-childitem", "gci", "test-path", "stat", "file",
     "xxd", "od", "sha256sum", "get-filehash",
     # Copies and moves carry the file; they never run it.
@@ -996,36 +996,74 @@ _EXECUTION_SINKS = frozenset({
 #: set: awk and sed run their quoted script, an editor opens it. None of these
 #: executes an argument except rg's `--pre` / `--hostname-bin`, refused below.
 _PATTERN_HEADS = frozenset({"rg", "grep", "egrep", "findstr", "select-string", "sls"})
+#: PowerShell cmdlets: resolved by PowerShell itself, never a file found on PATH.
+_PATTERN_CMDLETS = frozenset({"select-string", "sls"})
 #: Options that make a pattern head RUN a program named by an argument.
 _PATTERN_EXEC_OPTIONS = ("--pre", "--hostname-bin")
+#: Heads whose quoted argument is a PROGRAM they run: awk system() and pipes, sed `e`.
+_SCRIPT_HEADS = frozenset({"awk", "gawk", "mawk", "nawk", "sed", "gsed"})
+#: A script head spelled anywhere (path, .exe, after a wrapper): the unproven-shell scan.
+_SCRIPT_HEAD_WORD = re.compile(
+    r"(?i)(?<![\w.\-])(?:[\w:.~\-]*[/\\])?(?:awk|gawk|mawk|nawk|sed|gsed)(?:\.exe)?(?![\w.\-])")
 #: Syntax this small scan does not model; any of it restores the original scan.
 _PATTERN_UNMODELLED = re.compile(
     "[`#\r‘’‚‛“”„]|\\$\\(|@['\"({]|--%")
 
 
-def _pattern_literal_spans(command: str) -> list[tuple[int, int]]:
-    """Single-quoted PowerShell literals that are ARGUMENTS of a pattern-search head.
+def _is_windows() -> bool:
+    return os.name == "nt"
 
-    Owner-launcher only, and only under a proven PowerShell: `'subprocess\\.(run|Popen)'`
-    is verbatim text handed to rg, yet a `(`, `;`, `|` or `&` inside it was read as
-    a statement boundary, which emptied the command position and made `run` a launch.
-    Only a literal after a bare pattern head is excused, in a statement with no
-    preprocessor option. Boundaries OUTSIDE quotes still split statements, so
-    `rg 'x' f; run.bat` is refused.
 
-    Every word is DECODED before it is judged: bare text, single-quoted text (`''` is
-    one quote) and double-quoted text are joined as PowerShell joins them, so
-    `--pre`, `'--pre'`, `"--pre"` and `--p"re"` are the same option word. A head that
-    needed any quote to be spelled is not a bare head. This is not a PowerShell
-    parser: unmodelled syntax (backtick, comment, here-string, `$(`, smart quote, `--%`,
-    an unterminated or `$`-expanding double quote) returns no spans and the original
-    scan runs.
+def _native_head(name: str) -> bool:
+    """Does `name` resolve, on PATH, to a file that takes its argv as given?
+
+    Reads PATH (and PATHEXT on Windows), executes nothing. Fail-closed: a file or a
+    PATH entry can only REMOVE an exemption, never create one, and any error, or a
+    name that does not resolve, is "not native" so the original scan runs.
+    Windows: a `.cmd`/`.bat`/`.ps1`/other PATHEXT file in the same or an earlier
+    PATH directory withdraws it (cmd re-parses the quoted text); only `.exe`/`.com`
+    keeps it. POSIX: any executable file keeps it, a `#!` wrapper included (argv is
+    passed intact). PowerShell cmdlets are named, not resolved.
+    """
+    if name in _PATTERN_CMDLETS:
+        return True
+    try:
+        folders = [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+        if not _is_windows():
+            return any((folder / name).is_file() and os.access(folder / name, os.X_OK)
+                       for folder in folders)
+        native = (".exe", ".com")
+        others = {ext.lower() for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+                  if ext} - set(native)
+        others.add(".ps1")
+        for folder in folders:
+            if any((folder / (name + ext)).is_file() for ext in others):
+                return False
+            if any((folder / (name + ext)).is_file() for ext in native):
+                return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def _scan_statements(command: str):
+    """Statements of a PowerShell command line, with each word DECODED.
+
+    Returns None where the syntax is not modelled (the caller restores the original
+    scan): backtick, comment, CR, here-string, `$(`, `@(`, `--%`, smart quotes, an
+    unterminated single quote, an unterminated or `$`-expanding double quote.
+    Bare text, single-quoted text (`''` is one quote) and double-quoted text are
+    joined as PowerShell joins them, so `--pre`, `'--pre'`, `"--pre"` and `--p"re"`
+    are one word. A statement ends at `; | & ( ) { }` or a newline OUTSIDE quotes, so
+    a `;` or `|` inside a quoted script never ends one. Each statement is
+    {"head": its first word, lower-cased, or NUL when it needed a quote (`'rg' x` is a
+    string expression); "words"; "tainted": a decoded word starts an executing
+    option; "args": (start, end, quote) for each quoted part after the head}.
     """
     if _PATTERN_UNMODELLED.search(command):
-        return []
-    spans: list[tuple[int, int]] = []
-    pending: list[tuple[int, int]] = []
-    state = {"head": None, "word": "", "quoted": False, "tainted": False}
+        return None
+    statements = []
+    state = {"head": None, "word": "", "quoted": False, "tainted": False, "words": [], "args": []}
 
     def end_word():
         word = state["word"]
@@ -1034,14 +1072,14 @@ def _pattern_literal_spans(command: str) -> list[tuple[int, int]]:
                 # `'rg' x` is a string expression, not an rg invocation.
                 state["head"] = "\0" if state["quoted"] else word.lower()
             state["tainted"] |= word.lower().startswith(_PATTERN_EXEC_OPTIONS)
+            state["words"].append(word.lower())
         state.update(word="", quoted=False)
 
     def end_statement():
         end_word()
-        if state["head"] in _PATTERN_HEADS and not state["tainted"]:
-            spans.extend(pending)
-        pending.clear()
-        state.update(head=None, word="", quoted=False, tainted=False)
+        if state["head"] is not None:
+            statements.append({key: state[key] for key in ("head", "words", "tainted", "args")})
+        state.update(head=None, word="", quoted=False, tainted=False, words=[], args=[])
 
     i, n = 0, len(command)
     while i < n:
@@ -1051,7 +1089,7 @@ def _pattern_literal_spans(command: str) -> list[tuple[int, int]]:
             while True:
                 k = command.find("'", j)
                 if k < 0:
-                    return []
+                    return None
                 body += command[j:k]
                 if command[k + 1:k + 2] == "'":
                     body += "'"
@@ -1059,14 +1097,16 @@ def _pattern_literal_spans(command: str) -> list[tuple[int, int]]:
                     continue
                 break
             if state["head"] is not None:   # an argument; argv0 is never excused
-                pending.append((i, k + 1))
+                state["args"].append((i, k + 1, "'"))
             state["word"] += body
             state["quoted"] = True
             i = k + 1
         elif ch == '"':
             k = command.find('"', i + 1)
             if k < 0 or "$" in command[i + 1:k] or command[k + 1:k + 2] == '"':
-                return []
+                return None
+            if state["head"] is not None:
+                state["args"].append((i, k + 1, '"'))
             state["word"] += command[i + 1:k]
             state["quoted"] = True
             i = k + 1
@@ -1079,7 +1119,62 @@ def _pattern_literal_spans(command: str) -> list[tuple[int, int]]:
                 state["word"] += ch
             i += 1
     end_statement()
+    return statements
+
+
+def _pattern_literal_spans(command: str, shell: str | None = "powershell") -> list[tuple[int, int]]:
+    """Single-quoted PowerShell literals that are ARGUMENTS of a pattern-search head.
+
+    Owner-launcher only, and only under a proven PowerShell: `'subprocess\\.(run|Popen)'`
+    is verbatim text handed to rg, yet a `(`, `;`, `|` or `&` inside it was read as
+    a statement boundary, which emptied the command position and made `run` a launch.
+    Only a literal after a bare pattern head is excused, in a statement with no
+    preprocessor option, and only when that head resolves to a native program
+    (_native_head). Boundaries OUTSIDE quotes still split statements, so
+    `rg 'x' f; run.bat` is refused. Not a PowerShell parser: see _scan_statements.
+    """
+    statements = _scan_statements(command) if shell == "powershell" else None
+    spans: list[tuple[int, int]] = []
+    native: dict[str, bool] = {}
+    for statement in statements or ():
+        head = statement["head"]
+        if head not in _PATTERN_HEADS or statement["tainted"]:
+            continue
+        quoted = [(a, b) for a, b, quote in statement["args"] if quote == "'"]
+        if quoted and native.setdefault(head, _native_head(head)):
+            spans.extend(quoted)
     return spans
+
+
+def _script_head_launch(command: str, start: int, shell: str | None) -> bool:
+    """Is the launcher name at `start` inside the quoted PROGRAM of awk/sed (and kin)?
+
+    Their quoted script runs commands (`system("run")`, `print | "run"`, sed `e run`),
+    so the name inside it is a launch, never data. Proven PowerShell: exact, from
+    _scan_statements, so a bare operand stays a file name (`awk -f run.bat f`,
+    `awk '{print}' run.bat`) and a `;` or `|` inside the quotes cannot end the
+    statement and hide the head. Any other shell, or syntax the scan does not
+    model, cannot be tokenised safely: a script head spelled ANYWHERE before the
+    name, with a quote between them, is a launch. That reading refuses more
+    (`rg 'sed' 'x' run.bat`), never less: it does not depend on where statements end.
+    """
+    statements = _scan_statements(command) if shell == "powershell" else None
+    if statements is not None:
+        for statement in statements:
+            if not any(a < start < b for a, b, _ in statement["args"]):
+                continue
+            words = _owner_command_position(statement["words"])
+            if not words:
+                continue
+            first = words[0].replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".exe")
+            if first in _SCRIPT_HEADS:
+                return True
+            # A whole payload passed as one word (`bash -c 'awk ...'`): read it as text.
+            if re.search(r"\s", words[0]) and _SCRIPT_HEAD_WORD.match(words[0].lstrip()):
+                return True
+        return False
+    return any(re.search(r"[\"']", command[m.end():start])
+              for m in _SCRIPT_HEAD_WORD.finditer(command[:start]))
 
 
 def _owner_command_position(words: list[str]) -> list[str]:
@@ -1130,6 +1225,9 @@ def _owner_launch(command: str, match: re.Match, base: Path | None, home: Path,
     start = match.start()
     if _launcher_quoted_argument(command, start):
         return False
+    # awk/sed RUN their quoted program: the name inside it is a launch, not data.
+    if _script_head_launch(command, start, shell):
+        return True
     # Leading non-nested comments can precede argv0. Only a trusted PowerShell
     # context may excuse a match IN the comment; unknown shells keep scanning.
     comments = re.match(r"[ \t]*(?:<#(?:(?!<#|#>).)*#>[ \t]*)+", command, re.DOTALL)
