@@ -4,7 +4,7 @@ Agent naming — deterministic UUID-seeded name generator + user override layer.
 Design:
   1. Every agent gets a default name derived from its UUID (no storage needed)
   2. User can override with --name, stored in ~/.liteharness/names/<UUID>
-  3. get_name() checks override first, falls back to generated name
+  3. get_name() checks override, then presence, then the generated name
   4. Cleanup ties to stale agent purge (same 12h TTL)
 """
 
@@ -123,12 +123,61 @@ def clear_override(agent_id: str) -> None:
     path.unlink(missing_ok=True)
 
 
+# Presence fallback limits; existing explicit-override semantics are unchanged.
+MAX_PRESENCE_BYTES = 16 * 1024
+MAX_PRESENCE_NAME_CHARS = 128
+
+
 def get_name(agent_id: str) -> str:
-    """Get agent name — override first, then generated."""
-    override = get_override(agent_id)
-    if override:
-        return override
-    return generate_name(agent_id)
+    """Get a name without writes: override, presence, then deterministic fallback.
+
+    IDs must be safe single filenames (non-UUID IDs are allowed). Presence must
+    be a regular file, never a symlink, at most 16 KiB; its trimmed name must be
+    at most 128 characters. Labels are not liveness or ownership evidence.
+    Reads never refresh override mtimes. Explicit overrides still win immediately.
+    """
+    import json
+    import stat
+    from pathlib import PureWindowsPath
+
+    fallback = generate_name(agent_id)
+    if (not agent_id or agent_id.endswith((".", " "))
+            or any(char in agent_id for char in '<>:"/\\|?*\x00')
+            or PureWindowsPath(agent_id).is_reserved()):
+        return fallback
+    try:
+        override = get_override(agent_id)
+        if override:
+            return override
+    except Exception:
+        pass  # Best-effort display must survive inaccessible or corrupt overrides.
+    try:
+        path = config.get_root() / "agents" / f"{agent_id}.json"
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_PRESENCE_BYTES:
+            return fallback
+        flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(path, flags)
+        try:
+            opened = os.fstat(fd)
+            # Reject a replaced file before reading, including a raced symlink
+            # on platforms without O_NOFOLLOW. NONBLOCK avoids a raced FIFO wait.
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_size > MAX_PRESENCE_BYTES
+                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                return fallback
+            raw = os.read(fd, MAX_PRESENCE_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(raw) > MAX_PRESENCE_BYTES:
+            return fallback
+        record = json.loads(raw.decode("utf-8"))
+        name = record.get("name") if isinstance(record, dict) else None
+        if isinstance(name, str) and 0 < len(name.strip()) <= MAX_PRESENCE_NAME_CHARS:
+            return name.strip()
+    except Exception:
+        pass  # A missing, unreadable or corrupt record is not a usable name.
+    return fallback
 
 
 def _pid_alive(pid: int | None) -> bool:

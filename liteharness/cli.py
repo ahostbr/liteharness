@@ -1537,7 +1537,8 @@ def cmd_register(
         presence["canvas_session_id"] = canvas_session
         presence.setdefault("spawn_mode", "canvas")
 
-    # Name handling: override > existing override > generated
+    # A rejected name must not return through this seat's stale presence record.
+    name_refused = False
     if name and not strict_identity:
         taken_by = naming.is_name_taken(name, exclude_id=agent_id)
         if taken_by and takeover and not _agent_record_live(taken_by):
@@ -1549,13 +1550,19 @@ def cmd_register(
                 print(f"Warning: name '{name}' is held by LIVE agent {taken_by[:8]} — refusing takeover. Picking a different name.")
             else:
                 print(f"Warning: name '{name}' is already used by {taken_by[:8]}. Picking a different name.")
+            name_refused = True
             name = None
         else:
             naming.set_override(agent_id, name)
 
     # Strict folder-owned registration reports folder truth directly; legacy
     # naming overrides are neither another authority nor rewritten by heartbeat.
-    resolved_name = name if strict_identity else naming.get_name(agent_id)
+    if strict_identity:
+        resolved_name = name
+    elif name_refused:
+        resolved_name = naming.generate_name(agent_id)
+    else:
+        resolved_name = naming.get_name(agent_id)
     presence["name"] = resolved_name
     # An explicit CLI registration is an identity choice, unlike an automatic
     # SessionStart registration. Resume may replace only the latter (T363).
@@ -4679,13 +4686,22 @@ def cmd_spawn(
         print(f"Spawned: registered as {new_uuid}")
         print(f"  Agent ID: {new_uuid}")
         from . import naming
-        if name and not naming.get_override(new_uuid) and not naming.is_name_taken(name, exclude_id=new_uuid):
-            naming.set_override(new_uuid, name)
+        name_refused = False
+        if name and not naming.get_override(new_uuid):
+            if naming.is_name_taken(name, exclude_id=new_uuid):
+                name_refused = True
+            else:
+                naming.set_override(new_uuid, name)
+        if name:
+            # A holder may have appeared during launch. Do not restore the
+            # rejected request from the newly registered seat's presence row.
+            resolved_name = (naming.generate_name(new_uuid) if name_refused
+                             else naming.get_name(new_uuid))
         ppath = agents_dir / f"{new_uuid}.json"
         try:
             pdata = json.loads(ppath.read_text(encoding="utf-8"))
             if name:
-                pdata["name"] = naming.get_name(new_uuid)
+                pdata["name"] = resolved_name
             if my_id and not pdata.get("spawned_by"):
                 pdata["spawned_by"] = my_id
             if resolved_tier and resolved_tier != _roles.DEFAULT_ROLE:

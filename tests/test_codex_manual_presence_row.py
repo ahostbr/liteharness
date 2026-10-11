@@ -123,7 +123,8 @@ def test_a_registered_row_and_a_started_row_pass_the_same_check(root, capsys):
 def test_a_second_start_never_renames_the_seat(root):
     path = manual.write_presence(AGENT)
     config.merge_presence_fields(path, {"name": "Widget"})
-    assert naming.get_name(AGENT) != "Widget"
+    naming.set_override(AGENT, "Alpha")
+    assert naming.get_name(AGENT) == "Alpha"
     assert read(manual.write_presence(AGENT))["name"] == "Widget"
 
 
