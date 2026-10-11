@@ -4227,6 +4227,35 @@ def cmd_spawn(
         print(refusal)
         sys.exit(2)
 
+    # Cognitive architecture — MECHANICAL delivery (RULING, the user 2026-08-07:
+    # "the orch flow is broken without them getting their correct prompts").
+    # Discipline-based delivery ("tell the agent to read its file") failed
+    # silently the same day the brief-below-the-fold bug did; a polymath spawn
+    # now resolves its architecture file HERE and the SessionStart hook injects
+    # the content. --cognitive overrides; otherwise --name is tried against the
+    # library, so `--name Linus` alone is enough. A plain fleet name resolving
+    # to nothing is the normal case, not an error.
+    # T0463-B: an explicit --cognitive that resolves to nothing used to WARN and boot a
+    # generic seat. It is refused here, before a name is evicted, a worktree made or a
+    # pane opened.
+    try:
+        from . import prompts as _prompts_mod
+        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", tier or "worker")
+    except Exception as _cog_exc:  # noqa: BLE001 — a name-only miss never kills a spawn
+        if cognitive:
+            print(f"SPAWN REFUSED: --cognitive {cognitive!r} could not be resolved "
+                  f"({_cog_exc!r}). Nothing was spawned.")
+            sys.exit(2)
+        _cog = None
+    if _cog is None and cognitive:
+        try:
+            valid = ", ".join(_prompts_mod.list_cognitive_names()) or "none (no library resolved)"
+        except Exception as _list_exc:  # noqa: BLE001 — the refusal must still print
+            valid = f"unlisted ({_list_exc!r})"
+        print(f"SPAWN REFUSED: --cognitive {cognitive!r} matches no cognitive architecture. "
+              f"Valid names: {valid}. Nothing was spawned.")
+        sys.exit(2)
+
     # Absolute: the split path types a Set-Location into ANOTHER shell, where a
     # relative path would resolve against that shell's cwd, not ours.
     target_dir = os.path.abspath(cwd or os.getcwd())
@@ -4352,26 +4381,9 @@ def cmd_spawn(
     if name:
         context_env["LITEHARNESS_REQUESTED_NAME"] = name
 
-    # Cognitive architecture — MECHANICAL delivery (RULING, the user 2026-08-07:
-    # "the orch flow is broken without them getting their correct prompts").
-    # Discipline-based delivery ("tell the agent to read its file") failed
-    # silently the same day the brief-below-the-fold bug did; a polymath spawn
-    # now resolves its architecture file HERE and the SessionStart hook injects
-    # the content. --cognitive overrides; otherwise --name is tried against the
-    # library, so `--name Linus` alone is enough. A plain fleet name resolving
-    # to nothing is the normal case, not an error.
-    try:
-        from . import prompts as _prompts_mod
-        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", resolved_tier)
-        if _cog is not None:
-            context_env["LITEHARNESS_COGNITIVE_FILE"] = str(_cog)
-        elif cognitive:
-            print(f"WARNING: --cognitive '{cognitive}' matched no file in the "
-                  f"cognitive-architectures library — agent boots WITHOUT an "
-                  f"architecture. Check the name against the library tree.")
-    except Exception as _cog_exc:  # noqa: BLE001 — never let resolution kill a spawn
-        if cognitive:
-            print(f"WARNING: cognitive architecture resolution failed ({_cog_exc!r}).")
+    # Resolved (or refused) before anything launched; see the T0463-B gate above.
+    if _cog is not None:
+        context_env["LITEHARNESS_COGNITIVE_FILE"] = str(_cog)
 
     # Inside LiteSuite (Electron): route through canvas panel IPC when available
     if split_mode:
