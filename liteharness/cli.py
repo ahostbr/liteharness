@@ -3452,8 +3452,8 @@ SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
     ("--spawned-by", "spawned_by", True, "explicit requesting agent id (fresh or resumed spawn)"),
     ("--args", "additional_args", True, "extra arguments appended to the claude command"),
     ("--new-window", "new_window", False, "accepted for old callers; has no effect"),
-    ("--owner", "owner_title", True, "boot a standing owner named TITLE from --memory (role owner; the seat is named by its title)"),
-    ("--memory", "memory_dir", True, "with --owner: the folder holding SOUL.md, DOMAIN.md and NOW.md"),
+    ("--owner", "owner_title", True, "boot a standing owner named TITLE from --memory (--cli claude or litetui; role owner). For a LiteTUI successor, --takeover bypasses the held-name refusal, not the old seat: its presence/inbox id remains until it exits; messages to that id are not delivered once closed. Peers must address the owner by NAME or learn the new id"),
+    ("--memory", "memory_dir", True, "with --owner: the folder holding SOUL.md, DOMAIN.md and NOW.md; for litetui an absolute existing directory in a git repository (LiteTUI injects the files itself)"),
 )
 
 
@@ -3955,6 +3955,7 @@ def _spawn_litetui_agent(
     pane: str | None, direction: str | None, cognitive: str | None,
     backend: str | None, thinking_level: str | None, spawned_by: str | None,
     takeover: bool = False,
+    owner_title: str | None = None, memory_dir: str | None = None,
 ) -> None:
     """One LiteTUI launch owner; the bridge resolves/places but never governs."""
     from . import agent_names, fleet_policy
@@ -3982,7 +3983,9 @@ def _spawn_litetui_agent(
         print(f"SPAWN REFUSED: the name {name!r} already belongs to agent {held['agent_id']} "
               f"(conversation {held['convo_id']}, cwd {held['cwd']}). Resume it: "
               f"liteharness spawn --split --resume {held['name']} --tier {tier}; "
-              "a live seat is messaged by inbox instead. Nothing was spawned.")
+              "a live seat is messaged by inbox instead. "
+              + ("For an owner successor, pass --takeover. " if owner_title else "")
+              + "Nothing was spawned.")
         sys.exit(2)
     target_dir = Path(cwd or os.getcwd()).expanduser()
     if not target_dir.is_absolute() or not target_dir.is_dir():
@@ -4021,6 +4024,13 @@ def _spawn_litetui_agent(
         launch = owned_launch.request(resolved, root=root, name=name,
                                       agent_id=resolved.get('agentId'), backend=backend,
                                       model=model, thinking_level=thinking_level, fresh=True)
+        if owner_title:
+            # LiteTUI owner mode creates its own identity from the memory folder.
+            # Keep the resolver's agent id in env, not the mutually exclusive argv.
+            for flag in ("--create-agent", "--agent-id"):
+                at = launch["args"].index(flag)
+                del launch["args"][at:at + 2]
+            launch["args"].extend(["--owner", owner_title, "--memory", memory_dir])
     except (StoreError, OSError, TypeError) as exc:
         print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
         sys.exit(2)
@@ -4259,19 +4269,36 @@ def cmd_spawn(
             print(f"SPAWN REFUSED: {'--memory' if owner_title else '--owner'} is also required: "
                   "--owner <Title> --memory <dir> go together. Nothing was spawned.")
             sys.exit(2)
-        if (spawn_cli != "claude" or prompt or cognitive or resume_agent_id or resume_convo_id
+        if (spawn_cli not in ("claude", "litetui") or prompt or cognitive or resume_agent_id or resume_convo_id
                 or (tier and _roles.normalize_role(tier) != "owner")
                 or (name and name != owner_title)):
             print("SPAWN REFUSED: --owner takes its prompt from SOUL.md and its name from the title, so it "
                   "cannot be combined with --prompt, --cognitive, --name, --resume, --convo, a --tier other "
-                  "than owner, or --cli other than claude (resume an owner with `--resume <Title>` alone). "
+                  "than owner, or --cli other than claude or litetui (resume an owner with `--resume <Title>` alone). "
                   "Nothing was spawned.")
             sys.exit(2)
-        try:
-            prompt = _owner.owner_prompt(owner_title, memory_dir)
-        except _owner.OwnerError as exc:
-            print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
-            sys.exit(2)
+        if spawn_cli == "litetui":
+            try:
+                _owner.check_title(owner_title)
+                memory = Path(memory_dir)
+                if not memory.is_absolute() or not memory.is_dir():
+                    raise _owner.OwnerError("--memory must be an absolute existing directory")
+                _owner.memory_files(memory)
+                memory = memory.resolve()
+                repository = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                                            cwd=memory, capture_output=True, text=True, timeout=10)
+                if repository.returncode != 0:
+                    raise _owner.OwnerError("--memory must be inside a git repository; the handoff is a commit")
+                memory_dir = str(memory)
+            except (_owner.OwnerError, OSError, subprocess.SubprocessError) as exc:
+                print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
+                sys.exit(2)
+        else:
+            try:
+                prompt = _owner.owner_prompt(owner_title, memory_dir)
+            except _owner.OwnerError as exc:
+                print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
+                sys.exit(2)
         name, tier = owner_title, "owner"
     _tier_note = None
     if tier:
@@ -4345,7 +4372,8 @@ def cmd_spawn(
                              pty_mode=pty_mode, split_mode=split_mode, pane=split_pane,
                              direction=split_direction, cognitive=cognitive,
                              backend=backend, thinking_level=thinking_level,
-                             spawned_by=spawned_by, takeover=takeover)
+                             spawned_by=spawned_by, takeover=takeover,
+                             owner_title=owner_title, memory_dir=memory_dir)
         return
 
     if resume_agent_id or resume_convo_id:
