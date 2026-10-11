@@ -3057,6 +3057,36 @@ def test_fix5_the_readings_are_capped_at_four():
     assert deny_floor._ps_binding(["SRC", "ROOT"]) == [("ROOT", ["SRC"])]
 
 
+def test_fix5_a_glued_value_never_takes_the_next_word(roots):
+    """Only a `-P:` with NOTHING after the colon takes the next word: `-Path:SRC ROOT` keeps ROOT as the destination even when
+    another word of the line ends in a colon (that word's reading is the one that takes the next word)."""
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for head in FIX4_HEADS:
+        command = f"{head} -Exclude: x.json -Path:{src.as_posix()}/{OTHER_NAME} {litetui.as_posix()}"
+        assert deny_floor.jobs_write_target(command, workspace, home, shell="powershell", name=OTHER_NAME,
+                                            more=into) == litetui / OTHER_NAME, command
+
+
+def test_fix5_only_a_parameters_first_dash_is_read(roots):
+    """The Unicode dash is read as `-` only as the first character of a word: a folder whose name holds U+2013 is that folder."""
+    home, workspace, _, _, plain = roots
+    dashed = plain.parent / "LORA–SET"
+    dashed.mkdir()
+    (dashed / ".litetui-data.json").write_text("{}", encoding="utf-8")
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for command in (f"Copy-Item {src.as_posix()}/{OTHER_NAME} {dashed.as_posix()}",
+                    f"Copy-Item {src.as_posix()}/{OTHER_NAME} –Destination {dashed.as_posix()}"):
+        assert deny_floor.jobs_write_target(command, workspace, home, shell="powershell", name=OTHER_NAME,
+                                            more=into) == dashed / OTHER_NAME, command
+
+
 def test_fix5_a_unicode_dash_is_powershells_only(roots):
     """CONTROL: the dash is read as `-` only in PowerShell's reading. GNU's cp takes `–t` for a file name."""
     home, workspace, litetui, _, plain = roots
