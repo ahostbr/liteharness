@@ -249,11 +249,12 @@ def write_presence(agent_id: str) -> Path:
     # a row registered before its own process started is read as a pid-reuse ghost, and the
     # live session's name would be free to take.
     new_process = isinstance(detected_pid, int) and detected_pid > 0 and detected_pid != existing_session_pid
-    # A seat keeps the name it has: a re-run of start never renames it.
+    # A seat keeps the name it has: a re-run of start never renames it. A blank name is not a name.
     existing_name = existing.get("name")
     presence = {
         "agent_id": agent_id,
-        "name": existing_name if isinstance(existing_name, str) and existing_name else naming.get_name(agent_id),
+        "name": (existing_name if isinstance(existing_name, str) and existing_name.strip()
+                 else naming.get_name(agent_id)),
         "model": model,
         "project": current_project(),
         "cwd": os.getcwd(),

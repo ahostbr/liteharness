@@ -195,3 +195,31 @@ def test_the_pid_compared_is_the_session_pid_not_the_writers_pid(root, monkeypat
     config.merge_presence_fields(path, {"pid": child.pid + 1})
     row = read(manual.write_presence(AGENT))
     assert row["registered_at"] == LONG_AGO
+
+
+# ── what a re-run keeps and what it refuses to keep (T0482) ───────────────────────────────
+
+def _rewrite(path, **fields):
+    row = read(path)
+    row.update(fields)
+    path.write_text(json.dumps(row), encoding="utf-8")
+
+
+@pytest.mark.parametrize("blank", ["", " ", "   ", "\t", " \n "])
+def test_a_blank_existing_name_is_not_kept(root, blank):
+    path = manual.write_presence(AGENT)
+    _rewrite(path, name=blank)
+    assert read(manual.write_presence(AGENT))["name"] == naming.get_name(AGENT)
+
+
+@pytest.mark.parametrize("bad", [7, ["x"], {"n": "x"}, True, None])
+def test_a_non_string_existing_name_falls_back_to_the_naming_module(root, bad):
+    path = manual.write_presence(AGENT)
+    _rewrite(path, name=bad)
+    assert read(manual.write_presence(AGENT))["name"] == naming.get_name(AGENT)
+
+
+def test_a_non_blank_existing_name_is_kept_exactly_as_stored(root):
+    path = manual.write_presence(AGENT)
+    _rewrite(path, name="  Widget ")
+    assert read(manual.write_presence(AGENT))["name"] == "  Widget "
