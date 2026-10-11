@@ -2916,6 +2916,33 @@ def _validate_model_id(model: str) -> str:
     return resolved
 
 
+_SPAWN_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def _spawn_defaults() -> tuple[str | None, str | None]:
+    """(model, effort) a Claude spawn uses when the caller names none (T0471).
+
+    `claude` launched without --model boots the model in the user's settings.json, and
+    without --effort its configured level, which is how a fleet silently ran on the most
+    expensive pair. The harness names no model of its own: the operator sets
+    spawn_default_model / spawn_default_effort in the harness config, or
+    LITEHARNESS_SPAWN_MODEL / LITEHARNESS_SPAWN_EFFORT in the environment (which wins).
+    """
+    cfg = config.load()
+    model = os.environ.get("LITEHARNESS_SPAWN_MODEL") or cfg.get("spawn_default_model") or None
+    effort = os.environ.get("LITEHARNESS_SPAWN_EFFORT") or cfg.get("spawn_default_effort") or None
+    if effort is not None and effort not in _SPAWN_EFFORTS:
+        raise SystemExit(f"Unknown spawn_default_effort: {effort!r}. Use one of: {', '.join(_SPAWN_EFFORTS)}.")
+    return model, effort
+
+
+def _with_default_effort(additional_args: str | None, effort: str | None) -> str | None:
+    """additional_args with `--effort <default>` in front, unless the caller already chose one."""
+    if not effort or "--effort" in (additional_args or ""):
+        return additional_args
+    return f"--effort {effort} {additional_args or ''}".strip()
+
+
 def _build_claude_cmd(
     model: str | None = None,
     permission_mode: str | None = None,
@@ -2924,7 +2951,12 @@ def _build_claude_cmd(
     name: str | None = None,
 ) -> str:
     """Build the claude CLI command string with bootstrap instructions."""
-    resolved_model = _validate_model_id(model) if model else None
+    default_model, default_effort = _spawn_defaults()
+    if not model and not default_model:
+        print("  Note: no --model and no spawn_default_model in the harness config: claude will boot "
+              "the model in its own settings.json.")
+    resolved_model = _validate_model_id(model or default_model) if (model or default_model) else None
+    additional_args = _with_default_effort(additional_args, default_effort)
 
     bootstrap = (
         "MANDATORY FIRST STEPS: "
@@ -4300,6 +4332,8 @@ def cmd_spawn(
             sys.exit(2)
 
     claude_str, resolved_model = _build_claude_cmd(model, permission_mode, additional_args, prompt, name)
+    # The split, canvas and pty routes below assemble their own claude line from additional_args.
+    additional_args = _with_default_effort(additional_args, _spawn_defaults()[1])
 
     # Build context env vars to inject into the spawned agent's environment
     context_env: dict[str, str] = {}
