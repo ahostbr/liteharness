@@ -116,3 +116,18 @@ def test_a_registered_row_and_a_started_row_pass_the_same_check(root, capsys):
     registered = read(root / "agents" / "registered-alpha.json")
     assert missing(registered) == []
     assert missing(read(manual.write_presence(AGENT))) == []
+
+
+def test_a_second_start_never_renames_the_seat(root):
+    path = manual.write_presence(AGENT)
+    config.merge_presence_fields(path, {"name": "Widget"})
+    assert naming.get_name(AGENT) != "Widget"
+    assert read(manual.write_presence(AGENT))["name"] == "Widget"
+
+
+def test_an_old_row_without_a_name_still_gets_one(root):
+    path = manual.write_presence(AGENT)
+    row = read(path)
+    del row["name"]
+    path.write_text(json.dumps(row), encoding="utf-8")
+    assert read(manual.write_presence(AGENT))["name"] == naming.get_name(AGENT)

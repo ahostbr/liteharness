@@ -245,9 +245,11 @@ def write_presence(agent_id: str) -> Path:
         existing_session_pid if isinstance(existing_session_pid, int) and existing_session_pid > 0 else None
     )
     now = utc_now()
+    # A seat keeps the name it has: a re-run of start never renames it.
+    existing_name = existing.get("name")
     presence = {
         "agent_id": agent_id,
-        "name": naming.get_name(agent_id),
+        "name": existing_name if isinstance(existing_name, str) and existing_name else naming.get_name(agent_id),
         "model": model,
         "project": current_project(),
         "cwd": os.getcwd(),
