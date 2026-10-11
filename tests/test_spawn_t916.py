@@ -495,6 +495,24 @@ def test_a_superseded_holder_is_moved_aside_and_the_name_is_applied(split, capsy
     assert "Name: Carmack" in capsys.readouterr().out
 
 
+def test_a_name_claimed_during_launch_cannot_be_restored_from_presence(split, capsys):
+    from liteharness import naming
+    _, state, agents = split
+
+    def boot():
+        _holder(agents, "live-holder", "Alpha", _registered_now())
+        _presence(agents, "returning-seat", name="Alpha", canvas_session_id=MINTED)
+
+    state["on_launch"] = boot
+    assert _run(split_mode=True, split_pane="canvas-pane-26", prompt="x", name="Alpha") == 0
+    row = json.loads((agents / "returning-seat.json").read_text(encoding="utf-8"))
+    expected = naming.generate_name("returning-seat")
+    assert row["name"] == expected != "Alpha"
+    assert naming.get_name("returning-seat") == expected
+    assert f"Name: {expected}" in capsys.readouterr().out
+    assert naming.get_name("live-holder") == "Alpha"
+
+
 # ── T916-D: a stale env bridge token is retried ONCE with the file's token ────
 
 @pytest.fixture
