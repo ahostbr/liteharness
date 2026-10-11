@@ -16,6 +16,8 @@ from pathlib import Path
 import liteharness.config as config
 import liteharness.hooks as hooks
 import liteharness.inbox as inbox
+import liteharness.naming as naming
+import liteharness.roles as roles
 
 
 DEFAULT_ROOT = Path.home() / ".liteharness"
@@ -242,15 +244,32 @@ def write_presence(agent_id: str) -> Path:
     session_pid = detected_pid or (
         existing_session_pid if isinstance(existing_session_pid, int) and existing_session_pid > 0 else None
     )
+    now = utc_now()
     presence = {
         "agent_id": agent_id,
+        "name": naming.get_name(agent_id),
         "model": model,
         "project": current_project(),
-        "started_at": existing.get("started_at") or utc_now(),
-        "agent_last_seen": utc_now(),
+        "cwd": os.getcwd(),
+        # Kept across a re-run of start (registered_at orders same-session rows), set
+        # when the row has none: that is how a row written by an older start is completed.
+        "registered_at": existing.get("registered_at") or now,
+        "registration_source": existing.get("registration_source") or "startup",
+        "started_at": existing.get("started_at") or now,
+        "agent_last_seen": now,
         "pid": detected_pid or os.getpid(),
         **identity,
     }
+    # A hand-started session declared no role, so it gets the one every writer gives an
+    # undeclared seat (never orchestrator: readers pick the orchestrator by role). The
+    # environment is not consulted: a launching shell's LITEHARNESS_ROLE is not this seat's.
+    # A role already on the row (an explicit `register --tier`) is kept as written.
+    if existing.get("role") or existing.get("tier"):
+        for key in ("role", "tier"):
+            if key in existing:
+                presence[key] = existing[key]
+    else:
+        presence.update(roles.presence_fields(roles.DEFAULT_ROLE))
     if session_pid:
         presence["session_pid"] = session_pid
     if process_context.get("wt_process_pid"):
