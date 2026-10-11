@@ -9,7 +9,8 @@ from . import owned_launch
 def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
           direction: str | None, cwd: str | None, name: str | None, tier: str | None,
           model: str | None, backend: str | None, thinking_level: str | None,
-          spawned_by: str | None, kill_old: bool, prompt: str | None) -> None:
+          spawned_by: str | None, kill_old: bool, prompt: str | None,
+          cognitive: str | None = None) -> None:
     from . import cli, fleet_policy
     if kill_old:
         raise StoreError('Owned named resume never closes a seat; wait until offline')
@@ -69,6 +70,7 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
         'cli': 'litetui', 'name': agent.name, 'tier': tier, 'model': saved['model'],
         'backend': saved['backend'], 'thinkingLevel': saved['thinking_level'],
         'cwd': cwd, 'spawnedBy': caller, **({'prompt': prompt} if prompt is not None else {}),
+        **({'cognitive': cognitive} if cognitive else {}),
     })
     if not isinstance(resolution, dict) or resolution.get('ok') is not True:
         raise StoreError('Owned spawn resolution refused')

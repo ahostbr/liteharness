@@ -4171,6 +4171,37 @@ def cmd_spawn(
                            cwd=cwd, name=name, pane=split_pane, direction=split_direction,
                            spawned_by=spawned_by)
         return
+    # Cognitive architecture — MECHANICAL delivery (RULING, the user 2026-08-07:
+    # "the orch flow is broken without them getting their correct prompts").
+    # Discipline-based delivery ("tell the agent to read its file") failed
+    # silently the same day the brief-below-the-fold bug did; a polymath spawn
+    # now resolves its architecture file HERE and the SessionStart hook injects
+    # the content. --cognitive overrides; otherwise --name is tried against the
+    # library, so `--name Linus` alone is enough. A plain fleet name resolving
+    # to nothing is the normal case, not an error.
+    # T0463-B: an explicit --cognitive that resolves to nothing used to WARN and boot a
+    # generic seat. It is refused here, before a name is evicted, a worktree made or a
+    # pane opened. T0465: this is the one gate, ahead of the route split, so the fresh
+    # litetui and resume routes pass through it too (codex refuses --cognitive above).
+    try:
+        from . import prompts as _prompts_mod
+        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", tier or "worker",
+                                                   tier_default=not cognitive)
+    except Exception as _cog_exc:  # noqa: BLE001 — a name-only miss never kills a spawn
+        if cognitive:
+            print(f"SPAWN REFUSED: --cognitive {cognitive!r} could not be resolved "
+                  f"({_cog_exc!r}). Nothing was spawned.")
+            sys.exit(2)
+        _cog = None
+    if _cog is None and cognitive:
+        try:
+            valid = ", ".join(_prompts_mod.list_cognitive_names()) or "none (no library resolved)"
+        except Exception as _list_exc:  # noqa: BLE001 — the refusal must still print
+            valid = f"unlisted ({_list_exc!r})"
+        print(f"SPAWN REFUSED: --cognitive {cognitive!r} matches no cognitive architecture. "
+              f"Valid names: {valid}. Nothing was spawned.")
+        sys.exit(2)
+
     if not (resume_agent_id or resume_convo_id):
         # T0236-T4: a worker or leader is born in an explicit repo root. Falling back to
         # the CALLER's cwd is how seats ended up in the wrong tree. Resume takes its cwd
@@ -4200,7 +4231,7 @@ def cmd_spawn(
                          pane=split_pane, direction=split_direction, cwd=cwd,
                          name=name, tier=tier, model=model, backend=backend,
                          thinking_level=thinking_level, spawned_by=spawned_by,
-                         kill_old=kill_old, prompt=prompt)
+                         kill_old=kill_old, prompt=prompt, cognitive=cognitive)
         except ValueError as exc:
             print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
             sys.exit(2)
@@ -4225,35 +4256,6 @@ def cmd_spawn(
     refusal = _spawn_floor_refusal(model, exec_cmd)
     if refusal:
         print(refusal)
-        sys.exit(2)
-
-    # Cognitive architecture — MECHANICAL delivery (RULING, the user 2026-08-07:
-    # "the orch flow is broken without them getting their correct prompts").
-    # Discipline-based delivery ("tell the agent to read its file") failed
-    # silently the same day the brief-below-the-fold bug did; a polymath spawn
-    # now resolves its architecture file HERE and the SessionStart hook injects
-    # the content. --cognitive overrides; otherwise --name is tried against the
-    # library, so `--name Linus` alone is enough. A plain fleet name resolving
-    # to nothing is the normal case, not an error.
-    # T0463-B: an explicit --cognitive that resolves to nothing used to WARN and boot a
-    # generic seat. It is refused here, before a name is evicted, a worktree made or a
-    # pane opened.
-    try:
-        from . import prompts as _prompts_mod
-        _cog = _prompts_mod.resolve_cognitive_file(cognitive or name or "", tier or "worker")
-    except Exception as _cog_exc:  # noqa: BLE001 — a name-only miss never kills a spawn
-        if cognitive:
-            print(f"SPAWN REFUSED: --cognitive {cognitive!r} could not be resolved "
-                  f"({_cog_exc!r}). Nothing was spawned.")
-            sys.exit(2)
-        _cog = None
-    if _cog is None and cognitive:
-        try:
-            valid = ", ".join(_prompts_mod.list_cognitive_names()) or "none (no library resolved)"
-        except Exception as _list_exc:  # noqa: BLE001 — the refusal must still print
-            valid = f"unlisted ({_list_exc!r})"
-        print(f"SPAWN REFUSED: --cognitive {cognitive!r} matches no cognitive architecture. "
-              f"Valid names: {valid}. Nothing was spawned.")
         sys.exit(2)
 
     # Absolute: the split path types a Set-Location into ANOTHER shell, where a

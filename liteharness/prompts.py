@@ -177,7 +177,8 @@ _TIER_TO_COG_DIR = {
 }
 
 
-def resolve_cognitive_file(name: str, tier: str | None = None) -> Optional[Path]:
+def resolve_cognitive_file(name: str, tier: str | None = None, *,
+                           tier_default: bool = True) -> Optional[Path]:
     """Map a polymath name to its cognitive-architecture file, if one ships.
 
     Returns the file for e.g. name="Linus" regardless of which tier directory
@@ -238,7 +239,9 @@ def resolve_cognitive_file(name: str, tier: str | None = None) -> Optional[Path]
     # Deliberately NARROW: only the PREFERRED tier, and only when that tier ships a
     # default.md. A worker named "BottleRender" still returns None, which the docstring
     # above promises and which a blanket fallback would have broken.
-    if preferred and libs:
+    # T0465: a NAME-derived lookup only. An explicit --cognitive passes tier_default=False,
+    # so `--tier orchestrator --cognitive bogus` misses (and is refused) instead of booting this.
+    if tier_default and preferred and libs:
         fallback = libs[0] / preferred / "default.md"
         if fallback.is_file():
             return fallback
