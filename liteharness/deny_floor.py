@@ -1344,13 +1344,41 @@ def _comma_joined(args):
     return joined
 
 
+#: The dashes PowerShell's tokenizer takes for a parameter's `-` (fix 5, R28): en
+#: dash, em dash, horizontal bar (a command pasted from a web page carries them).
+_PS_DASHES = str.maketrans("\u2013\u2014\u2015", "---")
+
+
 def _ps_binding(args):
-    """(destination, sources) as PowerShell binds Copy-Item's and Move-Item's words:
-    a parameter's value is consumed by it; the first free positional is -Path, the
-    next -Destination; a comma array is split into its paths. A backtick-newline
-    leaves an EMPTY word between two words of the copy (fix 4, R20): it is no
-    argument, so it is dropped before anything is bound."""
-    args = _comma_joined([word for word in args if word])
+    """[(destination, sources), ...]: the readings of Copy-Item's and Move-Item's words
+    (_ps_bound). Two spellings are the same word list once the splitter is done, so
+    both are bound and each reading is asked (the union, as _meanings; only adds
+    refusals; fix 5):
+
+    - an EMPTY word is `""` or `''`, an argument (R26), or what a backtick-newline
+      leaves between two words, no argument (fix 4, R20): kept, and dropped;
+    - a word `-P:` is `-P: value`, the next word its value (R27), or `-P:''`, an
+      empty value with the next word free: both.
+
+    So at most 4 readings, and 1 when neither is in the words. A leading U+2013,
+    U+2014 or U+2015 is PowerShell's dash (R28), in this reading only."""
+    args = [word[:1].translate(_PS_DASHES) + word[1:] for word in args]
+    empty = (True, False) if "" in args else (False,)
+    colon = (True, False) if any(w.startswith("-") and w.endswith(":") for w in args) else (False,)
+    readings = []
+    for keep in empty:
+        for takes_next in colon:
+            reading = _ps_bound(args if keep else [word for word in args if word], takes_next)
+            if reading not in readings:
+                readings.append(reading)
+    return readings
+
+
+def _ps_bound(args, colon_takes_next):
+    """(destination, sources) as PowerShell binds the words: a parameter's value is
+    consumed by it; the first free positional is -Path, the next -Destination; a
+    comma array is split into its paths."""
+    args = _comma_joined(args)
     named, positional, i = {"source": [], "dest": []}, [], 0
     while i < len(args):
         word = args[i]
@@ -1358,17 +1386,18 @@ def _ps_binding(args):
         if not word.startswith("-") or word == "-":
             positional.append(word)
             continue
-        given, colon, value = word[1:].lower().partition(":")
+        given, colon, value = word[1:].partition(":")
+        given = given.lower()
         param = _PS_ALIASES.get(given) or (given if given in _PS_PARAMS else None)
         if param is None:
             names = [p for p in _PS_PARAMS if p.startswith(given)] if given else []
             param = names[0] if len(names) == 1 else None
         kind = _PS_PARAMS.get(param, "")
-        if kind and not colon:
+        if (kind and not colon) or (colon_takes_next and colon and not value):
             value = args[i] if i < len(args) else None
             i += 1
         if kind in ("source", "dest") and value is not None:
-            named[kind].append(word.partition(":")[2] if colon else value)
+            named[kind].append(value)
     slots = [kind for kind in ("source", "dest") if not named[kind]]
     for kind, word in zip(slots, positional):
         named[kind].append(word)
@@ -1402,32 +1431,33 @@ def _copied_into(shell, head, args, base, home, name, under, streams) -> Path | 
             if gnu["directory"]:
                 continue
             if gnu["target"] is not None:
-                dest, sources = gnu["target"], operands
+                readings = [(gnu["target"], operands)]
             elif len(operands) >= 2:
-                dest, sources = operands[-1], operands[:-1]
+                readings = [(operands[-1], operands[:-1])]
             else:
-                dest, sources = (".", operands) if bare == "ln" and operands else (None, [])
+                readings = [(".", operands)] if bare == "ln" and operands else []
             tree = gnu["recursive"]
             by_name = not gnu["no_target"]   # with -T the destination is the copy itself
         elif grammar == "powershell":
-            dest, sources = _ps_binding(args)
+            readings = _ps_binding(args)
             by_name = True
         else:
             words = [w for w in args if not _SWITCH.fullmatch(w)]
             words = [piece for w in words for piece in (w.split("+") if bare == "copy" else [w])]
-            dest, sources = (words[-1], words[:-1]) if len(words) >= 2 else (".", words)
+            readings = [(words[-1], words[:-1]) if len(words) >= 2 else (".", words)]
             tree = bare in ("copy", "xcopy")
             by_name = True
-        if dest is None:
-            continue
-        try:   # a NUL here is no answer for this reading, not for the whole command (fix 2)
-            if by_name and (target := _named_into(dest, sources, base, home, name, under, streams)):
-                return target
-            if tree and (target := _tree_into(grammar, dest, sources, base, home, name, under, streams,
-                                              no_target=grammar == "gnu" and gnu["no_target"])):
-                return target
-        except (ValueError, OSError):
-            continue
+        for dest, sources in readings:
+            if dest is None:
+                continue
+            try:   # a NUL here is no answer for this reading, not for the whole command (fix 2)
+                if by_name and (target := _named_into(dest, sources, base, home, name, under, streams)):
+                    return target
+                if tree and (target := _tree_into(grammar, dest, sources, base, home, name, under, streams,
+                                                  no_target=grammar == "gnu" and gnu["no_target"])):
+                    return target
+            except (ValueError, OSError):
+                continue
     return None
 
 
