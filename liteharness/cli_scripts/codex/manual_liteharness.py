@@ -245,6 +245,10 @@ def write_presence(agent_id: str) -> Path:
         existing_session_pid if isinstance(existing_session_pid, int) and existing_session_pid > 0 else None
     )
     now = utc_now()
+    # A session on a pid the row does not name is a new registration, so it is stamped now:
+    # a row registered before its own process started is read as a pid-reuse ghost, and the
+    # live session's name would be free to take.
+    new_process = isinstance(detected_pid, int) and detected_pid > 0 and detected_pid != existing_session_pid
     # A seat keeps the name it has: a re-run of start never renames it.
     existing_name = existing.get("name")
     presence = {
@@ -253,9 +257,10 @@ def write_presence(agent_id: str) -> Path:
         "model": model,
         "project": current_project(),
         "cwd": os.getcwd(),
-        # Kept across a re-run of start (registered_at orders same-session rows), set
-        # when the row has none: that is how a row written by an older start is completed.
-        "registered_at": existing.get("registered_at") or now,
+        # Kept across a re-run of start in the same process (registered_at orders same-session
+        # rows), set when the row has none (that is how a row written by an older start is
+        # completed) and re-stamped when the session is a new process.
+        "registered_at": now if new_process else (existing.get("registered_at") or now),
         "registration_source": existing.get("registration_source") or "startup",
         "started_at": existing.get("started_at") or now,
         "agent_last_seen": now,

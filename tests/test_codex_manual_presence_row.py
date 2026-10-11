@@ -6,11 +6,13 @@ registered_at could neither order nor ignore it. The fix is on the writer: no re
 should need a special case for this row.
 """
 import json
+import subprocess
+import sys
 from datetime import datetime
 
 import pytest
 
-from liteharness import cli, config, naming, roles
+from liteharness import cli, config, hooks, naming, roles
 from liteharness.cli_scripts.codex import manual_liteharness as manual
 
 AGENT = "codex-alpha0001"
@@ -131,3 +133,65 @@ def test_an_old_row_without_a_name_still_gets_one(root):
     del row["name"]
     path.write_text(json.dumps(row), encoding="utf-8")
     assert read(manual.write_presence(AGENT))["name"] == naming.get_name(AGENT)
+
+
+# ── a restarted hand-started session is a NEW registration (T0482) ─────────────────────────
+
+LONG_AGO = "2026-01-01T00:00:00+00:00"
+
+
+@pytest.fixture
+def child():
+    """A real, short-lived process whose create_time is later than LONG_AGO."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        yield proc
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def _first_run_long_ago(monkeypatch, pid):
+    """The row a previous session wrote: registered long before any process alive now."""
+    monkeypatch.setattr(manual, "detect_process_context", lambda: {"codex_pid": pid} if pid else {})
+    with monkeypatch.context() as stamped:
+        stamped.setattr(manual, "utc_now", lambda: LONG_AGO)
+        return manual.write_presence(AGENT)
+
+
+def test_a_restarted_session_on_a_new_pid_is_a_new_registration(root, monkeypatch, child):
+    path = _first_run_long_ago(monkeypatch, 999999)
+    assert read(path)["registered_at"] == LONG_AGO
+    monkeypatch.setattr(manual, "detect_process_context", lambda: {"codex_pid": child.pid})
+    row = read(manual.write_presence(AGENT))
+    assert row["session_pid"] == child.pid
+    assert row["registered_at"] != LONG_AGO
+    assert row["started_at"] == LONG_AGO, "only the registration is re-stamped"
+    # The two readers that decide whether a seat may be taken over / its name is free.
+    assert hooks._record_belongs_to_process(AGENT, child.pid) is True
+    assert cli._agent_record_live(AGENT) is True
+
+
+def test_a_rerun_on_the_same_pid_keeps_registered_at(root, monkeypatch, child):
+    _first_run_long_ago(monkeypatch, child.pid)
+    row = read(manual.write_presence(AGENT))
+    assert row["session_pid"] == child.pid
+    assert row["registered_at"] == LONG_AGO
+
+
+def test_a_rerun_that_detects_no_pid_keeps_registered_at_and_the_old_pid(root, monkeypatch, child):
+    _first_run_long_ago(monkeypatch, child.pid)
+    monkeypatch.setattr(manual, "detect_process_context", lambda: {})
+    row = read(manual.write_presence(AGENT))
+    assert row["session_pid"] == child.pid
+    assert row["registered_at"] == LONG_AGO
+
+
+def test_the_pid_compared_is_the_session_pid_not_the_writers_pid(root, monkeypatch, child):
+    # A row from another writer names the session pid and a different writer pid; a re-run in
+    # that same session is not a new registration.
+    path = _first_run_long_ago(monkeypatch, child.pid)
+    config.merge_presence_fields(path, {"pid": child.pid + 1})
+    row = read(manual.write_presence(AGENT))
+    assert row["registered_at"] == LONG_AGO
