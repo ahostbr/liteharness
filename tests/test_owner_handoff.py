@@ -102,6 +102,67 @@ def test_headings_match_case_insensitively_and_with_a_timestamp_on_the_line():
     assert owner.validate_now(text) == []
 
 
+PLAIN_NOW = """\
+Updated: 2026-10-11 14:00
+Doing now: Reconciling the widgets backlog.
+Next 3 steps:
+1. Check the open cards
+2. Ask Beta about the shared interface
+3. Write the summary
+Waiting on: Beta: the interface answer
+Crew alive: none
+Do NOT redo: The audit of the widgets index (done, see DOMAIN.md)
+"""
+
+
+def test_the_plain_colon_spelling_passes():
+    assert owner.validate_now(PLAIN_NOW) == []
+
+
+def test_the_plain_spelling_matches_case_insensitively():
+    assert owner.validate_now(PLAIN_NOW.replace("Doing now:", "DOING NOW:").replace("Updated:", "updated:")) == []
+
+
+def test_markdown_and_plain_headings_can_be_mixed():
+    text = GOOD_NOW.replace("## Doing now\nReconciling the widgets backlog.", "Doing now: Reconciling the widgets backlog.")
+    text = text.replace("## Waiting on\nBeta: the interface answer", "Waiting on:\nBeta: the interface answer")
+    assert "## Updated" in text and "Doing now: " in text and "Waiting on:\n" in text
+    assert owner.validate_now(text) == []
+
+
+def test_a_missing_plain_heading_is_refused_by_name():
+    text = PLAIN_NOW.replace("Crew alive: none\n", "")
+    assert any("Crew alive" in p and "no" in p for p in owner.validate_now(text))
+
+
+def test_a_duplicate_plain_heading_is_refused():
+    text = PLAIN_NOW + "Doing now: again\n"
+    assert any("Doing now" in p and "2 times" in p for p in owner.validate_now(text))
+
+
+def test_a_plain_heading_duplicating_a_markdown_one_is_refused():
+    text = GOOD_NOW + "Waiting on: someone else\n"
+    assert any("Waiting on" in p and "2 times" in p for p in owner.validate_now(text))
+
+
+def test_an_empty_plain_section_is_refused():
+    text = PLAIN_NOW.replace("Crew alive: none\n", "Crew alive:\n")
+    assert any("Crew alive" in p and "empty" in p for p in owner.validate_now(text))
+
+
+def test_a_list_item_or_body_line_starting_with_a_name_is_not_a_heading():
+    text = PLAIN_NOW.replace(
+        "3. Write the summary\n",
+        "3. Write the summary\n2. Updated: the list item is body text\nWaiting on peers is not a heading\n"
+        "Doing nowhere: nor is this\n")
+    assert owner.validate_now(text) == []
+
+
+def test_body_lines_under_a_plain_heading_belong_to_its_section():
+    text = PLAIN_NOW.replace("Crew alive: none\n", "Crew alive:\nnone\n")
+    assert owner.validate_now(text) == []
+
+
 # ── the command ──────────────────────────────────────────────────────────────────
 
 def test_a_valid_handoff_commits_only_now_and_domain_with_the_owner_trailer(repo, capsys):

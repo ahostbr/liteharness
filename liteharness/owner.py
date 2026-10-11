@@ -78,6 +78,19 @@ MAX_NOW_LINES = 60
 REQUIRED_HEADINGS = ("Updated", "Doing now", "Next 3 steps", "Waiting on", "Crew alive", "Do NOT redo")
 
 _HEADING = re.compile(r"^#{1,6}\s*(.*?)\s*$")
+#: The plain spelling of the template: a line that starts with the heading name and a colon
+#: (`Doing now: text`). Not indented, so list items and body lines never match.
+_PLAIN_HEADINGS = [(name, re.compile(re.escape(name) + r"\s*:\s*(.*?)\s*$", re.IGNORECASE))
+                   for name in REQUIRED_HEADINGS]
+
+
+def _plain_heading(line: str) -> tuple[str, str] | None:
+    """(required heading, text after its colon) when `line` is a plain `Heading: text` line."""
+    for name, pattern in _PLAIN_HEADINGS:
+        match = pattern.match(line)
+        if match:
+            return name, match.group(1)
+    return None
 
 
 def validate_now(text: str) -> list[str]:
@@ -104,6 +117,14 @@ def validate_now(text: str) -> list[str]:
                     if rest:
                         current.append(rest)
                     break
+            continue
+        plain = _plain_heading(line)
+        if plain:
+            name, rest = plain
+            seen[name] = seen.get(name, 0) + 1
+            current = sections.setdefault(name, [])
+            if rest:
+                current.append(rest)
         elif current is not None and line.strip():
             current.append(line.strip())
     for name in REQUIRED_HEADINGS:
