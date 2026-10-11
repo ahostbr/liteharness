@@ -99,7 +99,11 @@ class QueuedCommandTests(unittest.TestCase):
         hits = [(r[1], r[2]) for r in self.rows() if 'bunch under floor' in r[3]]
         self.assertEqual(hits, [('q-str', 'user')])
 
-    def test_reindex_reaches_files_an_older_parser_indexed(self):
+    def ids(self, path):
+        with contextlib.closing(lookup.get_db()) as conn:
+            return [r[0] for r in conn.execute('SELECT id FROM messages WHERE file_path = ? ORDER BY id', (str(path),))]
+
+    def test_index_built_before_the_column_existed_is_migrated_and_reparsed(self):
         self.write('session.jsonl', FIXTURE)
         plain_file = self.write('plain.jsonl', FIXTURE[5:])
         original = conversation_sources.normalized_records
@@ -109,22 +113,46 @@ class QueuedCommandTests(unittest.TestCase):
         with patch.object(lookup, 'normalized_records', older_parser):
             lookup.cmd_index()
         with contextlib.closing(lookup.get_db()) as conn:
-            conn.execute("DELETE FROM index_meta WHERE key = 'parser_version'")  # no older index carries it
+            conn.execute('ALTER TABLE indexed_files DROP COLUMN parser_version')  # the schema before T0466
             conn.commit()
         before = self.rows()
+        plain_ids = self.ids(plain_file)
         self.assertFalse(any('bunch under floor' in r[3] for r in before))
 
-        lookup.cmd_index()  # neither mtime moved
+        lookup.cmd_index()  # neither mtime moved; the column is added back, NULL on every row
         after = self.rows()
         self.assertEqual([r[1] for r in after if 'bunch under floor' in r[3]], ['q-str'])
-        with contextlib.closing(lookup.get_db()) as conn:
-            plain_ids = [r[0] for r in conn.execute('SELECT id FROM messages WHERE file_path = ? ORDER BY id',
-                                                    (str(plain_file),))]
-        # A file without a queued_command record keeps its rows: same ids, not re-parsed.
-        self.assertEqual(len(plain_ids), 2)
-        self.assertTrue(set(plain_ids) <= {r[0] for r in before})
+        self.assertEqual(self.ids(plain_file), plain_ids)  # no queued_command: re-stamped, not re-parsed
         lookup.cmd_index()
-        self.assertEqual(self.rows(), after)  # the version is recorded: no third parse
+        self.assertEqual(self.rows(), after)  # both rows now carry the version: no third parse
+
+    def test_old_writer_rewrite_reparses_that_file_and_only_that_file(self):
+        rewritten = self.write('a.jsonl', FIXTURE)
+        untouched = self.write('b.jsonl', FIXTURE)
+        plain = self.write('c.jsonl', FIXTURE[5:])
+        lookup.cmd_index()
+        with contextlib.closing(lookup.get_db()) as conn:
+            # An older copy re-parses a.jsonl: its rows lose the queued prompts and its
+            # bookkeeping row is replaced by the statement that copy runs, without the column.
+            conn.execute('DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages '
+                         "WHERE file_path = ? AND message_uuid IN ('q-str', 'q-image'))", (str(rewritten),))
+            conn.execute("DELETE FROM messages WHERE file_path = ? AND message_uuid IN ('q-str', 'q-image')",
+                         (str(rewritten),))
+            conn.execute('INSERT OR REPLACE INTO indexed_files (file_path, mtime, msg_count) VALUES (?,?,?)',
+                         (str(rewritten), rewritten.stat().st_mtime, 2))
+            conn.commit()
+        before = {path: self.ids(path) for path in (rewritten, untouched, plain)}
+        self.assertEqual(len(before[rewritten]), 2)
+
+        lookup.cmd_index()
+        after = {path: self.ids(path) for path in (rewritten, untouched, plain)}
+        self.assertEqual(len(after[rewritten]), 4)
+        self.assertFalse(set(after[rewritten]) & set(before[rewritten]))  # re-parsed
+        self.assertEqual(after[untouched], before[untouched])  # not re-parsed
+        self.assertEqual(after[plain], before[plain])
+        self.assertEqual([r[1] for r in self.rows() if 'bunch under floor' in r[3]], ['q-str', 'q-str'])
+        lookup.cmd_index()
+        self.assertEqual({path: self.ids(path) for path in (rewritten, untouched, plain)}, after)
 
     def test_embeddings_reach_files_an_older_parser_embedded(self):
         import numpy as np
@@ -141,7 +169,8 @@ class QueuedCommandTests(unittest.TestCase):
             with patch.object(lookup, 'normalized_records', older_parser):
                 lookup.cmd_index_embeddings()
             with contextlib.closing(lookup.get_db()) as conn:
-                conn.execute("DELETE FROM index_meta WHERE key = 'embedding_parser_version'")
+                conn.execute('INSERT OR REPLACE INTO embedded_files (file_path, mtime, chunk_count) '
+                             'SELECT file_path, mtime, chunk_count FROM embedded_files')  # an older copy's write
                 conn.commit()
                 before = conn.execute('SELECT chunk_text FROM embeddings').fetchone()[0]
             self.assertNotIn('bunch under floor', before)
