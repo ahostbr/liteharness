@@ -2612,6 +2612,9 @@ FIX2_FORMS = [
     ("cmd", "cd /d {root} && copy {src}\\NAME"),                            # one word: into the current folder
     ("cmd", "copy /Y {src}\\NAME+{src}\\x.json {root}"),
     ("cmd", "copy {src}\\NAME {root} /-Y"),
+    # fix 4 (C2 again): `copy` has PowerShell's reading in cmd now (a third positional is ignored), so only xcopy, which has none,
+    # tells a `/-Y` switch from a path.
+    ("cmd", "xcopy {src}\\NAME {root} /-Y"),
 ]
 #: A FOLDER source holding the file, copied so its files land in the root (R8).
 FIX2_TREES = [
@@ -2902,7 +2905,8 @@ def test_fix4_r20_a_backtick_newline_between_the_words_of_a_copy(roots, template
 
 @pytest.mark.parametrize("source", [
     "\\/no-such-host/share/dir", "/\\no-such-host\\share\\dir", "'//no-such-host/share/dir'",
-    "\"//no-such-host/share/dir\"", "'\\\\no-such-host\\share\\dir'", "//no-such-host/share/dir",
+    "\"//no-such-host/share/dir\"", "'\\\\no-such-host\\share\\dir'",
+    "\\\"//no-such-host/share/dir\\\"",   # bash keeps the double quotes of an escaped pair on the word "//no-such-host/share/dir",
     "\\\\no-such-host\\share\\dir", "//?/UNC/no-such-host/share/dir", "\\/?/UNC/no-such-host/share/dir",
 ])
 @pytest.mark.parametrize("head", ["cp -r {s} {dest}/", "cp -a {s} {dest}/", "cp -rT {s} {dest}",
@@ -2924,6 +2928,18 @@ def test_fix4_r21_any_spelling_windows_reads_as_a_network_folder_is_never_looked
     deny_floor.jobs_write_target(f"cp -r {plain.as_posix()} {litetui.as_posix()}/", workspace, home,
                                  name=OTHER_NAME, more=deny_floor.MORE)
     assert any(plain.as_posix() in raw for raw in resolved), "CONTROL: a local folder source is resolved"
+
+
+def test_fix4_r21_a_lone_quote_is_no_layer(roots, monkeypatch):
+    """CONTROL: one quote layer is stripped only when both ends carry it. `'//host/share` (a quote at the start only) names a
+    folder in the current directory, not a network path, so it IS looked at."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    deny_floor.jobs_write_target(f"cp -r \"'//no-such-host/share/dir\" {plain.as_posix()}/", workspace, home,
+                                 shell="bash", name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(raw.startswith("'//no-such-host") for raw in resolved), resolved
 
 
 def test_the_gnu_grammar_alone_in_bash(roots):
