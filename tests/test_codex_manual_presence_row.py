@@ -223,3 +223,25 @@ def test_a_non_blank_existing_name_is_kept_exactly_as_stored(root):
     path = manual.write_presence(AGENT)
     _rewrite(path, name="  Widget ")
     assert read(manual.write_presence(AGENT))["name"] == "  Widget "
+
+
+def test_a_row_with_only_a_tier_keeps_it_and_gets_no_role_invented(root):
+    path = manual.write_presence(AGENT)
+    row = read(path)
+    del row["role"]
+    row["tier"] = "leader"
+    path.write_text(json.dumps(row), encoding="utf-8")
+    again = read(manual.write_presence(AGENT))
+    assert again["tier"] == "leader"
+    assert "role" not in again
+
+
+def test_a_row_with_only_a_role_keeps_it_and_gets_no_tier_invented(root):
+    path = manual.write_presence(AGENT)
+    row = read(path)
+    del row["tier"]
+    row["role"] = "scout"
+    path.write_text(json.dumps(row), encoding="utf-8")
+    again = read(manual.write_presence(AGENT))
+    assert again["role"] == "scout"
+    assert "tier" not in again
