@@ -298,3 +298,14 @@ def test_a_rejecting_hook_restores_the_index_for_the_two_files_only(repo, capsys
     assert _git(root, "rev-parse", "HEAD") == before
     assert _staged(root) == ["other.txt"], "NOW.md and DOMAIN.md must be unstaged again, other.txt untouched"
     assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW, "the owner's edit survives"
+
+
+# ── T0482: a UTF-8 BOM (PowerShell 5, Notepad) is not part of the first heading ──────────────
+
+# The BOM lands on the first line, so the markdown file must open on a required heading.
+@pytest.mark.parametrize("spelling", [GOOD_NOW.replace("# NOW\n\n", ""), PLAIN_NOW], ids=["markdown", "plain"])
+def test_a_now_saved_with_a_utf8_bom_passes(repo, capsys, spelling):
+    root, memory = repo
+    (memory / "NOW.md").write_bytes(b"\xef\xbb\xbf" + spelling.encode("utf-8"))
+    assert _handoff(memory) is None, capsys.readouterr().out
+    assert "/compact" in capsys.readouterr().out

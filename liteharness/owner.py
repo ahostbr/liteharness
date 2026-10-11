@@ -164,7 +164,8 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
     """Validate NOW.md, commit NOW.md and DOMAIN.md, return the pointer lines to print."""
     files = memory_files(memory_dir)
     base = files["NOW.md"].parent
-    problems = validate_now(files["NOW.md"].read_text(encoding="utf-8"))
+    # utf-8-sig: PowerShell 5 and Notepad save a BOM, which would sit in front of the first heading.
+    problems = validate_now(files["NOW.md"].read_text(encoding="utf-8-sig"))
     if problems:
         raise OwnerError("NOW.md does not pass the template: " + "; ".join(problems))
     if _git(base, "rev-parse", "--show-toplevel").returncode != 0:
