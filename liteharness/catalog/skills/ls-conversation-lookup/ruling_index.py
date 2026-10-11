@@ -11,9 +11,9 @@ import sqlite3
 import subprocess
 import time
 
-from conversation_sources import identity, serialized_index
+from conversation_sources import identity, queued_human_prompt, serialized_index
 
-FILTER_VERSION = 2
+FILTER_VERSION = 3
 NON_HUMAN_TEXT_MARKERS = (
     "Base directory for this skill", "This session is being continued",
     "<command-name>", "<local-command", "<system-reminder>", "<task-notification>",
@@ -124,6 +124,16 @@ def _extract(path):
                         questions.setdefault(uuid, []).append({"questions": qs, "call_id": b["id"],
                                                               "hash": digest, "line": line})
             continue
+        if kind == "attachment":
+            # A message typed mid-turn: provenance comes from the attachment's own origin.
+            text = queued_human_prompt(record)
+            if not text or not text.strip() or record.get("isSidechain") \
+                    or any(marker in text for marker in NON_HUMAN_TEXT_MARKERS):
+                continue
+            origin_class = "human-typed" if isinstance(record["attachment"].get("origin"), dict) \
+                else "legacy-human-candidate"
+            rows.append(_row(path, provider, convo, project, uuid, digest, record, origin_class, text, None))
+            continue
         if kind == "response_item":
             item = record.get("payload", {})
             if not isinstance(item, dict) or item.get("type") != "message" or item.get("role") != "user":
@@ -153,12 +163,16 @@ def _extract(path):
             text = _text(content)
             if not origin_class or not text.strip() or any(marker in text for marker in NON_HUMAN_TEXT_MARKERS):
                 continue
-        rows.append({"id": hashlib.sha256((str(path) + "\0" + digest).encode()).hexdigest(),
-                     "provider": provider, "conversation_id": convo, "project": project,
-                     "source_path": str(path), "record_uuid": str(uuid), "source_hash": digest,
-                     "timestamp": record.get("timestamp", ""), "origin_class": origin_class,
-                     "text": text, "question_hash": question_hash})
+        rows.append(_row(path, provider, convo, project, uuid, digest, record, origin_class, text, question_hash))
     return rows
+
+
+def _row(path, provider, convo, project, uuid, digest, record, origin_class, text, question_hash):
+    return {"id": hashlib.sha256((str(path) + "\0" + digest).encode()).hexdigest(),
+            "provider": provider, "conversation_id": convo, "project": project,
+            "source_path": str(path), "record_uuid": str(uuid), "source_hash": digest,
+            "timestamp": record.get("timestamp", ""), "origin_class": origin_class,
+            "text": text, "question_hash": question_hash}
 
 
 def _absolute(value, label):
