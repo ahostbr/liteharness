@@ -114,6 +114,19 @@ def validate(root: Path, *, agent_id: str, name: str | None, session_pid: int | 
         raise StoreError("Strict registration requires complete execution and no takeover")
     if not pid_alive(session_pid):
         raise StoreError("Strict registration owner is not a live process")
+    _validate_registry_claim(root, agent_id=agent_id, name=name, session_pid=session_pid)
+
+
+def validate_available_name(root: Path, name: str) -> None:
+    """Read-only fresh-owner preflight, not a reservation or registration receipt.
+
+    Child registration must repeat the check after acquiring its own home.
+    """
+    _validate_registry_claim(root, agent_id=None, name=valid_name(name), session_pid=None)
+
+
+def _validate_registry_claim(root: Path, *, agent_id: str | None, name: str,
+                             session_pid: int | None) -> None:
     root = Path(root)
     agents = _unlinked(root / "agents")
     try:

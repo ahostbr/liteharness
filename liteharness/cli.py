@@ -3459,7 +3459,7 @@ SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
     ("--spawned-by", "spawned_by", True, "explicit requesting agent id (fresh or resumed spawn)"),
     ("--args", "additional_args", True, "extra arguments appended to the claude command"),
     ("--new-window", "new_window", False, "accepted for old callers; has no effect"),
-    ("--owner", "owner_title", True, "boot a standing owner named TITLE from --memory (--cli claude or litetui; role owner). For a LiteTUI successor, --takeover bypasses the held-name refusal, not the old seat: its presence/inbox id remains until it exits; messages to that id are not delivered once closed. Peers must address the owner by NAME or learn the new id"),
+    ("--owner", "owner_title", True, "boot a standing owner named TITLE from --memory (--cli claude or litetui; role owner). For a LiteTUI successor, --takeover bypasses only the saved-name refusal; a live or uninspectable owner still refuses before launch. It never closes the old seat: its presence/inbox id remains until it exits; messages to that id are not delivered once closed. Peers must address the owner by NAME or learn the new id"),
     ("--memory", "memory_dir", True, "with --owner: the folder holding SOUL.md, DOMAIN.md and NOW.md; for litetui an absolute existing directory in a git repository (LiteTUI injects the files itself)"),
 )
 
@@ -3978,6 +3978,15 @@ def _spawn_litetui_agent(
     if not caller:
         print("SPAWN REFUSED: LiteTUI needs --spawned-by or LITEHARNESS_AGENT_ID.")
         sys.exit(2)
+    if owner_title:
+        from . import strict_registration
+        from .agent_store import StoreError
+        try:
+            strict_registration.validate_available_name(config.get_root(), owner_title)
+        except StoreError as exc:
+            print(f"SPAWN REFUSED: owner title {owner_title!r}: {exc}. "
+                  "--takeover cannot bypass a live or uninspectable owner. Nothing was spawned.")
+            sys.exit(2)
     # T0236-T1: a name is one agent, one conversation, for good. A fresh spawn never
     # mints a second agent under a name the index already holds (new contacts, new
     # instincts); the holder is resumed. --takeover is the explicit, audited exception.
@@ -3991,7 +4000,7 @@ def _spawn_litetui_agent(
               f"(conversation {held['convo_id']}, cwd {held['cwd']}). Resume it: "
               f"liteharness spawn --split --resume {held['name']} --tier {tier}; "
               "a live seat is messaged by inbox instead. "
-              + ("For an owner successor, pass --takeover. " if owner_title else "")
+              + ("For an owner successor with no live title holder, pass --takeover. " if owner_title else "")
               + "Nothing was spawned.")
         sys.exit(2)
     target_dir = Path(cwd or os.getcwd()).expanduser()
