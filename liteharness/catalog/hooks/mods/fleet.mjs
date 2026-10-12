@@ -23,7 +23,10 @@ export function fleetSnapshot(text) {
     })), warnings: row.warnings.slice(0, 10).map(clean) }
 }
 
-export const SPAWN_MODELS = new Set(['claude-opus-5-5[1m]', 'claude-opus-5[1m]', 'claude-opus-4-8[1m]', 'claude-opus-4-6[1m]'])
+// The host's Agent tool offers only short names (sonnet|opus|haiku|fable) and rejects a full id itself,
+// so a list of full ids alone refuses every subagent. Ryan 2026-10-12: allow the short names.
+export const SPAWN_MODELS = new Set(['claude-opus-5-5[1m]', 'claude-opus-5[1m]', 'claude-opus-4-8[1m]', 'claude-opus-4-6[1m]',
+  'claude-sonnet-5-5[1m]', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'sonnet', 'haiku', 'opus'])
 
 export function normalizedCwd(value) {
   if (typeof value !== 'string' || !value || /[\x00-\x1f]/.test(value)) return null
@@ -42,7 +45,7 @@ export function spawnDenial(e, ownedCwd) {
   const valid = lines.length === 1 && (lines[0][1] === 'Role' ? ROLES : OLD_TIERS).has(lines[0][2])
   if (!valid || mentions !== 1) return 'Spawn requires exactly one Agent-Role: orchestrator|owner|builder|scout|critic brief line (the older Agent-Tier: orchestrator|leader|worker|thinker|reviewer is still accepted).'
   if (!SPAWN_MODELS.has(e.model)) {
-    return 'Spawn requires an explicit full Claude model id ending in [1m]; aliases and inherit are refused.'
+    return 'Spawn requires an explicit model: sonnet, haiku or opus (short name or full id); inherit and other models are refused.'
   }
   if (e.fork && e.parentModel !== e.model) return 'Fork ignores the requested model; its parent must match the explicit [1m] model id.'
   const cwd = normalizedCwd(e.cwd)
