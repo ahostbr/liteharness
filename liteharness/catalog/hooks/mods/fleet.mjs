@@ -48,7 +48,9 @@ export function spawnDenial(e, ownedCwd) {
     return 'Spawn requires an explicit model: sonnet, haiku or opus (short name or full id); inherit and other models are refused.'
   }
   if (e.fork && e.parentModel !== e.model) return 'Fork ignores the requested model; its parent must match the explicit [1m] model id.'
-  const cwd = normalizedCwd(e.cwd)
+  // The host's Agent tool has no cwd input: a spawn without one runs in the session's own directory,
+  // which is the only directory this check allows anyway.
+  const cwd = normalizedCwd(e.cwd || ownedCwd)
   if (!cwd) return 'Spawn requires an explicit absolute cwd without dot segments.'
   if (!normalizedCwd(ownedCwd) || cwd !== normalizedCwd(ownedCwd)) return 'Spawn cwd must match the current owned session scope.'
   return null
