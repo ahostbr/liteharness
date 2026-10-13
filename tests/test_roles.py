@@ -81,12 +81,20 @@ def test_register_with_a_new_word_prints_no_deprecation(home, capsys):
     assert "deprecated" not in (captured.out + captured.err).lower()
 
 
-def test_register_unknown_role_warns_and_stores_builder_not_unknown(home, capsys):
-    """An unknown register role emits a warning and stores builder, not the unknown word."""
-    cli.cmd_register("seat-1", cli="claude-code", tier="janitor", name="Alpha")
-    out = capsys.readouterr().out
-    assert "janitor" in out and "orchestrator" in out and "builder" in out
-    assert _presence(home, "seat-1")["role"] == "builder"
+def test_register_unknown_role_refuses_without_registry_changes(home, capsys):
+    """Unknown role input is refused, not silently changed to the default role."""
+    def snapshot():
+        return {str(p.relative_to(home)): p.read_bytes() if p.is_file() else None
+                for p in home.rglob("*")}
+    before = snapshot()
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_register("seat-1", cli="claude-code", tier="janitor", name="Alpha")
+    assert exc.value.code != 0
+    assert snapshot() == before
+    captured = capsys.readouterr()
+    assert captured.out == "" and len(captured.err.splitlines()) == 1
+    assert "janitor" in captured.err
+    assert all(word in captured.err for word in (*roles.ROLES, *roles.ROLE_ALIASES))
 
 
 def test_register_default_is_builder(home):
