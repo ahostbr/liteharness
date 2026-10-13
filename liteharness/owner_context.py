@@ -40,24 +40,26 @@ def _read(path: Path) -> dict:
 
 
 def record(data: dict) -> None:
-    """Write only the host's explicit percentage, never infer tokens or capacity."""
+    """Record explicit usage or invalidate old usage; never infer capacity."""
     if not isinstance(data, dict):
         return
     context = data.get('context_window')
-    if not isinstance(context, dict):
-        return
-    used = context.get('used_percentage')
+    used = context.get('used_percentage') if isinstance(context, dict) else None
     if not _number(used) or not 0 <= used <= 100:
-        return
+        used = None
     path = _path(data.get('session_id'))
     if path is None:
         return
     try:
+        if used is None and not path.exists():
+            return  # No old observation to invalidate.
         path.parent.mkdir(parents=True, exist_ok=True)
         with _KernelLease(path.with_suffix('.lock')):
             previous = _read(path)
+            # An unusable latest sample invalidates the observation, not the
+            # latch. Only a measured below-threshold value rearms the reminder.
             latched = (previous.get('session_id') == data['session_id']
-                       and previous.get('reminded') is True and used >= 70)
+                       and previous.get('reminded') is True and (used is None or used >= 70))
             config.atomic_write_json(path, {
                 'session_id': data['session_id'], 'used_percentage': used,
                 'updated_at': time.time(), 'reminded': latched,

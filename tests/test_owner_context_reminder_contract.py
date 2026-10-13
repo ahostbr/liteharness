@@ -142,12 +142,32 @@ def test_state_write_failure_does_not_break_statusline_or_hook(tick, monkeypatch
     assert 'owner-handoff' not in tick(70)
 
 
-def test_invalid_sample_does_not_overwrite_previous_state(tick, tmp_path):
+def test_invalid_sample_preserves_latch_without_preserving_usable_usage(tick):
     assert 'owner-handoff' in tick(70)
-    path = next((tmp_path / 'context-usage').glob('*.json'))
-    before = path.read_bytes()
     assert 'owner-handoff' not in tick(None)
-    assert path.read_bytes() == before
+    assert 'owner-handoff' not in tick(70)
+    assert 'owner-handoff' not in tick(69)
+    assert 'owner-handoff' in tick(70)
+
+
+@pytest.mark.parametrize('context', [{}, {'used_percentage': 'unreadable'}, None, 'unreadable'])
+def test_latest_invalid_sample_suppresses_unconsumed_high_usage(tmp_path, monkeypatch, context):
+    from liteharness import owner_context
+    monkeypatch.setattr(hooks.config, 'get_root', lambda: tmp_path)
+    owner_context.record({'session_id': SID, 'context_window': {'used_percentage': 70}})
+    owner_context.record({'session_id': SID, 'context_window': context})
+    assert owner_context.reminder(SID, 'owner') == ''
+    owner_context.record({'session_id': SID, 'context_window': {'used_percentage': 70}})
+    assert 'owner-handoff' in owner_context.reminder(SID, 'owner')
+
+
+@pytest.mark.parametrize('usage', [None, 'unreadable', True, float('nan'), float('inf'), -1, 101])
+def test_statusline_invalidates_unconsumed_high_usage_before_owner_hook(tick, monkeypatch, usage):
+    monkeypatch.setenv('LITEHARNESS_ROLE', 'builder')
+    assert 'owner-handoff' not in tick(70)
+    monkeypatch.setenv('LITEHARNESS_ROLE', 'owner')
+    assert 'owner-handoff' not in tick(usage)
+    assert 'owner-handoff' in tick(70)
 
 
 def test_no_percentage_is_inferred_from_token_counts(tmp_path, monkeypatch):
