@@ -300,6 +300,65 @@ def test_a_rejecting_hook_restores_the_index_for_the_two_files_only(repo, capsys
     assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW, "the owner's edit survives"
 
 
+@pytest.mark.parametrize("failure", ["hook", "timeout", "partial-add"])
+@pytest.mark.parametrize("staged", ["earlier", "unchanged", "absent"])
+def test_failed_handoff_preserves_prior_index_and_newer_edits(repo, monkeypatch, failure, staged):
+    root, memory = repo
+    if staged == "absent":
+        _git(memory, "rm", "--cached", "--", "NOW.md", "DOMAIN.md")
+    if staged == "earlier":
+        (memory / "NOW.md").write_text("earlier staged note\n", encoding="utf-8")
+        (memory / "DOMAIN.md").write_text("earlier staged domain\n", encoding="utf-8")
+        _git(memory, "add", "NOW.md", "DOMAIN.md")
+    (root / "other.txt").write_text("unrelated staged edit\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    before = _git(root, "ls-files", "--stage", "-z")
+    head = _git(root, "rev-parse", "HEAD")
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
+    if failure == "hook":
+        (root / ".git" / "hooks" / "pre-commit").write_text(
+            "#!/bin/sh\necho rejected-by-test >&2\nexit 1\n", encoding="utf-8")
+    else:
+        run = owner.subprocess.run
+
+        def fail_git(args, **kwargs):
+            if failure == "timeout" and args[:2] == ["git", "commit"]:
+                raise subprocess.TimeoutExpired(args, 120)
+            if failure == "partial-add" and args[:2] == ["git", "add"]:
+                run(["git", "add", "--", "NOW.md"], **kwargs)
+                return subprocess.CompletedProcess(args, 1, "", "partial add rejected")
+            return run(args, **kwargs)
+
+        monkeypatch.setattr(owner.subprocess, "run", fail_git)
+    try:
+        with pytest.raises(owner.OwnerError, match="was restored"):
+            owner.handoff(memory, agent_id=AGENT_ID, agent_name="Alpha")
+    finally:
+        assert _git(root, "ls-files", "--stage", "-z") == before
+        assert _git(root, "rev-parse", "HEAD") == head
+        assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+        assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
+
+
+def test_failed_index_restoration_is_reported_without_claiming_success(repo, monkeypatch):
+    root, memory = repo
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    run = owner.subprocess.run
+
+    def fail_git(args, **kwargs):
+        if args[:2] in (["git", "commit"], ["git", "update-index"]):
+            return subprocess.CompletedProcess(args, 1, "", "blocked " + args[1])
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(owner.subprocess, "run", fail_git)
+    with pytest.raises(owner.OwnerError, match="index restoration failed") as error:
+        owner.handoff(memory, agent_id=AGENT_ID, agent_name="Alpha")
+    assert "blocked commit" in str(error.value) and "blocked update-index" in str(error.value)
+    assert "was restored" not in str(error.value)
+    assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+
+
 # ── T0482: a UTF-8 BOM (PowerShell 5, Notepad) is not part of the first heading ──────────────
 
 # The BOM lands on the first line, so the markdown file must open on a required heading.

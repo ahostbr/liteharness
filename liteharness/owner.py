@@ -155,9 +155,14 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
 
 
-def _unstage(base: Path) -> None:
-    """Undo only what this command staged: the two files, never anything else in the index."""
-    _git(base, "reset", "-q", "--", "NOW.md", "DOMAIN.md")
+def _restore_index(base: Path, entries: str, prefix: str) -> None:
+    """Index-info consumes root-relative paths even when invoked in a subdirectory."""
+    removals = "".join(f"0 {'0' * 40}\t{prefix}{name}\0" for name in ("NOW.md", "DOMAIN.md"))
+    result = subprocess.run(["git", "update-index", "-z", "--index-info"], cwd=base,
+                            input=removals + entries, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise OwnerError("could not restore the handoff index: " +
+                         (result.stderr.strip() or result.stdout.strip()))
 
 
 def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
@@ -175,10 +180,12 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
     if tracked and not changed:
         raise OwnerError("NOW.md has not changed since the last commit; rewrite it for this "
                          "handoff first, a stale NOW.md would reload the wrong state")
-    added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
-    if added.returncode != 0:
-        _unstage(base)
-        raise OwnerError("git add failed: " + (added.stderr.strip() or added.stdout.strip()))
+    prefix = _git(base, "rev-parse", "--show-prefix")
+    if prefix.returncode != 0:
+        raise OwnerError("could not resolve the handoff index paths: " + prefix.stderr.strip())
+    snapshot = _git(base, "ls-files", "--full-name", "--stage", "-z", "--", "NOW.md", "DOMAIN.md")
+    if snapshot.returncode != 0:
+        raise OwnerError("could not snapshot the handoff index: " + snapshot.stderr.strip())
     message = (
         "chore(handoff): rolling handoff of NOW.md and DOMAIN.md\n\n"
         f"Agent-Role: owner\nAgent-Name: {agent_name}\nAgent-ID: {agent_id}\n"
@@ -187,12 +194,23 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
         handle.write(message)
         message_file = handle.name
     try:
-        committed = _git(base, "commit", "-q", "-F", message_file, "--", "NOW.md", "DOMAIN.md")
+        try:
+            added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
+            if added.returncode != 0:
+                raise OwnerError("git add failed: " + (added.stderr.strip() or added.stdout.strip()))
+            committed = _git(base, "commit", "-q", "-F", message_file, "--", "NOW.md", "DOMAIN.md")
+            if committed.returncode != 0:
+                raise OwnerError("git commit failed: " +
+                                 (committed.stderr.strip() or committed.stdout.strip()))
+        except (OwnerError, OSError, subprocess.SubprocessError) as exc:
+            try:
+                _restore_index(base, snapshot.stdout, prefix.stdout.rstrip("\r\n"))
+            except (OwnerError, OSError, subprocess.SubprocessError) as restore_error:
+                raise OwnerError(f"{exc}; index restoration failed: {restore_error}; "
+                                 "inspect the index before retrying") from exc
+            raise OwnerError(f"{exc} (the index for NOW.md and DOMAIN.md was restored; "
+                             "your edits are untouched)") from exc
     finally:
         os.unlink(message_file)
-    if committed.returncode != 0:
-        _unstage(base)
-        raise OwnerError("git commit failed: " + (committed.stderr.strip() or committed.stdout.strip())
-                         + " (the index for NOW.md and DOMAIN.md was restored; your edits are untouched)")
     here = base.as_posix()
     return ["/compact", f"Reload: read {here}/NOW.md then {here}/DOMAIN.md"]
