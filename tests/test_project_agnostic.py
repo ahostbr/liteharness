@@ -163,7 +163,9 @@ def test_runtime_ignore_excludes_only_untracked_state(tmp_path, monkeypatch):
     (tmp_path / ".gitignore").write_text(ignore_rules, encoding="utf-8")
     test_untracked_new_files_are_scanned_too()
 
-    _git("add", "--force", ".liteharness/notes.txt")
+    (tmp_path / ".gitignore").write_text("", encoding="utf-8")
+    _git("add", ".liteharness/notes.txt")
+    (tmp_path / ".gitignore").write_text(ignore_rules, encoding="utf-8")
     with pytest.raises(AssertionError, match="tracked files carry"):
         test_no_tracked_file_carries_project_specific_text()
 
