@@ -32,6 +32,10 @@ class OwnerError(ValueError):
         super().__init__(message)
 
 
+class OwnerCommitOutcomeError(OwnerError):
+    """A commit may have landed; do not report a no-commit refusal or rewind staging."""
+
+
 def check_title(title) -> str:
     if (not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE
             or title != title.strip() or any(c in title for c in '"\'`$\\') or not title.isprintable()):
@@ -207,6 +211,8 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
     snapshot = _git(base, "ls-files", "--full-name", "--stage", "-z", "--", "NOW.md", "DOMAIN.md")
     if snapshot.returncode != 0:
         raise OwnerError("could not snapshot the handoff index: " + snapshot.stderr.strip())
+    head_before = _git(base, "rev-parse", "--verify", "HEAD")
+    commit_started = False
     message = (
         "chore(handoff): rolling handoff of NOW.md and DOMAIN.md\n\n"
         f"Agent-Role: owner\nAgent-Name: {agent_name}\nAgent-ID: {agent_id}\n"
@@ -220,11 +226,32 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
             added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
             if added.returncode != 0:
                 raise OwnerError("git add failed: " + (added.stderr.strip() or added.stdout.strip()))
+            commit_started = True
             committed = _git(base, "commit", "-q", "-F", message_file, "--", "NOW.md", "DOMAIN.md")
             if committed.returncode != 0:
                 raise OwnerError("git commit failed: " +
                                  (committed.stderr.strip() or committed.stdout.strip()))
         except (OwnerError, OSError, subprocess.SubprocessError) as exc:
+            if commit_started:
+                # A post-commit hook can outlive the subprocess timeout. Do not put
+                # old staging back on top of a new (or unreadable) HEAD.
+                outcome = "could not determine HEAD; commit outcome is uncertain"
+                try:
+                    head_after = _git(base, "rev-parse", "--verify", "HEAD")
+                    if head_before.returncode == 0 and head_after.returncode == 0:
+                        if head_before.stdout == head_after.stdout:
+                            outcome = ""
+                        else:
+                            outcome = (f"HEAD changed from {head_before.stdout.strip()} to "
+                                       f"{head_after.stdout.strip()}; a commit may have landed")
+                except (OSError, subprocess.SubprocessError):
+                    pass  # Keep the explicit uncertain-outcome diagnostic and recovery records.
+                if outcome:
+                    raise OwnerCommitOutcomeError(
+                        f"{exc}; {outcome}. The index was left as Git left it: NOW.md and "
+                        "DOMAIN.md may be committed or staged; unrelated staging was not reset. "
+                        "Inspect HEAD and the index before retrying; no automatic retry was made",
+                        recovery_path=recovery_path) from exc
             try:
                 _restore_index(base, recovery_path)
             except (OwnerError, OSError, subprocess.SubprocessError) as restore_error:

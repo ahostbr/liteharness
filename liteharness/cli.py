@@ -822,6 +822,9 @@ def cmd_owner_handoff(argv: list[str]) -> None:
     agent_id = config.get_agent_id()
     try:
         lines = owner.handoff(memory, agent_id=agent_id, agent_name=naming.get_name(agent_id))
+    except owner.OwnerCommitOutcomeError as exc:
+        print(f"HANDOFF NEEDS INSPECTION: {exc}")
+        sys.exit(2)
     except owner.OwnerError as exc:
         print(f"HANDOFF REFUSED: {exc}. Nothing was committed.")
         sys.exit(2)

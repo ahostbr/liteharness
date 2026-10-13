@@ -379,6 +379,46 @@ def test_failed_index_restoration_is_reported_without_claiming_success(repo, mon
     assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
 
 
+@pytest.mark.parametrize("head_readable", [True, False], ids=["head-changed", "head-unknown"])
+def test_timeout_after_commit_reports_outcome_without_rewinding_staging(repo, monkeypatch, capsys, head_readable):
+    root, memory = repo
+    for name in ("NOW.md", "DOMAIN.md"):
+        (memory / name).write_text("earlier staged version\n", encoding="utf-8")
+    _git(memory, "add", "NOW.md", "DOMAIN.md")
+    (root / "other.txt").write_text("unrelated staged version\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
+    before = _git(root, "rev-parse", "HEAD")
+    run = owner.subprocess.run
+    committed_index = []
+
+    def commit_then_timeout(args, **kwargs):
+        if args[:2] == ["git", "commit"]:
+            result = run(args, **kwargs)
+            assert result.returncode == 0, result.stderr
+            committed_index.append(_git(root, "ls-files", "--stage", "-z"))
+            raise subprocess.TimeoutExpired(args, 120)
+        if committed_index and not head_readable and args[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(args, 128, "", "HEAD unavailable")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(owner.subprocess, "run", commit_then_timeout)
+    assert _handoff(memory) == 2
+    out = capsys.readouterr().out
+    assert "Nothing was committed" not in out
+    assert ("HEAD changed" if head_readable else "could not determine HEAD") in out
+    assert "index was left as Git left it" in out
+    assert "/compact" not in out
+    monkeypatch.setattr(owner.subprocess, "run", run)
+    assert _git(root, "rev-parse", "HEAD") != before
+    assert _git(root, "ls-files", "--stage", "-z") == committed_index[0]
+    assert _staged(root) == ["other.txt"]
+    (recovery,) = (root / ".git").glob("handoff-index-*.recovery")
+    assert str(recovery) in out
+    assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+
+
 # ── T0482: a UTF-8 BOM (PowerShell 5, Notepad) is not part of the first heading ──────────────
 
 # The BOM lands on the first line, so the markdown file must open on a required heading.
