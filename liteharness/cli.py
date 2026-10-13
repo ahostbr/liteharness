@@ -1432,6 +1432,11 @@ def cmd_register(
     from . import naming
 
     agent_id = _require_identity_value(agent_id, "--agent-id")
+    role = _roles.normalize_role(tier) if tier is not None else None
+    if tier is not None and role is None:
+        accepted = ", ".join((*_roles.ROLES, *_roles.ROLE_ALIASES))
+        print(f"Error: invalid role {tier!r}; accepted roles: {accepted}.", file=sys.stderr)
+        sys.exit(2)
     if strict_identity:
         from .strict_registration import validate
         validate(config.get_root(), agent_id=agent_id, name=name, session_pid=session_pid,
@@ -1500,15 +1505,10 @@ def cmd_register(
     if spawned_by:
         presence["spawned_by"] = spawned_by
 
-    role = _roles.normalize_role(tier) if tier else None
     if role:
         presence.update(_roles.presence_fields(role))
         if _roles.deprecation_note(tier):
             print(_roles.deprecation_note(tier), file=sys.stderr)
-    elif tier:
-        print(f"Warning: invalid role '{tier}', must be one of {_roles.ROLES}. Defaulting to '{_roles.DEFAULT_ROLE}'.")
-        if "tier" not in presence and "role" not in presence:
-            presence.update(_roles.presence_fields(_roles.DEFAULT_ROLE))
     elif "tier" not in presence and "role" not in presence:
         presence.update(_roles.presence_fields(_roles.DEFAULT_ROLE))
 
