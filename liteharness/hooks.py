@@ -1308,7 +1308,8 @@ def _obs_identity(resolved: str, adopted_from: str | None, session_pid: int | No
         pass
 
 
-def _record_belongs_to_process(agent_id: str, session_pid: int | None) -> bool:
+def _record_belongs_to_process(agent_id: str, session_pid: int | None, *,
+                               root: Path | None = None) -> bool:
     """True when `agent_id`'s record was written while `session_pid` was running.
 
     Guards adoption against pid reuse across a reboot. Returns True when it
@@ -1318,7 +1319,7 @@ def _record_belongs_to_process(agent_id: str, session_pid: int | None) -> bool:
     """
     if not session_pid:
         return False
-    path = config.get_root() / "agents" / f"{agent_id}.json"
+    path = (config.get_root() if root is None else root) / "agents" / f"{agent_id}.json"
     try:
         stamp = str(json.loads(path.read_text(encoding="utf-8")).get("registered_at") or "")
         registered = datetime.fromisoformat(stamp)

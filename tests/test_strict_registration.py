@@ -16,7 +16,8 @@ def registry(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
     monkeypatch.setattr(strict_registration, 'pid_alive',
                         lambda pid: _known_pid(pid))
-    from liteharness import seat_lifecycle, announce
+    from liteharness import seat_lifecycle, announce, hooks
+    monkeypatch.setattr(hooks, '_pid_alive', _known_pid)
     monkeypatch.setattr(seat_lifecycle, 'log_path', lambda: tmp_path / 'lifecycle.jsonl')
     monkeypatch.setattr(announce, 'announce_registration', lambda *a, **k: [])
     return tmp_path
@@ -167,3 +168,52 @@ def test_unrelated_complete_legacy_identity_does_not_require_canonical_uuid(regi
     register()
     assert path.read_bytes() == before
     assert json.loads((registry / 'agents' / (AID + '.json')).read_text())['name'] == 'QuietHelm'
+
+
+@pytest.mark.parametrize('identity', [AID, BID])
+@pytest.mark.parametrize('status', ['active', 'offline'])
+def test_live_pid_claim_requires_its_current_process_to_have_written_the_row(
+    registry, monkeypatch, identity, status
+):
+    """One decision table: real/unknown owners block; a proven reused PID does not."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    import psutil
+
+    prior_pid = 4321
+    registered = datetime(2025, 1, 2, tzinfo=timezone.utc).timestamp()
+    path = row(registry, identity, session_pid=prior_pid, status=status,
+               registered_at='2025-01-02T00:00:00+00:00')
+    original = snapshot(registry)
+
+    def validate():
+        strict_registration.validate(
+            registry, agent_id=AID, name='QuietHelm', session_pid=1234,
+            backend='codex', model='fixture', thinking_level='high', takeover=False)
+
+    # A record written during this process's life remains occupied, even offline.
+    monkeypatch.setattr(psutil, 'Process', lambda pid: SimpleNamespace(
+        create_time=lambda: registered - 1))
+    with pytest.raises(StoreError, match='held by another live owner'):
+        validate()
+    assert snapshot(registry) == original
+
+    # An uninspectable process start time is ignorance, not permission.
+    def denied(pid):
+        raise psutil.AccessDenied(pid)
+    monkeypatch.setattr(psutil, 'Process', denied)
+    with pytest.raises(StoreError, match='held by another live owner'):
+        validate()
+    assert snapshot(registry) == original
+
+    # The same number now describes a process born AFTER registration.
+    monkeypatch.setattr(psutil, 'Process', lambda pid: SimpleNamespace(
+        create_time=lambda: registered + 1))
+    validate()
+    assert snapshot(registry) == original  # validation never repairs/evicts/writes
+    register(session_pid=1234)
+    current = json.loads((registry / 'agents' / (AID + '.json')).read_text())
+    assert current['session_pid'] == 1234 and current['name'] == 'QuietHelm'
+    if identity != AID:
+        assert path.read_bytes() == original[str(path.relative_to(registry))]
+    assert not (registry / 'names').exists()

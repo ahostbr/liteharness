@@ -169,5 +169,8 @@ def _validate_registry_claim(root: Path, *, agent_id: str | None, name: str,
         if (same_id and type(prior_pid) is int and prior_pid > 0
                 and prior_pid == session_pid):
             continue  # held child lease, not registry fields, proves ownership
-        if pid_alive(row.get("session_pid")):
+        from .hooks import _record_belongs_to_process
+        # Only a proven dead/reused PID frees a claim; offline is advisory.
+        # The shared rule treats unknown registration/start times as occupied.
+        if pid_alive(prior_pid) and _record_belongs_to_process(row["agent_id"], prior_pid, root=root):
             raise StoreError("Strict agent identity/name is held by another live owner")
