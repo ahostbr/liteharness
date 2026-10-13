@@ -201,7 +201,14 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
     from . import agent_names, cli
     if kill_old and not agent_id:
         raise ValueError("--kill-old requires --resume <agent-id>")
-    agent_id, convo_id, entry = resolve_target(agent_id, convo_id)
+    try:
+        agent_id, convo_id, entry = resolve_target(agent_id, convo_id)
+    except ValueError as exc:
+        if root is None:
+            raise ValueError(
+                f"Owned-store data root unknown: set LITETUI_DATA_ROOT; name-index lookup: {exc}"
+            ) from exc
+        raise
     if entry is not None and kill_old:
         # Rule 25: a named seat is never closed to be resumed. Nothing below runs.
         raise ValueError(f"a named resume never closes a seat: message {entry['name']} by inbox, "

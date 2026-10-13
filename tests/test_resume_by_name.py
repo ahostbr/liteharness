@@ -476,6 +476,34 @@ def test_claude_named_resume_never_kills_old_seat(claude_world, capsys):
     assert "never closes a seat" in capsys.readouterr().out and launches == []
 
 
+def test_name_index_miss_reports_unknown_owned_root_without_changing_known_root(world, monkeypatch, capsys):
+    from liteharness import owned_launch
+
+    root, _ = world
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    monkeypatch.setattr(cli, '_bridge_request', lambda *a, **kw: pytest.fail('no launch on lookup refusal'))
+
+    # With the root known, keep the established name-index result exactly.
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_spawn(split_mode=True, resume_agent_id='Owned-Only')
+    assert exc.value.code == 2
+    known = capsys.readouterr().out
+    assert 'no agent named Owned-Only; liteharness names --list' in known
+    assert 'LITETUI_DATA_ROOT' not in known
+
+    def unknown():
+        raise owned_launch.RootUnknown('fixture: no canonical resolver')
+    monkeypatch.setattr(owned_launch, 'data_root', unknown)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_spawn(split_mode=True, resume_agent_id='Owned-Only')
+    assert exc.value.code == 2
+    unknown_message = capsys.readouterr().out
+    assert 'owned-store data root unknown' in unknown_message.lower()
+    assert 'LITETUI_DATA_ROOT' in unknown_message
+    assert 'no agent named Owned-Only; liteharness names --list' in unknown_message
+    assert {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()} == before
+
+
 def _index_diagnostic(project, **kw):
     resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {})
     cli._record_fresh_name(kw['name'], '33333333-3333-4333-8333-333333333333',
