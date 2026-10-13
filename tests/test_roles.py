@@ -81,7 +81,8 @@ def test_register_with_a_new_word_prints_no_deprecation(home, capsys):
     assert "deprecated" not in (captured.out + captured.err).lower()
 
 
-def test_register_unknown_role_is_refused_not_stored(home, capsys):
+def test_register_unknown_role_warns_and_stores_builder_not_unknown(home, capsys):
+    """An unknown register role emits a warning and stores builder, not the unknown word."""
     cli.cmd_register("seat-1", cli="claude-code", tier="janitor", name="Alpha")
     out = capsys.readouterr().out
     assert "janitor" in out and "orchestrator" in out and "builder" in out
@@ -147,8 +148,11 @@ def test_builder_and_owner_need_a_cwd_old_words_too(role, bridge, capsys):
 
 @pytest.mark.parametrize("role", ["orchestrator", "scout", "critic", "thinker", "reviewer"])
 def test_other_roles_are_exempt_from_the_cwd_gate(role, bridge, capsys):
-    _spawn(tier=role)
+    assert _spawn(tier=role) == 2, "the resolver stub refuses only after the cwd gate"
     assert "--cwd" not in capsys.readouterr().out
+    (method, path, body), = bridge
+    assert (method, path) == ("POST", "/harness/spawn/resolve")
+    assert body["tier"] == roles.wire_tier(role)
 
 
 def test_spawn_with_an_unknown_role_is_refused(bridge, capsys):

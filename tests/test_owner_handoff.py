@@ -205,6 +205,7 @@ def test_a_valid_handoff_commits_only_now_and_domain_with_the_owner_trailer(repo
     assert "Agent-Role: owner" in body
     assert f"Agent-ID: {AGENT_ID}" in body and "Agent-Name: " in body
     assert "other.txt" in _git(root, "status", "--porcelain"), "unrelated edits stay uncommitted"
+    assert list((root / ".git").glob("handoff-index-*.recovery")) == []
 
 
 def test_it_prints_compact_then_the_reload_pointer(repo, capsys):
@@ -298,6 +299,199 @@ def test_a_rejecting_hook_restores_the_index_for_the_two_files_only(repo, capsys
     assert _git(root, "rev-parse", "HEAD") == before
     assert _staged(root) == ["other.txt"], "NOW.md and DOMAIN.md must be unstaged again, other.txt untouched"
     assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW, "the owner's edit survives"
+
+
+@pytest.mark.parametrize("failure", ["hook", "timeout", "partial-add"])
+@pytest.mark.parametrize("staged", ["earlier", "unchanged", "absent"])
+def test_failed_handoff_preserves_prior_index_and_newer_edits(repo, monkeypatch, failure, staged):
+    root, memory = repo
+    if staged == "absent":
+        _git(memory, "rm", "--cached", "--", "NOW.md", "DOMAIN.md")
+    if staged == "earlier":
+        (memory / "NOW.md").write_text("earlier staged note\n", encoding="utf-8")
+        (memory / "DOMAIN.md").write_text("earlier staged domain\n", encoding="utf-8")
+        _git(memory, "add", "NOW.md", "DOMAIN.md")
+    (root / "other.txt").write_text("unrelated staged edit\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    before = _git(root, "ls-files", "--stage", "-z")
+    head = _git(root, "rev-parse", "HEAD")
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
+    if failure == "hook":
+        (root / ".git" / "hooks" / "pre-commit").write_text(
+            "#!/bin/sh\necho rejected-by-test >&2\nexit 1\n", encoding="utf-8")
+    else:
+        run = owner.subprocess.run
+
+        def fail_git(args, **kwargs):
+            if args[:2] == ["git", "add"]:
+                assert len(list((root / ".git").glob("handoff-index-*.recovery"))) == 1
+            if failure == "timeout" and args[:2] == ["git", "commit"]:
+                raise subprocess.TimeoutExpired(args, 120)
+            if failure == "partial-add" and args[:2] == ["git", "add"]:
+                run(["git", "add", "--", "NOW.md"], **kwargs)
+                return subprocess.CompletedProcess(args, 1, "", "partial add rejected")
+            return run(args, **kwargs)
+
+        monkeypatch.setattr(owner.subprocess, "run", fail_git)
+    try:
+        with pytest.raises(owner.OwnerError, match="was restored"):
+            owner.handoff(memory, agent_id=AGENT_ID, agent_name="Alpha")
+    finally:
+        assert _git(root, "ls-files", "--stage", "-z") == before
+        assert _git(root, "rev-parse", "HEAD") == head
+        assert list((root / ".git").glob("handoff-index-*.recovery")) == []
+        assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+        assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
+
+
+def test_failed_index_restoration_is_reported_without_claiming_success(repo, monkeypatch):
+    root, memory = repo
+    (memory / "NOW.md").write_text("earlier staged note\n", encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("earlier staged domain\n", encoding="utf-8")
+    _git(memory, "add", "NOW.md", "DOMAIN.md")
+    before = _git(memory, "ls-files", "--stage", "-z", "--", "NOW.md", "DOMAIN.md")
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
+    run = owner.subprocess.run
+
+    def fail_git(args, **kwargs):
+        if args[:2] == ["git", "commit"]:
+            return subprocess.CompletedProcess(args, 1, "", "blocked commit")
+        if args[:2] == ["git", "update-index"]:
+            return subprocess.CompletedProcess(args, 1, b"", b"blocked update-index")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(owner.subprocess, "run", fail_git)
+    with pytest.raises(owner.OwnerError, match="index restoration failed") as error:
+        owner.handoff(memory, agent_id=AGENT_ID, agent_name="Alpha")
+    assert "blocked commit" in str(error.value) and "blocked update-index" in str(error.value)
+    assert "was restored" not in str(error.value)
+    recovery = getattr(error.value, "recovery_path", None)
+    assert recovery is not None, "prior staged entries must remain recoverable after rollback fails"
+    assert recovery.is_file() and str(recovery) in str(error.value)
+    monkeypatch.setattr(owner.subprocess, "run", run)
+    (root / "other.txt").write_text("new unrelated staging\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    run(["git", "update-index", "-z", "--index-info"], cwd=root,
+        input=recovery.read_bytes(), capture_output=True, check=True)
+    assert _git(memory, "ls-files", "--stage", "-z", "--", "NOW.md", "DOMAIN.md") == before
+    assert _git(root, "show", ":other.txt") == "new unrelated staging\n"
+    assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+    assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
+
+
+@pytest.mark.parametrize("restore_fails", [False, True], ids=["rollback", "retained-recovery"])
+def test_index_recovery_preserves_non_ascii_paths_under_legacy_locale(repo, monkeypatch, restore_fails):
+    root, memory = repo
+    renamed = memory.with_name("caf\u00e9")
+    memory.rename(renamed)
+    memory = renamed
+    _git(root, "add", "--", "owners")
+    _git(root, "commit", "-q", "-m", "move memory")
+    for name in ("NOW.md", "DOMAIN.md"):
+        (memory / name).write_text("earlier staged version\n", encoding="utf-8")
+    _git(memory, "add", "NOW.md", "DOMAIN.md")
+    (root / "other.txt").write_text("unrelated staged version\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    run = owner.subprocess.run
+    before = run(["git", "ls-files", "--stage", "-z"], cwd=root,
+                 capture_output=True, check=True).stdout
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
+    (root / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+
+    def legacy_locale(args, **kwargs):
+        # Exercise the actual cp1252 codec independently of this host's UTF-8 mode.
+        if kwargs.get("text") and not kwargs.get("encoding"):
+            kwargs["encoding"] = "cp1252"
+        if restore_fails and args[:2] == ["git", "update-index"]:
+            text = kwargs.get("text") or kwargs.get("encoding")
+            return subprocess.CompletedProcess(args, 1, "" if text else b"",
+                                               "blocked" if text else b"blocked")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(owner.subprocess, "run", legacy_locale)
+    with pytest.raises(owner.OwnerError) as error:
+        owner.handoff(memory, agent_id=AGENT_ID, agent_name="Alpha")
+    if restore_fails:
+        run(["git", "update-index", "-z", "--index-info"], cwd=root,
+            input=error.value.recovery_path.read_bytes(), capture_output=True, check=True)
+    after = run(["git", "ls-files", "--stage", "-z"], cwd=root,
+                capture_output=True, check=True).stdout
+    assert after == before, "recovery must preserve exact path bytes, without extra mojibake entries"
+    assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+    assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
+
+
+@pytest.mark.parametrize("directory", [b"tab\tfolder", b"line\nfolder"])
+def test_recovery_keeps_index_path_delimiters_verbatim(repo, directory):
+    root, memory = repo
+    # The index format permits these names; Windows working files do not.
+    # Relax only this temporary repository's index pathname guard, never create files.
+    _git(root, "config", "core.protectNTFS", "false")
+
+    def raw(*args, data=None):
+        return subprocess.run(["git", *args], cwd=root, input=data,
+                              capture_output=True, check=True).stdout
+
+    names = [b"odd/" + directory + b"/" + name for name in (b"NOW.md", b"DOMAIN.md")]
+    old_blob = raw("rev-parse", "HEAD:owners/alpha/NOW.md").strip()
+    new_blob = raw("rev-parse", "HEAD:owners/alpha/DOMAIN.md").strip()
+
+    def records(blob):
+        return b"".join(b"100644 " + blob + b" 0\t" + name + b"\0" for name in names)
+
+    raw("update-index", "-z", "--index-info", data=records(old_blob))
+    before = raw("ls-files", "--stage", "-z")
+    entries = raw("ls-files", "--full-name", "--stage", "-z", "--", "odd/")
+    paths = raw("ls-files", "--full-name", "--cached", "--others", "-z", "--", "odd/")
+    recovery = owner._save_index_recovery(root, entries, paths)
+    removals = b"".join(b"0 " + b"0" * 40 + b"\t" + name + b"\0" for name in paths.split(b"\0") if name)
+    assert recovery.read_bytes() == removals + entries
+    raw("update-index", "-z", "--index-info", data=records(new_blob))
+    owner._restore_index(root, recovery)
+    assert raw("ls-files", "--stage", "-z") == before
+
+
+@pytest.mark.parametrize("head_readable", [True, False], ids=["head-changed", "head-unknown"])
+def test_timeout_after_commit_reports_outcome_without_rewinding_staging(repo, monkeypatch, capsys, head_readable):
+    root, memory = repo
+    for name in ("NOW.md", "DOMAIN.md"):
+        (memory / name).write_text("earlier staged version\n", encoding="utf-8")
+    _git(memory, "add", "NOW.md", "DOMAIN.md")
+    (root / "other.txt").write_text("unrelated staged version\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
+    before = _git(root, "rev-parse", "HEAD")
+    run = owner.subprocess.run
+    committed_index = []
+
+    def commit_then_timeout(args, **kwargs):
+        if args[:2] == ["git", "commit"]:
+            result = run(args, **kwargs)
+            assert result.returncode == 0, result.stderr
+            committed_index.append(_git(root, "ls-files", "--stage", "-z"))
+            raise subprocess.TimeoutExpired(args, 120)
+        if committed_index and not head_readable and args[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(args, 128, "", "HEAD unavailable")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(owner.subprocess, "run", commit_then_timeout)
+    assert _handoff(memory) == 2
+    out = capsys.readouterr().out
+    assert "Nothing was committed" not in out
+    assert ("HEAD changed" if head_readable else "could not determine HEAD") in out
+    assert "index was left as Git left it" in out
+    assert "/compact" not in out
+    monkeypatch.setattr(owner.subprocess, "run", run)
+    assert _git(root, "rev-parse", "HEAD") != before
+    assert _git(root, "ls-files", "--stage", "-z") == committed_index[0]
+    assert _staged(root) == ["other.txt"]
+    (recovery,) = (root / ".git").glob("handoff-index-*.recovery")
+    assert str(recovery) in out
+    assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
 
 
 # ── T0482: a UTF-8 BOM (PowerShell 5, Notepad) is not part of the first heading ──────────────

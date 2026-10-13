@@ -23,7 +23,19 @@ MAX_TITLE = 64
 
 
 class OwnerError(ValueError):
-    """The owner identity cannot be built; the message says why and what to fix."""
+    """An owner operation failed; optional index records make recovery explicit."""
+
+    def __init__(self, message: str, *, recovery_path: Path | None = None):
+        self.recovery_path = recovery_path
+        if recovery_path is not None:
+            message += (f". Prior index records retained at {recovery_path}; NUL-delimited index-info "
+                        "holds blob IDs, not contents: inspect HEAD/staging and recover promptly before "
+                        "Git prunes unreferenced blobs. Recovery is not locking or transactional isolation")
+        super().__init__(message)
+
+
+class OwnerCommitOutcomeError(OwnerError):
+    """A commit may have landed; do not report a no-commit refusal or rewind staging."""
 
 
 def check_title(title) -> str:
@@ -151,17 +163,38 @@ def validate_now(text: str) -> list[str]:
     return problems
 
 
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
+def _git(cwd: Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=text, timeout=120)
 
 
-def _unstage(base: Path) -> None:
-    """Undo only what this command staged: the two files, never anything else in the index."""
-    _git(base, "reset", "-q", "--", "NOW.md", "DOMAIN.md")
+def _save_index_recovery(base: Path, entries: bytes, paths: bytes) -> Path:
+    """Save raw NUL-delimited index-info; blob IDs, not contents, need prompt recovery."""
+    git_dir = _git(base, "rev-parse", "--absolute-git-dir", text=False)
+    if git_dir.returncode != 0:
+        raise OwnerError("could not locate index recovery storage: " +
+                         git_dir.stderr.decode("utf-8", errors="replace").strip())
+    removals = b"".join(b"0 " + b"0" * 40 + b"\t" + name + b"\0"
+                        for name in dict.fromkeys(paths.split(b"\0")) if name)
+    with tempfile.NamedTemporaryFile("wb", prefix="handoff-index-", suffix=".recovery",
+                                     dir=os.fsdecode(git_dir.stdout.removesuffix(b"\n")),
+                                     delete=False) as handle:
+        handle.write(removals + entries)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return Path(handle.name)
+
+
+def _restore_index(base: Path, recovery_path: Path) -> None:
+    """Apply only the saved paths; never replace the entire index."""
+    result = subprocess.run(["git", "update-index", "-z", "--index-info"], cwd=base,
+                            input=recovery_path.read_bytes(), capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise OwnerError("could not restore the handoff index: " +
+                         (result.stderr or result.stdout).decode("utf-8", errors="replace").strip())
 
 
 def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
-    """Validate NOW.md, commit NOW.md and DOMAIN.md, return the pointer lines to print."""
+    """Commit the handoff with compensating recovery, not locking or transactional isolation."""
     files = memory_files(memory_dir)
     base = files["NOW.md"].parent
     # utf-8-sig: PowerShell 5 and Notepad save a BOM, which would sit in front of the first heading.
@@ -175,10 +208,18 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
     if tracked and not changed:
         raise OwnerError("NOW.md has not changed since the last commit; rewrite it for this "
                          "handoff first, a stale NOW.md would reload the wrong state")
-    added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
-    if added.returncode != 0:
-        _unstage(base)
-        raise OwnerError("git add failed: " + (added.stderr.strip() or added.stdout.strip()))
+    paths = _git(base, "ls-files", "--full-name", "--cached", "--others", "-z", "--",
+                 "NOW.md", "DOMAIN.md", text=False)
+    if paths.returncode != 0:
+        raise OwnerError("could not resolve the handoff index paths: " +
+                         paths.stderr.decode("utf-8", errors="replace").strip())
+    snapshot = _git(base, "ls-files", "--full-name", "--stage", "-z", "--",
+                    "NOW.md", "DOMAIN.md", text=False)
+    if snapshot.returncode != 0:
+        raise OwnerError("could not snapshot the handoff index: " +
+                         snapshot.stderr.decode("utf-8", errors="replace").strip())
+    head_before = _git(base, "rev-parse", "--verify", "HEAD")
+    commit_started = False
     message = (
         "chore(handoff): rolling handoff of NOW.md and DOMAIN.md\n\n"
         f"Agent-Role: owner\nAgent-Name: {agent_name}\nAgent-ID: {agent_id}\n"
@@ -187,12 +228,48 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
         handle.write(message)
         message_file = handle.name
     try:
-        committed = _git(base, "commit", "-q", "-F", message_file, "--", "NOW.md", "DOMAIN.md")
+        recovery_path = _save_index_recovery(base, snapshot.stdout, paths.stdout)
+        try:
+            added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
+            if added.returncode != 0:
+                raise OwnerError("git add failed: " + (added.stderr.strip() or added.stdout.strip()))
+            commit_started = True
+            committed = _git(base, "commit", "-q", "-F", message_file, "--", "NOW.md", "DOMAIN.md")
+            if committed.returncode != 0:
+                raise OwnerError("git commit failed: " +
+                                 (committed.stderr.strip() or committed.stdout.strip()))
+        except (OwnerError, OSError, subprocess.SubprocessError) as exc:
+            if commit_started:
+                # A post-commit hook can outlive the subprocess timeout. Do not put
+                # old staging back on top of a new (or unreadable) HEAD.
+                outcome = "could not determine HEAD; commit outcome is uncertain"
+                try:
+                    head_after = _git(base, "rev-parse", "--verify", "HEAD")
+                    if head_before.returncode == 0 and head_after.returncode == 0:
+                        if head_before.stdout == head_after.stdout:
+                            outcome = ""
+                        else:
+                            outcome = (f"HEAD changed from {head_before.stdout.strip()} to "
+                                       f"{head_after.stdout.strip()}; a commit may have landed")
+                except (OSError, subprocess.SubprocessError):
+                    pass  # Keep the explicit uncertain-outcome diagnostic and recovery records.
+                if outcome:
+                    raise OwnerCommitOutcomeError(
+                        f"{exc}; {outcome}. The index was left as Git left it: NOW.md and "
+                        "DOMAIN.md may be committed or staged; unrelated staging was not reset. "
+                        "Inspect HEAD and the index before retrying; no automatic retry was made",
+                        recovery_path=recovery_path) from exc
+            try:
+                _restore_index(base, recovery_path)
+            except (OwnerError, OSError, subprocess.SubprocessError) as restore_error:
+                raise OwnerError(f"{exc}; index restoration failed: {restore_error}; "
+                                 "inspect the index before retrying",
+                                 recovery_path=recovery_path) from exc
+            recovery_path.unlink()
+            raise OwnerError(f"{exc} (the index for NOW.md and DOMAIN.md was restored; "
+                             "your edits are untouched)") from exc
+        recovery_path.unlink()
     finally:
         os.unlink(message_file)
-    if committed.returncode != 0:
-        _unstage(base)
-        raise OwnerError("git commit failed: " + (committed.stderr.strip() or committed.stdout.strip())
-                         + " (the index for NOW.md and DOMAIN.md was restored; your edits are untouched)")
     here = base.as_posix()
     return ["/compact", f"Reload: read {here}/NOW.md then {here}/DOMAIN.md"]

@@ -44,6 +44,31 @@ def test_both_trailers_are_parsed(repo):
     assert "Role: builder" in old, "an old Agent-Tier word is shown as its role"
 
 
+@pytest.mark.parametrize("trailer, expected", [
+    ("Agent-Role: owner", "owner"), ("Agent-Tier: worker", "builder"),
+])
+def test_sole_selected_trailer_is_parsed(tmp_path, trailer, expected):
+    _git(tmp_path, "init", "-q")
+    _commit(tmp_path, "single trailer", [trailer])
+    (content,) = [c["content"] for c in GitScanner(str(tmp_path)).parse_file("__git_log__")]
+    assert f"Role: {expected}" in content.splitlines()
+
+
+def test_folded_name_cannot_overwrite_the_role(tmp_path):
+    _git(tmp_path, "init", "-q")
+    _commit(tmp_path, "folded name", ["Agent-Role: owner", "Agent-Name: Alpha", " Agent-Role: critic"])
+    (content,) = [c["content"] for c in GitScanner(str(tmp_path)).parse_file("__git_log__")]
+    assert content.splitlines()[-1] == "Agent: Alpha Agent-Role: critic | Role: owner"
+
+
+def test_only_the_final_trailer_block_supplies_metadata(tmp_path):
+    _git(tmp_path, "init", "-q")
+    _commit(tmp_path, "separate blocks", ["Agent-Role: critic", "", "Agent-Role: owner"])
+    (content,) = [c["content"] for c in GitScanner(str(tmp_path)).parse_file("__git_log__")]
+    assert content.splitlines()[-1] == "Role: owner"
+    assert "critic" not in content
+
+
 def test_role_wins_when_a_commit_carries_both(tmp_path):
     _git(tmp_path, "init", "-q")
     _commit(tmp_path, "both", ["Agent-Name: Alpha", "Agent-Tier: worker", "Agent-Role: critic"])

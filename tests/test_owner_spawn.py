@@ -141,16 +141,16 @@ def test_a_missing_file_refuses_before_anything_launches(seen, tmp_path, capsys)
     {"resume_agent_id": "Alpha"},
     {"resume_convo_id": MINTED},
     {"spawn_cli": "codex"},
-    {"spawn_cli": "litetui"},
     {"cognitive": "feynman"},
 ])
 def test_owner_flags_refuse_what_would_override_the_charter(seen, tmp_path, capsys, extra):
     memory = _folder(tmp_path)
     assert _spawn(owner_title="Alpha", memory_dir=str(memory), cwd=str(tmp_path), split_mode=True, **extra) == 2
-    assert "SPAWN REFUSED" in capsys.readouterr().out
-    assert seen["launched"] == []
+    assert "SPAWN REFUSED: --owner takes its prompt from SOUL.md and its name from the title" in capsys.readouterr().out
+    assert seen["launched"] == [] and "brief" not in seen
 
 
+# The supported LiteTUI route is covered by test_owner_litetui_spawn.py.
 def test_an_owner_spawn_still_needs_an_explicit_cwd(seen, tmp_path, capsys):
     memory = _folder(tmp_path)
     assert _spawn(owner_title="Alpha", memory_dir=str(memory), split_mode=True) == 2
