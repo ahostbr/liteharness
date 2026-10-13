@@ -24,7 +24,7 @@ export function fleetSnapshot(text) {
 }
 
 // The host's Agent tool offers only short names (sonnet|opus|haiku|fable) and rejects a full id itself,
-// so a list of full ids alone refuses every subagent. Ryan 2026-10-12: allow the short names.
+// so a list of full ids alone refuses every subagent; allow the short names too.
 export const SPAWN_MODELS = new Set(['claude-opus-5-5[1m]', 'claude-opus-5[1m]', 'claude-opus-4-8[1m]', 'claude-opus-4-6[1m]',
   'claude-sonnet-5-5[1m]', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'sonnet', 'haiku', 'opus'])
 
