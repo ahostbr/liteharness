@@ -333,6 +333,11 @@ def main() -> None:
         print("")
         return
     try:
+        from .owner_context import record
+        record(data)
+    except Exception:
+        pass  # Advisory state must never take down the display.
+    try:
         print(build_line(data if isinstance(data, dict) else {}))
     except Exception:
         # Belt and braces. Whatever went wrong, the user gets a blank line, not a stack.
