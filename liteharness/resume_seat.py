@@ -177,7 +177,8 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
                  direction: str | None, cwd: str | None, name: str | None,
                  tier: str | None, model: str | None, backend: str | None,
                  thinking_level: str | None, spawned_by: str | None,
-                 kill_old: bool, prompt: str | None, cognitive: str | None = None) -> None:
+                 kill_old: bool, prompt: str | None, cognitive: str | None = None,
+                 owner_title: str | None = None, memory_dir: str | None = None) -> None:
     from . import owned_launch, owned_resume
     from .agent_store import AgentStore, StoreError
     try:
@@ -195,7 +196,7 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
                                direction=direction, cwd=cwd, name=name, tier=tier,
                                model=model, backend=backend, thinking_level=thinking_level,
                                spawned_by=spawned_by, kill_old=kill_old, prompt=prompt,
-                               cognitive=cognitive)
+                               cognitive=cognitive, owner_title=owner_title, memory_dir=memory_dir)
             return
     from . import agent_names, cli
     if kill_old and not agent_id:
@@ -217,4 +218,4 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
                        direction=direction, cwd=cwd, name=name, tier=tier,
                        model=model, backend=backend, thinking_level=thinking_level,
                        spawned_by=spawned_by, kill_old=kill_old, prompt=prompt,
-                       cognitive=cognitive)
+                       cognitive=cognitive, owner_title=owner_title, memory_dir=memory_dir)

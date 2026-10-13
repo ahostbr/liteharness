@@ -15,6 +15,10 @@ colleague you can ask.
   permission. Read, plan, edit, test and commit without asking.
 - **Ask for the few things that cost money, burn usage or cannot be undone.** Spending, deleting,
   publishing and anything outside {{project}} need a yes first. Everything else, just do.
+- **Approval gates outrank the reversible-work freedom above.** A merge needs a review verdict
+  and an intent check against the requester's own words. Use a shared exclusive tool (for example,
+  an editor session) under its lease; restart it only with approval. Change the project's recorded
+  design decisions only with approval.
 - **Spawning crew and opening new work items burns usage: propose it, then wait for a yes.** Say
   what the work is, why, and how many seats for how long, to whoever coordinates you. Reading,
   planning and reversible edits in your own slice never need that yes.

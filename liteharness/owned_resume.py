@@ -10,7 +10,8 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
           direction: str | None, cwd: str | None, name: str | None, tier: str | None,
           model: str | None, backend: str | None, thinking_level: str | None,
           spawned_by: str | None, kill_old: bool, prompt: str | None,
-          cognitive: str | None = None) -> None:
+          cognitive: str | None = None, owner_title: str | None = None,
+          memory_dir: str | None = None) -> None:
     from . import cli, fleet_policy
     if kill_old:
         raise StoreError('Owned named resume never closes a seat; wait until offline')
@@ -27,6 +28,15 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
         agent = store.find_agent(name=store.locate_conversation(conversation_id).parent.parent.name)
     else:
         raise StoreError('Select an owned agent first')
+    from .resume_seat import _registry
+    # Presence supplies only a downgrade guard, never folder/execution authority.
+    if (roles.row_role(_registry(agent.agent_id)) == 'owner' or roles.normalize_role(tier) == 'owner'
+            or owner_title or memory_dir):
+        if not (owner_title and memory_dir):
+            raise StoreError('Owner resume requires --owner <Title> --memory <dir>')
+        if owner_title != agent.name:
+            raise StoreError('--owner must match the resumed agent name')
+        tier = 'owner'
     saved = agent.settings['execution']
     if saved['model'] is None:
         raise StoreError('Agent model is unchosen; choose a model in its owned standalone seat before executable resume')
@@ -77,7 +87,8 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
         raise StoreError('Owned spawn resolution refused')
     launch = owned_launch.request(resolution, root=root, name=agent.name, agent_id=agent.agent_id,
                                   backend=saved['backend'], model=saved['model'],
-                                  thinking_level=saved['thinking_level'], conversation_id=conversation_id)
+                                  thinking_level=saved['thinking_level'], conversation_id=conversation_id,
+                                  owner_title=owner_title, memory_dir=memory_dir)
     # Revalidate folder after the external boundary; child repeats ownership check.
     current = store.find_agent(agent_id=agent.agent_id)
     if current != agent:

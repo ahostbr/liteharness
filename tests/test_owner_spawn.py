@@ -138,8 +138,6 @@ def test_a_missing_file_refuses_before_anything_launches(seen, tmp_path, capsys)
 @pytest.mark.parametrize("extra", [
     {"prompt": "something else"},
     {"tier": "builder"},
-    {"resume_agent_id": "Alpha"},
-    {"resume_convo_id": MINTED},
     {"spawn_cli": "codex"},
     {"cognitive": "feynman"},
 ])
