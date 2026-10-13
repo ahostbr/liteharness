@@ -81,7 +81,8 @@ def test_register_with_a_new_word_prints_no_deprecation(home, capsys):
     assert "deprecated" not in (captured.out + captured.err).lower()
 
 
-def test_register_unknown_role_is_refused_not_stored(home, capsys):
+def test_register_unknown_role_warns_and_stores_builder_not_unknown(home, capsys):
+    """An unknown register role emits a warning and stores builder, not the unknown word."""
     cli.cmd_register("seat-1", cli="claude-code", tier="janitor", name="Alpha")
     out = capsys.readouterr().out
     assert "janitor" in out and "orchestrator" in out and "builder" in out
