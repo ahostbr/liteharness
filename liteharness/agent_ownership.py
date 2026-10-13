@@ -27,7 +27,7 @@ from uuid import uuid4
 from .agent_store import (
     AGENT_SEED_FILES, CONVERSATIONS_DIR, MEMORIES_DIR,
     Agent, AgentStore, INITIALIZING_NAME, SCHEMA_VERSION, SETTINGS_NAME, StoreError, _unlinked,
-    name_key, valid_id, valid_name,
+    name_key, read_agent, valid_id, valid_name,
 )
 
 AGENT_LEASE_NAME = ".agent.lease"
@@ -231,9 +231,13 @@ class AgentSession:
                 raise
 
     def _require_owned(self) -> None:
+        # Discovery/acquisition validates the whole catalog. Under the lease,
+        # re-read this home's paths and authority, not every unrelated sibling.
+        # Sibling corruption introduced later is caught on the next catalog
+        # discovery/acquisition; no metadata or path validation is cached here.
         if self._lease.handle is None or self._lease.pid != os.getpid():
             raise OwnershipError("Agent session is not owned by this process")
-        current = self.store.find_agent(agent_id=self._authority.agent_id)
+        current = read_agent(self.store.agent_directory(self._authority.name))
         if (current.directory != self._agent.directory
                 or AgentAuthority.from_agent(current) != self._authority):
             raise StoreError("Owned agent authority changed; reopen explicitly")
@@ -250,7 +254,7 @@ class AgentSession:
 
     def conversation_directory(self, conversation_id: str) -> Path:
         self._require_owned()
-        return self.store.conversation_directory(self._agent, conversation_id)
+        return _unlinked(self._agent.conversations_root / valid_id(conversation_id))
 
     def update_execution(self, *, backend: str, model: str, thinking_level: str) -> AgentAuthority:
         """Publish execution under this process lease; retain failed temp evidence.
@@ -264,7 +268,7 @@ class AgentSession:
         execution = {'backend': backend, 'model': model, 'thinking_level': thinking_level}
         if any(not isinstance(v, str) or not v.strip() for v in execution.values()):
             raise StoreError('Agent execution authority is incomplete')
-        before = self.store.find_agent(agent_id=self._authority.agent_id)
+        before = read_agent(self.store.agent_directory(self._authority.name))
         settings = deepcopy(before.settings)
         settings['execution'].update(execution)
         settings['execution']['model_selection'] = 'chosen'
@@ -276,10 +280,10 @@ class AgentSession:
             handle.flush()
             os.fsync(handle.fileno())
         self._require_owned()
-        if self.store.find_agent(agent_id=self._authority.agent_id).settings != before.settings:
+        if read_agent(self.store.agent_directory(self._authority.name)).settings != before.settings:
             raise StoreError('Agent settings changed before execution publication')
         os.replace(temporary, target)
-        current = self.store.find_agent(agent_id=self._authority.agent_id)
+        current = read_agent(self.store.agent_directory(self._authority.name))
         if current.settings != settings or current.directory != self._agent.directory:
             raise StoreError('Agent execution publication changed; reopen explicitly')
         self._agent = current
