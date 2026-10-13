@@ -28,7 +28,9 @@ class OwnerError(ValueError):
     def __init__(self, message: str, *, recovery_path: Path | None = None):
         self.recovery_path = recovery_path
         if recovery_path is not None:
-            message += f". Prior index records retained at {recovery_path}"
+            message += (f". Prior index records retained at {recovery_path}; NUL-delimited index-info "
+                        "holds blob IDs, not contents: inspect HEAD/staging and recover promptly before "
+                        "Git prunes unreferenced blobs. Recovery is not locking or transactional isolation")
         super().__init__(message)
 
 
@@ -161,19 +163,21 @@ def validate_now(text: str) -> list[str]:
     return problems
 
 
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
+def _git(cwd: Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=text, timeout=120)
 
 
-def _save_index_recovery(base: Path, entries: str, prefix: str) -> Path:
-    """Save root-relative index-info input before mutation, including absent paths."""
-    git_dir = _git(base, "rev-parse", "--absolute-git-dir")
+def _save_index_recovery(base: Path, entries: bytes, paths: bytes) -> Path:
+    """Save raw NUL-delimited index-info; blob IDs, not contents, need prompt recovery."""
+    git_dir = _git(base, "rev-parse", "--absolute-git-dir", text=False)
     if git_dir.returncode != 0:
-        raise OwnerError("could not locate index recovery storage: " + git_dir.stderr.strip())
-    removals = "".join(f"0 {'0' * 40}\t{prefix}{name}\0" for name in ("NOW.md", "DOMAIN.md"))
-    with tempfile.NamedTemporaryFile("w", prefix="handoff-index-", suffix=".recovery",
-                                     dir=git_dir.stdout.rstrip("\r\n"), delete=False,
-                                     encoding="utf-8", newline="") as handle:
+        raise OwnerError("could not locate index recovery storage: " +
+                         git_dir.stderr.decode("utf-8", errors="replace").strip())
+    removals = b"".join(b"0 " + b"0" * 40 + b"\t" + name + b"\0"
+                        for name in dict.fromkeys(paths.split(b"\0")) if name)
+    with tempfile.NamedTemporaryFile("wb", prefix="handoff-index-", suffix=".recovery",
+                                     dir=os.fsdecode(git_dir.stdout.removesuffix(b"\n")),
+                                     delete=False) as handle:
         handle.write(removals + entries)
         handle.flush()
         os.fsync(handle.fileno())
@@ -183,15 +187,14 @@ def _save_index_recovery(base: Path, entries: str, prefix: str) -> Path:
 def _restore_index(base: Path, recovery_path: Path) -> None:
     """Apply only the saved paths; never replace the entire index."""
     result = subprocess.run(["git", "update-index", "-z", "--index-info"], cwd=base,
-                            input=recovery_path.read_text(encoding="utf-8"), encoding="utf-8",
-                            capture_output=True, timeout=120)
+                            input=recovery_path.read_bytes(), capture_output=True, timeout=120)
     if result.returncode != 0:
         raise OwnerError("could not restore the handoff index: " +
-                         (result.stderr.strip() or result.stdout.strip()))
+                         (result.stderr or result.stdout).decode("utf-8", errors="replace").strip())
 
 
 def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
-    """Validate NOW.md, commit NOW.md and DOMAIN.md, return the pointer lines to print."""
+    """Commit the handoff with compensating recovery, not locking or transactional isolation."""
     files = memory_files(memory_dir)
     base = files["NOW.md"].parent
     # utf-8-sig: PowerShell 5 and Notepad save a BOM, which would sit in front of the first heading.
@@ -205,12 +208,16 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
     if tracked and not changed:
         raise OwnerError("NOW.md has not changed since the last commit; rewrite it for this "
                          "handoff first, a stale NOW.md would reload the wrong state")
-    prefix = _git(base, "rev-parse", "--show-prefix")
-    if prefix.returncode != 0:
-        raise OwnerError("could not resolve the handoff index paths: " + prefix.stderr.strip())
-    snapshot = _git(base, "ls-files", "--full-name", "--stage", "-z", "--", "NOW.md", "DOMAIN.md")
+    paths = _git(base, "ls-files", "--full-name", "--cached", "--others", "-z", "--",
+                 "NOW.md", "DOMAIN.md", text=False)
+    if paths.returncode != 0:
+        raise OwnerError("could not resolve the handoff index paths: " +
+                         paths.stderr.decode("utf-8", errors="replace").strip())
+    snapshot = _git(base, "ls-files", "--full-name", "--stage", "-z", "--",
+                    "NOW.md", "DOMAIN.md", text=False)
     if snapshot.returncode != 0:
-        raise OwnerError("could not snapshot the handoff index: " + snapshot.stderr.strip())
+        raise OwnerError("could not snapshot the handoff index: " +
+                         snapshot.stderr.decode("utf-8", errors="replace").strip())
     head_before = _git(base, "rev-parse", "--verify", "HEAD")
     commit_started = False
     message = (
@@ -221,7 +228,7 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
         handle.write(message)
         message_file = handle.name
     try:
-        recovery_path = _save_index_recovery(base, snapshot.stdout, prefix.stdout.rstrip("\r\n"))
+        recovery_path = _save_index_recovery(base, snapshot.stdout, paths.stdout)
         try:
             added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
             if added.returncode != 0:

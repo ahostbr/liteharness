@@ -356,8 +356,10 @@ def test_failed_index_restoration_is_reported_without_claiming_success(repo, mon
     run = owner.subprocess.run
 
     def fail_git(args, **kwargs):
-        if args[:2] in (["git", "commit"], ["git", "update-index"]):
-            return subprocess.CompletedProcess(args, 1, "", "blocked " + args[1])
+        if args[:2] == ["git", "commit"]:
+            return subprocess.CompletedProcess(args, 1, "", "blocked commit")
+        if args[:2] == ["git", "update-index"]:
+            return subprocess.CompletedProcess(args, 1, b"", b"blocked update-index")
         return run(args, **kwargs)
 
     monkeypatch.setattr(owner.subprocess, "run", fail_git)
@@ -377,6 +379,79 @@ def test_failed_index_restoration_is_reported_without_claiming_success(repo, mon
     assert _git(root, "show", ":other.txt") == "new unrelated staging\n"
     assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
     assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
+
+
+@pytest.mark.parametrize("restore_fails", [False, True], ids=["rollback", "retained-recovery"])
+def test_index_recovery_preserves_non_ascii_paths_under_legacy_locale(repo, monkeypatch, restore_fails):
+    root, memory = repo
+    renamed = memory.with_name("caf\u00e9")
+    memory.rename(renamed)
+    memory = renamed
+    _git(root, "add", "--", "owners")
+    _git(root, "commit", "-q", "-m", "move memory")
+    for name in ("NOW.md", "DOMAIN.md"):
+        (memory / name).write_text("earlier staged version\n", encoding="utf-8")
+    _git(memory, "add", "NOW.md", "DOMAIN.md")
+    (root / "other.txt").write_text("unrelated staged version\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    run = owner.subprocess.run
+    before = run(["git", "ls-files", "--stage", "-z"], cwd=root,
+                 capture_output=True, check=True).stdout
+    (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
+    (root / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+
+    def legacy_locale(args, **kwargs):
+        # Exercise the actual cp1252 codec independently of this host's UTF-8 mode.
+        if kwargs.get("text") and not kwargs.get("encoding"):
+            kwargs["encoding"] = "cp1252"
+        if restore_fails and args[:2] == ["git", "update-index"]:
+            text = kwargs.get("text") or kwargs.get("encoding")
+            return subprocess.CompletedProcess(args, 1, "" if text else b"",
+                                               "blocked" if text else b"blocked")
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(owner.subprocess, "run", legacy_locale)
+    with pytest.raises(owner.OwnerError) as error:
+        owner.handoff(memory, agent_id=AGENT_ID, agent_name="Alpha")
+    if restore_fails:
+        run(["git", "update-index", "-z", "--index-info"], cwd=root,
+            input=error.value.recovery_path.read_bytes(), capture_output=True, check=True)
+    after = run(["git", "ls-files", "--stage", "-z"], cwd=root,
+                capture_output=True, check=True).stdout
+    assert after == before, "recovery must preserve exact path bytes, without extra mojibake entries"
+    assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+    assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
+
+
+@pytest.mark.parametrize("directory", [b"tab\tfolder", b"line\nfolder"])
+def test_recovery_keeps_index_path_delimiters_verbatim(repo, directory):
+    root, memory = repo
+    # The index format permits these names; Windows working files do not.
+    # Relax only this temporary repository's index pathname guard, never create files.
+    _git(root, "config", "core.protectNTFS", "false")
+
+    def raw(*args, data=None):
+        return subprocess.run(["git", *args], cwd=root, input=data,
+                              capture_output=True, check=True).stdout
+
+    names = [b"odd/" + directory + b"/" + name for name in (b"NOW.md", b"DOMAIN.md")]
+    old_blob = raw("rev-parse", "HEAD:owners/alpha/NOW.md").strip()
+    new_blob = raw("rev-parse", "HEAD:owners/alpha/DOMAIN.md").strip()
+
+    def records(blob):
+        return b"".join(b"100644 " + blob + b" 0\t" + name + b"\0" for name in names)
+
+    raw("update-index", "-z", "--index-info", data=records(old_blob))
+    before = raw("ls-files", "--stage", "-z")
+    entries = raw("ls-files", "--full-name", "--stage", "-z", "--", "odd/")
+    paths = raw("ls-files", "--full-name", "--cached", "--others", "-z", "--", "odd/")
+    recovery = owner._save_index_recovery(root, entries, paths)
+    removals = b"".join(b"0 " + b"0" * 40 + b"\t" + name + b"\0" for name in paths.split(b"\0") if name)
+    assert recovery.read_bytes() == removals + entries
+    raw("update-index", "-z", "--index-info", data=records(new_blob))
+    owner._restore_index(root, recovery)
+    assert raw("ls-files", "--stage", "-z") == before
 
 
 @pytest.mark.parametrize("head_readable", [True, False], ids=["head-changed", "head-unknown"])
