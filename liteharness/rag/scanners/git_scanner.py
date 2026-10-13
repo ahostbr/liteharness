@@ -42,7 +42,7 @@ class GitScanner(BaseScanner):
             result = subprocess.run(
                 [
                     "git", "log",
-                    "--format=COMMIT:%H%n%(trailers:key=Agent-Name,key=Agent-ID,key=Agent-Role,key=Agent-Tier,key=Task-id,separator=%x00)%nEND_COMMIT",
+                    "--format=COMMIT:%H%n%(trailers:key=Agent-Name,key=Agent-ID,key=Agent-Role,key=Agent-Tier,key=Task-id,unfold=true,separator=%x00)%nEND_COMMIT",
                     "--stat",
                     "--max-count=500",
                     "--all",
