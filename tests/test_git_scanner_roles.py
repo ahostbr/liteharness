@@ -44,6 +44,16 @@ def test_both_trailers_are_parsed(repo):
     assert "Role: builder" in old, "an old Agent-Tier word is shown as its role"
 
 
+@pytest.mark.parametrize("trailer, expected", [
+    ("Agent-Role: owner", "owner"), ("Agent-Tier: worker", "builder"),
+])
+def test_sole_selected_trailer_is_parsed(tmp_path, trailer, expected):
+    _git(tmp_path, "init", "-q")
+    _commit(tmp_path, "single trailer", [trailer])
+    (content,) = [c["content"] for c in GitScanner(str(tmp_path)).parse_file("__git_log__")]
+    assert f"Role: {expected}" in content.splitlines()
+
+
 def test_role_wins_when_a_commit_carries_both(tmp_path):
     _git(tmp_path, "init", "-q")
     _commit(tmp_path, "both", ["Agent-Name: Alpha", "Agent-Tier: worker", "Agent-Role: critic"])

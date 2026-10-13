@@ -63,6 +63,7 @@ class GitScanner(BaseScanner):
         now = time.time()
         current_commit: dict = {}
         body_lines: list[str] = []
+        in_trailers = False
 
         for line in result.stdout.splitlines():
             if line.startswith("COMMIT:"):
@@ -70,10 +71,11 @@ class GitScanner(BaseScanner):
                     chunks.append(_build_chunk(current_commit, body_lines, now))
                 current_commit = {"sha": line[7:]}
                 body_lines = []
+                in_trailers = True
             elif line == "END_COMMIT":
-                continue
-            elif "\x00" in line:
-                # trailer line(s)
+                in_trailers = False
+            elif in_trailers:
+                # Git separates trailers, but emits no separator for a single trailer.
                 for trailer in line.split("\x00"):
                     trailer = trailer.strip()
                     if ":" in trailer:
