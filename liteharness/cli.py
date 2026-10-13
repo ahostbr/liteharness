@@ -4285,15 +4285,15 @@ def cmd_spawn(
             print(f"SPAWN REFUSED: {'--memory' if owner_title else '--owner'} is also required: "
                   "--owner <Title> --memory <dir> go together. Nothing was spawned.")
             sys.exit(2)
-        if (spawn_cli not in ("claude", "litetui") or prompt or cognitive or resume_agent_id or resume_convo_id
+        if (spawn_cli not in ("claude", "litetui") or prompt or cognitive
                 or (tier and _roles.normalize_role(tier) != "owner")
                 or (name and name != owner_title)):
             print("SPAWN REFUSED: --owner takes its prompt from SOUL.md and its name from the title, so it "
-                  "cannot be combined with --prompt, --cognitive, --name, --resume, --convo, a --tier other "
-                  "than owner, or --cli other than claude or litetui (resume an owner with `--resume <Title>` alone). "
+                  "cannot be combined with --prompt, --cognitive, a different --name, a --tier other "
+                  "than owner, or --cli other than claude or litetui. "
                   "Nothing was spawned.")
             sys.exit(2)
-        if spawn_cli == "litetui":
+        if spawn_cli == "litetui" or resume_agent_id or resume_convo_id:
             try:
                 _owner.check_title(owner_title)
                 memory = Path(memory_dir)
@@ -4402,7 +4402,8 @@ def cmd_spawn(
                          pane=split_pane, direction=split_direction, cwd=cwd,
                          name=name, tier=tier, model=model, backend=backend,
                          thinking_level=thinking_level, spawned_by=spawned_by,
-                         kill_old=kill_old, prompt=prompt, cognitive=cognitive)
+                         kill_old=kill_old, prompt=prompt, cognitive=cognitive,
+                         **({"owner_title": owner_title, "memory_dir": memory_dir} if owner_title else {}))
         except ValueError as exc:
             print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
             sys.exit(2)

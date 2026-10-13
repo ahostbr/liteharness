@@ -57,7 +57,8 @@ def data_root(resolution: dict | None = None) -> Path:
 
 def request(resolution: dict, *, root: Path, name: str, agent_id: str,
             backend: str, model: str, thinking_level: str,
-            fresh: bool = False, conversation_id: str | None = None) -> dict:
+            fresh: bool = False, conversation_id: str | None = None,
+            owner_title: str | None = None, memory_dir: str | None = None) -> dict:
     """Bind exact argv/env to one home; no writable legacy fallback."""
     valid_name(name)
     valid_id(agent_id)
@@ -82,8 +83,12 @@ def request(resolution: dict, *, root: Path, name: str, agent_id: str,
     args = launch['args']
     # Resolver may select execution flags, but never a different owned context.
     if any(a == flag or a.startswith(flag + '=') for a in args
-           for flag in ('--agent', '--create-agent', '--agent-id', '--convo')):
-        raise StoreError('Resolver already selected an agent or conversation')
+           for flag in ('--agent', '--create-agent', '--agent-id', '--convo', '--owner', '--memory')):
+        raise StoreError('Resolver already selected an agent, conversation or owner memory')
+    if owner_title or memory_dir:
+        if owner_title != name or not memory_dir:
+            raise StoreError('Owner resume requires matching --owner and --memory')
+        args.extend(['--owner', owner_title, '--memory', memory_dir])
     if (any(a == '--thinking-level' or a.startswith('--thinking-level=') for a in args)
             and any(a == '--reasoning-effort' or a.startswith('--reasoning-effort=') for a in args)):
         raise StoreError('Resolver returned mutually exclusive thinking flags')

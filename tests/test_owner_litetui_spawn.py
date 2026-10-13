@@ -130,8 +130,6 @@ def test_bad_title_refuses_before_resolver(seat, capsys, title):
     ({"cognitive": "other"}, "--cognitive"),
     ({"name": "Beta"}, "--name"),
     ({"tier": "builder"}, "--tier"),
-    ({"resume_agent_id": "Alpha"}, "--resume"),
-    ({"resume_convo_id": AGENT_ID}, "--convo"),
     ({"owner_title": None}, "--owner"),
     ({"memory_dir": None}, "--memory"),
     ({"spawn_cli": "codex"}, "--cli"),
