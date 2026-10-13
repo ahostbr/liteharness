@@ -23,7 +23,13 @@ MAX_TITLE = 64
 
 
 class OwnerError(ValueError):
-    """The owner identity cannot be built; the message says why and what to fix."""
+    """An owner operation failed; optional index records make recovery explicit."""
+
+    def __init__(self, message: str, *, recovery_path: Path | None = None):
+        self.recovery_path = recovery_path
+        if recovery_path is not None:
+            message += f". Prior index records retained at {recovery_path}"
+        super().__init__(message)
 
 
 def check_title(title) -> str:
@@ -155,11 +161,26 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
 
 
-def _restore_index(base: Path, entries: str, prefix: str) -> None:
-    """Index-info consumes root-relative paths even when invoked in a subdirectory."""
+def _save_index_recovery(base: Path, entries: str, prefix: str) -> Path:
+    """Save root-relative index-info input before mutation, including absent paths."""
+    git_dir = _git(base, "rev-parse", "--absolute-git-dir")
+    if git_dir.returncode != 0:
+        raise OwnerError("could not locate index recovery storage: " + git_dir.stderr.strip())
     removals = "".join(f"0 {'0' * 40}\t{prefix}{name}\0" for name in ("NOW.md", "DOMAIN.md"))
+    with tempfile.NamedTemporaryFile("w", prefix="handoff-index-", suffix=".recovery",
+                                     dir=git_dir.stdout.rstrip("\r\n"), delete=False,
+                                     encoding="utf-8", newline="") as handle:
+        handle.write(removals + entries)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return Path(handle.name)
+
+
+def _restore_index(base: Path, recovery_path: Path) -> None:
+    """Apply only the saved paths; never replace the entire index."""
     result = subprocess.run(["git", "update-index", "-z", "--index-info"], cwd=base,
-                            input=removals + entries, capture_output=True, text=True, timeout=120)
+                            input=recovery_path.read_text(encoding="utf-8"), encoding="utf-8",
+                            capture_output=True, timeout=120)
     if result.returncode != 0:
         raise OwnerError("could not restore the handoff index: " +
                          (result.stderr.strip() or result.stdout.strip()))
@@ -194,6 +215,7 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
         handle.write(message)
         message_file = handle.name
     try:
+        recovery_path = _save_index_recovery(base, snapshot.stdout, prefix.stdout.rstrip("\r\n"))
         try:
             added = _git(base, "add", "--", "NOW.md", "DOMAIN.md")
             if added.returncode != 0:
@@ -204,12 +226,15 @@ def handoff(memory_dir, *, agent_id: str, agent_name: str) -> list[str]:
                                  (committed.stderr.strip() or committed.stdout.strip()))
         except (OwnerError, OSError, subprocess.SubprocessError) as exc:
             try:
-                _restore_index(base, snapshot.stdout, prefix.stdout.rstrip("\r\n"))
+                _restore_index(base, recovery_path)
             except (OwnerError, OSError, subprocess.SubprocessError) as restore_error:
                 raise OwnerError(f"{exc}; index restoration failed: {restore_error}; "
-                                 "inspect the index before retrying") from exc
+                                 "inspect the index before retrying",
+                                 recovery_path=recovery_path) from exc
+            recovery_path.unlink()
             raise OwnerError(f"{exc} (the index for NOW.md and DOMAIN.md was restored; "
                              "your edits are untouched)") from exc
+        recovery_path.unlink()
     finally:
         os.unlink(message_file)
     here = base.as_posix()

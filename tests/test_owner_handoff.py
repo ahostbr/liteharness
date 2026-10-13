@@ -205,6 +205,7 @@ def test_a_valid_handoff_commits_only_now_and_domain_with_the_owner_trailer(repo
     assert "Agent-Role: owner" in body
     assert f"Agent-ID: {AGENT_ID}" in body and "Agent-Name: " in body
     assert "other.txt" in _git(root, "status", "--porcelain"), "unrelated edits stay uncommitted"
+    assert list((root / ".git").glob("handoff-index-*.recovery")) == []
 
 
 def test_it_prints_compact_then_the_reload_pointer(repo, capsys):
@@ -323,6 +324,8 @@ def test_failed_handoff_preserves_prior_index_and_newer_edits(repo, monkeypatch,
         run = owner.subprocess.run
 
         def fail_git(args, **kwargs):
+            if args[:2] == ["git", "add"]:
+                assert len(list((root / ".git").glob("handoff-index-*.recovery"))) == 1
             if failure == "timeout" and args[:2] == ["git", "commit"]:
                 raise subprocess.TimeoutExpired(args, 120)
             if failure == "partial-add" and args[:2] == ["git", "add"]:
@@ -337,13 +340,19 @@ def test_failed_handoff_preserves_prior_index_and_newer_edits(repo, monkeypatch,
     finally:
         assert _git(root, "ls-files", "--stage", "-z") == before
         assert _git(root, "rev-parse", "HEAD") == head
+        assert list((root / ".git").glob("handoff-index-*.recovery")) == []
         assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
         assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
 
 
 def test_failed_index_restoration_is_reported_without_claiming_success(repo, monkeypatch):
     root, memory = repo
+    (memory / "NOW.md").write_text("earlier staged note\n", encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("earlier staged domain\n", encoding="utf-8")
+    _git(memory, "add", "NOW.md", "DOMAIN.md")
+    before = _git(memory, "ls-files", "--stage", "-z", "--", "NOW.md", "DOMAIN.md")
     (memory / "NOW.md").write_text(GOOD_NOW, encoding="utf-8")
+    (memory / "DOMAIN.md").write_text("newer domain\n", encoding="utf-8")
     run = owner.subprocess.run
 
     def fail_git(args, **kwargs):
@@ -356,7 +365,18 @@ def test_failed_index_restoration_is_reported_without_claiming_success(repo, mon
         owner.handoff(memory, agent_id=AGENT_ID, agent_name="Alpha")
     assert "blocked commit" in str(error.value) and "blocked update-index" in str(error.value)
     assert "was restored" not in str(error.value)
+    recovery = getattr(error.value, "recovery_path", None)
+    assert recovery is not None, "prior staged entries must remain recoverable after rollback fails"
+    assert recovery.is_file() and str(recovery) in str(error.value)
+    monkeypatch.setattr(owner.subprocess, "run", run)
+    (root / "other.txt").write_text("new unrelated staging\n", encoding="utf-8")
+    _git(root, "add", "other.txt")
+    run(["git", "update-index", "-z", "--index-info"], cwd=root,
+        input=recovery.read_bytes(), capture_output=True, check=True)
+    assert _git(memory, "ls-files", "--stage", "-z", "--", "NOW.md", "DOMAIN.md") == before
+    assert _git(root, "show", ":other.txt") == "new unrelated staging\n"
     assert (memory / "NOW.md").read_text(encoding="utf-8") == GOOD_NOW
+    assert (memory / "DOMAIN.md").read_text(encoding="utf-8") == "newer domain\n"
 
 
 # ── T0482: a UTF-8 BOM (PowerShell 5, Notepad) is not part of the first heading ──────────────
