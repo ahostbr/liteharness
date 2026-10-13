@@ -533,8 +533,8 @@ def compose(tier: str, mode: str) -> str:
     prompts_dir, source = resolve_prompts_dir()
     if prompts_dir is None:
         return (
-            "[LITEHARNESS] ⚠ TIER PREAMBLE NOT DELIVERED — no prompt library found "
-            f"({source}). You are operating WITHOUT tier doctrine: stay within your "
+            "[LITEHARNESS] ⚠ ROLE PREAMBLE NOT DELIVERED — no prompt library found "
+            f"({source}). You are operating WITHOUT role doctrine: stay within your "
             f"spawn prompt, make no destructive or outward-facing moves, and report "
             f"this delivery failure to your orchestrator/human immediately."
         )
@@ -545,8 +545,8 @@ def compose(tier: str, mode: str) -> str:
     if tier_file is None:
         tier_file = FALLBACK_TIER_FILE
         warn = (
-            f"\n> ⚠ Unknown tier '{tier}' — delivering the worker preamble as the "
-            f"safe default. If your tier is real, add it to TIER_FILES in "
+            f"\n> ⚠ Unknown role '{tier}' — delivering the builder preamble as the "
+            f"safe default. If your role is real, add it to TIER_FILES in "
             f"liteharness/prompts.py and to the prompt library."
         )
 
@@ -577,11 +577,10 @@ def compose(tier: str, mode: str) -> str:
         "need a running LiteSuite; your doctrine is inlined below in full"
     )
     header = (
-        f"## Tier Preamble — {_roles.canonical(tier_key)} ({mode})\n"
+        f"## Role Preamble — {_roles.canonical(tier_key)} ({mode})\n"
         f"You are running {where}.\n"
-        f"Tool access is NOT tier-gated (manifests deleted 496dbdd9): these rules are "
-        f"your ONLY constraint — a thinker/reviewer edits nothing because doctrine says "
-        f"so, not because it can't.\n"
+        f"Tool access is NOT role-gated: a scout/critic edits nothing because the "
+        f"assigned scope is read-only, not because it can't.\n"
         f"Prompt library: {prompts_dir} (source {source}) — protocols/, "
         f"cognitive-architectures/ live there.{warn}"
     )
