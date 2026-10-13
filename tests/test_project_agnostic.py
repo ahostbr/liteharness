@@ -149,6 +149,25 @@ def test_the_tree_scan_catches_a_planted_leak_and_honours_the_allowlist():
     assert tree_findings("not/listed.txt", listed) != [], "the exemption belongs to the file"
 
 
+def test_runtime_ignore_excludes_only_untracked_state(tmp_path, monkeypatch):
+    """Runtime notes are ignored; even an ignored path remains guarded if tracked."""
+    ignore_rules = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    monkeypatch.setattr(__import__(__name__), "ROOT", tmp_path)
+    _git("init")
+    runtime = tmp_path / ".liteharness" / "notes.txt"
+    runtime.parent.mkdir()
+    runtime.write_text(WORDS[0] + " private note\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="untracked files carry"):
+        test_untracked_new_files_are_scanned_too()
+
+    (tmp_path / ".gitignore").write_text(ignore_rules, encoding="utf-8")
+    test_untracked_new_files_are_scanned_too()
+
+    _git("add", "--force", ".liteharness/notes.txt")
+    with pytest.raises(AssertionError, match="tracked files carry"):
+        test_no_tracked_file_carries_project_specific_text()
+
+
 # ── the branch ──────────────────────────────────────────────────────────────────────────
 
 def _develop_exists() -> bool:

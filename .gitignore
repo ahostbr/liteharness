@@ -27,6 +27,8 @@ Thumbs.db
 desktop.ini
 
 # Local
+# Checkout-local operational state is not public source; tracked files remain guarded.
+/.liteharness/
 .liteeditor/
 *.zip
 *.log
