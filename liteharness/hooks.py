@@ -599,9 +599,9 @@ def memory_nudge() -> None:
     tier-appropriate durable-knowledge doctrine. Off by default (config
     memory_nudge.enabled).
 
-    It names WHERE knowledge goes — patterns, commit bodies, handoffs — and names
-    no memory file at all (git-as-memory v2 WS1). It still MUST NEVER open or read
-    any memory file: the payload is a fixed template, never injected content.
+    It names WHERE knowledge goes — patterns, commit bodies, handoffs — alongside
+    Claude Code's own memory instructions. It still MUST NEVER open or read any
+    memory file: the payload is a fixed template, never injected content.
     Gated on hook_event_name=='UserPromptSubmit' so only real user turns advance
     the per-agent cadence counter.
     """
@@ -671,8 +671,9 @@ def _memory_checkin_text(tier: str) -> str:
     Durable knowledge now goes where it can be found by the tools that already
     index it: patterns, commit bodies, handoffs."""
     common = (
-        "[LITEHARNESS] Durable knowledge this turn? IT GOES IN GIT — there is no "
-        "memory file.\n"
+        "[LITEHARNESS] Durable knowledge this turn? It goes in git.\n"
+        "  Claude Code auto memory stays on; follow Claude Code's memory instructions.\n"
+        "  Never prune, merge, or compact existing memory entries.\n"
         "  task outcome / root cause / reusable pattern -> lst run pattern action=record ...\n"
         "      (born verified:\"unverified\" — that is a SCHEMA Fact, not a modifier you choose)\n"
         "  why this change, what you rejected           -> the COMMIT BODY (with your trailers);\n"
@@ -1807,7 +1808,9 @@ def register_presence() -> None:
         memory_contract = (
             charter.split("## How you stay yourself across a compaction\n", 1)[1].strip()
             if tier == "owner" else
-            "DURABLE KNOWLEDGE GOES IN GIT — there is no memory file to write."
+            "Durable knowledge goes in git: patterns, commit bodies, handoffs.\n"
+            "  Claude Code auto memory stays on; follow Claude Code's memory instructions.\n"
+            "  Never prune, merge, or compact existing memory entries."
         )
         print(f"""[LITEHARNESS] Inter-agent messaging active. Do all of this before you answer anyone.
   You are {agent_id} — role {tier}, assigned at spawn. You do not choose your role, and
