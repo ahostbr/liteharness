@@ -1964,3 +1964,231 @@ def test_t0116_review2_jobs_linear_depth_actual_floor(roots, depth):
     proven = deny_floor.refusal(command, workspace, home, shell="bash")
     print("REVIEW2 DEPTH", depth, repr(out), repr(proven))
     assert out and proven, "actual floor must preserve depth exhaustion writer"
+
+
+# ── the recognizer's `name` keyword (T0306): the same questions about another file ──
+#
+# A caller may ask about another file in a data root. Each question is asked
+# under the default name and under another, beside each other: the answer must
+# follow the name asked about, and never the other one.
+
+SCHEDULE, OTHER_NAME = "jobs.json", "settings.json"
+NAMED_SHELL = [   # (command, is it a write)
+    ("echo x > {dir}/NAME", True),                                  # a redirect
+    ("rm {dir}/NAME", True),                                        # a delete
+    ("python -c \"open('{dir}/NAME','w').write('x')\"", True),      # code handed to an interpreter
+    ("cat {dir}/NAME", False),                                      # a reader
+]
+NAMED_GIT = [
+    ("git restore -- {dir}/NAME", True),
+    ("git diff -- {dir}/NAME", False),
+]
+
+
+def _other(name):
+    return OTHER_NAME if name == SCHEDULE else SCHEDULE
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template, writes", NAMED_SHELL)
+def test_the_name_keyword_asks_the_shell_question_of_that_file(roots, template, writes, name):
+    home, workspace, litetui, _, _ = roots
+    command = template.format(dir=litetui.as_posix()).replace("NAME", name)
+    target = deny_floor.jobs_write_target(command, workspace, home, name=name)
+    assert (target is not None) is writes, command
+    if writes:
+        assert target == litetui / name
+    assert deny_floor.jobs_write_target(command, workspace, home, name=_other(name)) is None, command
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template, writes", NAMED_GIT)
+def test_the_name_keyword_asks_the_git_question_of_that_file(roots, template, writes, name):
+    home, workspace, litetui, _, _ = roots
+    command = template.format(dir=litetui.as_posix()).replace("NAME", name)
+    assert bool(deny_floor.jobs_git_refusal(command, workspace, home, name=name)) is writes, command
+    assert deny_floor.jobs_git_refusal(command, workspace, home, name=_other(name)) is None, command
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_the_name_keyword_asks_the_path_questions_of_that_file(roots, name):
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        assert deny_floor.is_jobs_file(root / name, name)
+        assert not deny_floor.is_jobs_file(root / name, _other(name))
+        assert deny_floor.write_refusal(str(root / name), workspace, home, name=name)
+        assert deny_floor.write_refusal(str(root / name), workspace, home, name=_other(name)) is None
+    assert not deny_floor.is_jobs_file(plain / name, name)
+    assert deny_floor.write_refusal(str(plain / name), workspace, home, name=name) is None
+
+
+def test_the_default_name_is_still_the_schedule_file_and_refusal_asks_about_no_other(roots):
+    home, workspace, litetui, _, _ = roots
+    schedule = f"echo x > {litetui.as_posix()}/{SCHEDULE}"
+    assert deny_floor.jobs_write_target(schedule, workspace, home) == litetui / SCHEDULE
+    assert deny_floor.is_jobs_file(litetui / SCHEDULE) and not deny_floor.is_jobs_file(litetui / OTHER_NAME)
+    assert "[jobs-file]" in deny_floor.refusal(schedule, workspace, home)
+    assert deny_floor.refusal(f"echo x > {litetui.as_posix()}/{OTHER_NAME}", workspace, home) is None
+
+
+# ── the recognizer's `under` keyword (T0306-R): a file at any depth below one
+#    named folder of a data root. Without it the file must sit IN the data root. ──
+
+UNDER = ".agents"
+DEPTHS = ["{under}/NAME", "{under}/Seat/NAME", "{under}/Seat/conversations/c1/NAME"]
+UNDER_SHELL = [   # (command, is it a write)
+    ("echo x > {file}", True),                                     # a redirect
+    ("rm {file}", True),                                           # a delete
+    ("cp other.json {file}", True),                                # a copy onto it
+    ("python -c \"open('{file}','w').write('x')\"", True),         # code handed to an interpreter
+    ("cat {file}", False),                                         # a reader
+    ("cp {file} other.json", False),                               # a copy from it
+]
+
+
+def _below(root, depth, name=OTHER_NAME, under=UNDER):
+    return root / depth.format(under=under).replace("NAME", name)
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_under_asks_the_path_questions_at_any_depth_below_the_folder(roots, depth, name):
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        path = _below(root, depth, name)
+        assert deny_floor.is_jobs_file(path, name, UNDER), path
+        assert not deny_floor.is_jobs_file(path, name), "without `under` the file must sit in the data root"
+        assert not deny_floor.is_jobs_file(path, _other(name), UNDER)
+        assert deny_floor.write_refusal(str(path), workspace, home, name=name, under=UNDER)
+        assert deny_floor.write_refusal(str(path), workspace, home, name=name) is None
+    assert not deny_floor.is_jobs_file(_below(plain, depth, name), name, UNDER), "not a data root"
+    assert deny_floor.write_refusal(str(_below(plain, depth, name)), workspace, home, name=name, under=UNDER) is None
+
+
+def test_under_does_not_ask_about_the_file_in_the_data_root_itself(roots):
+    home, workspace, litetui, _, _ = roots
+    assert deny_floor.is_jobs_file(litetui / OTHER_NAME, OTHER_NAME)
+    assert not deny_floor.is_jobs_file(litetui / OTHER_NAME, OTHER_NAME, UNDER)
+
+
+@pytest.mark.parametrize("place", ["agents/Seat", ".agents2/Seat", "x.agents/Seat",
+                                   "sub/.agents/Seat", ".agents.d/Seat"])
+def test_under_means_that_folder_directly_inside_the_data_root(roots, place):
+    """Another folder's name, or the right name one level too deep, is not it."""
+    home, workspace, litetui, _, _ = roots
+    path = litetui / place / OTHER_NAME
+    assert not deny_floor.is_jobs_file(path, OTHER_NAME, UNDER), path
+    assert deny_floor.jobs_write_target(f"echo x > {path.as_posix()}", workspace, home,
+                                        name=OTHER_NAME, under=UNDER) is None
+
+
+@pytest.mark.parametrize("spelling", [".AGENTS", ".Agents", ".agents.", ".agents ", ".agents..",
+                                      ".agents::$INDEX_ALLOCATION", ".agents:$I30:$INDEX_ALLOCATION"])
+def test_under_compares_the_folders_name_as_a_files_name_is_compared(roots, spelling):
+    """Case, trailing dots and spaces and a stream suffix name the same folder
+    (canonical_name). The path is judged as spelled: no folder exists on disk
+    here, so nothing but the comparison can make these equal."""
+    home, workspace, litetui, _, _ = roots
+    assert deny_floor.is_jobs_file(litetui / spelling / "Seat" / OTHER_NAME, OTHER_NAME, UNDER)
+    assert deny_floor.is_jobs_file(litetui / UNDER / "Seat" / OTHER_NAME, OTHER_NAME, spelling), \
+        "the caller's spelling of `under` is folded too"
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+@pytest.mark.parametrize("template, writes", UNDER_SHELL)
+def test_under_asks_the_shell_question_below_the_folder(roots, template, writes, depth):
+    home, workspace, litetui, _, plain = roots
+    command = template.format(file=_below(litetui, depth).as_posix())
+    target = deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME, under=UNDER)
+    assert (target is not None) is writes, command
+    if writes:
+        assert target == _below(litetui, depth)
+    assert deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME) is None, \
+        "without `under` a file below the folder is not the data root's own"
+    assert deny_floor.jobs_write_target(command, workspace, home, name=SCHEDULE, under=UNDER) is None
+    elsewhere = template.format(file=_below(plain, depth).as_posix())
+    assert deny_floor.jobs_write_target(elsewhere, workspace, home, name=OTHER_NAME, under=UNDER) is None
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+@pytest.mark.parametrize("template, writes", NAMED_GIT)
+def test_under_asks_the_git_question_below_the_folder(roots, template, writes, depth):
+    home, workspace, litetui, _, plain = roots
+    command = template.format(dir=_below(litetui, depth).parent.as_posix()).replace("NAME", OTHER_NAME)
+    assert bool(deny_floor.jobs_git_refusal(command, workspace, home, name=OTHER_NAME, under=UNDER)) is writes, command
+    assert deny_floor.jobs_git_refusal(command, workspace, home, name=OTHER_NAME) is None, command
+    elsewhere = template.format(dir=_below(plain, depth).parent.as_posix()).replace("NAME", OTHER_NAME)
+    assert deny_floor.jobs_git_refusal(elsewhere, workspace, home, name=OTHER_NAME, under=UNDER) is None
+
+
+def test_under_knows_a_data_root_by_the_environment_too(roots, monkeypatch):
+    home, workspace, _, _, plain = roots
+    path = _below(plain, DEPTHS[1])
+    assert not deny_floor.is_jobs_file(path, OTHER_NAME, UNDER)   # control: an unmarked folder
+    monkeypatch.setenv("LITETUI_DATA_ROOT", str(plain))
+    assert deny_floor.is_jobs_file(path, OTHER_NAME, UNDER)
+    assert deny_floor.jobs_write_target(f"rm {path.as_posix()}", workspace, home,
+                                        name=OTHER_NAME, under=UNDER) == path
+
+
+def test_under_follows_the_folders_short_name_when_the_folder_is_on_disk(roots):
+    """A volume may give the folder a second, short name (`AGENTS~1`). That
+    word is not the folder's name as spelled, so the bare path question says
+    no; the tool and shell questions resolve the path on disk first and are
+    answered for the folder it really is. Skipped where the volume gives none."""
+    if os.name != "nt":
+        pytest.skip("short names are a Windows volume feature")
+    import ctypes
+    home, workspace, litetui, _, _ = roots
+    path = _below(litetui, DEPTHS[1])
+    path.parent.mkdir(parents=True)
+    buffer = ctypes.create_unicode_buffer(600)
+    ctypes.windll.kernel32.GetShortPathNameW(str(litetui / UNDER), buffer, 600)
+    short = Path(buffer.value).name
+    if not short or short.lower() == UNDER:
+        pytest.skip("this volume gives the folder no short name")
+    spelled = (litetui / short / "Seat" / OTHER_NAME).as_posix()
+    assert not deny_floor.is_jobs_file(Path(spelled), OTHER_NAME, UNDER), "as spelled, another folder"
+    assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME, under=UNDER)
+    assert deny_floor.jobs_write_target(f"echo x > {spelled}", workspace, home,
+                                        name=OTHER_NAME, under=UNDER) == path
+
+
+def _asked_every_way(path, workspace, home):
+    """The path question, the tool question, a redirect and a delete, each with `under`."""
+    return [bool(deny_floor.is_jobs_file(path, OTHER_NAME, UNDER)),
+            bool(deny_floor.write_refusal(str(path), workspace, home, name=OTHER_NAME, under=UNDER)),
+            deny_floor.jobs_write_target(f"echo x > {path.as_posix()}", workspace, home,
+                                         name=OTHER_NAME, under=UNDER) == path,
+            deny_floor.jobs_write_target(f"rm {path.as_posix()}", workspace, home,
+                                         name=OTHER_NAME, under=UNDER) == path]
+
+
+@pytest.mark.parametrize("depth", ["{under}/Seat/conversations/c1/attachments/NAME",
+                                   "{under}/Seat/conversations/c1/a/b/c/NAME"])
+def test_under_reaches_deeper_than_the_deepest_file_that_exists_today(roots, depth):
+    """ANY depth: five and seven folders below the data root. A walk that
+    stopped four folders up would still catch a conversation's own file, the
+    deepest one any other test here names, so only these rows hold "any"."""
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        assert _asked_every_way(_below(root, depth), workspace, home) == [True] * 4, root
+    assert _asked_every_way(_below(plain, depth), workspace, home) == [False] * 4, "not a data root"
+
+
+def test_under_with_two_folders_of_that_name_in_one_path(roots):
+    """EVERY folder of that name on the path is tried, not the nearest alone and
+    not the outermost alone. A second one inside an agent's home: the outer one
+    is the data root's. A data root kept below another folder of that name: the
+    inner one is the data root's."""
+    home, workspace, litetui, marked, plain = roots
+    inside_a_home = litetui / UNDER / "Seat" / UNDER / "x" / OTHER_NAME
+    kept = plain / UNDER / "kept"
+    kept.mkdir(parents=True)
+    (kept / ".litetui-data.json").write_text("{}", encoding="utf-8")
+    root_below_another = kept / UNDER / "Seat" / OTHER_NAME
+    for path in (inside_a_home, root_below_another):
+        assert _asked_every_way(path, workspace, home) == [True] * 4, path
+    # CONTROL: two folders of that name and no data root above either.
+    neither = plain / UNDER / "other" / UNDER / "Seat" / OTHER_NAME
+    assert _asked_every_way(neither, workspace, home) == [False] * 4
