@@ -1,8 +1,8 @@
 """Tests for the memory-nudge hook.
 
-The nudge is a tiny INDEX pointer, NOT content-injection: it names the agent's
-durable MEMORY.md path on an every-other-turn cadence (configurable) and MUST
-NEVER open or read MEMORY.md. These tests pin that contract.
+The nudge points to git and Claude Code's own memory instructions on an
+every-other-turn cadence (configurable), without injecting memory content.
+It MUST NEVER open or read MEMORY.md. These tests pin that contract.
 """
 
 import inspect
@@ -258,6 +258,10 @@ class MemoryNudgeTests(unittest.TestCase):
         # And the positive half, so "absent" cannot be satisfied by an empty payload:
         self.assertIn("lst run pattern", payload)
         self.assertIn("HANDOFF", payload)
+        self.assertIn("Durable knowledge this turn? It goes in git.", payload)
+        self.assertIn("Claude Code auto memory stays on; follow Claude Code's memory instructions.", payload)
+        self.assertIn("Never prune, merge, or compact existing memory entries.", payload)
+        self.assertNotIn("no memory file", payload.lower())
 
         # POSITIVE CONTROL: the tracker must have actually observed file I/O,
         # otherwise the MEMORY.md check below is vacuous (an empty list always

@@ -183,8 +183,9 @@ Verification and merge receipts remain separate from the human's final look.
 
 ## Where durable knowledge goes
 
-**IT GOES IN GIT. There is no memory file.** Anything worth keeping past this
-session goes to a place the tools already index:
+**Durable knowledge goes in git.** Claude Code auto memory stays on; follow
+Claude Code's memory instructions. Never prune, merge, or compact existing memory
+entries. Keep patterns, commit bodies, and handoffs where the tools already index them:
 
 | what you learned | where it goes |
 |---|---|
