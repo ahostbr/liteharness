@@ -11,11 +11,11 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
           model: str | None, backend: str | None, thinking_level: str | None,
           spawned_by: str | None, kill_old: bool, prompt: str | None,
           cognitive: str | None = None, owner_title: str | None = None,
-          memory_dir: str | None = None) -> None:
+          memory_dir: str | None = None, root: Path | None = None) -> None:
     from . import cli, fleet_policy
     if kill_old:
         raise StoreError('Owned named resume never closes a seat; wait until offline')
-    root = owned_launch.data_root()
+    root = owned_launch.data_root() if root is None else root
     store = AgentStore(root)
     if value:
         try:
