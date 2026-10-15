@@ -36,7 +36,10 @@ A `Manifest` has both:
 2. `seats: list[Seat]`: resolved conversation/CLI/execution/root/cwd/role/cognitive/
    parent/owner-profile/disposition/recovery-action/source-revision/slot contracts.
 
-Every unresolved expected seat requires a seat-specific blocker. It cannot
+Every unresolved expected seat requires a seat-specific blocker. After a resolved
+seat is published, its stable launch identity cannot be dropped or changed within
+the same checkpoint; retain its captured descriptor with a blocker, or create a
+new checkpoint when identity changes. It cannot
 vanish from counts. Expected identities and exclusions are disjoint. Duplicate
 agent names, agent IDs and resolved conversation IDs refuse publication. A
 coordinator record points at an expected seat, specifies `external-manual-return`
@@ -70,8 +73,16 @@ blocks instead of disappearing. Registry rows corroborate context, **not life**.
 
 Native Claude/Codex/Copilot census requires the named original cwd/conversation
 and an explicit registry transcript path inside the selected authorized root.
+Backend/model must match the name index; thinking must be corroborated by current
+registry evidence (absent evidence blocks). The reference must carry the selected
+conversation UUID as its file stem or immediate parent, or as a Codex rollout
+filename suffix. Different-conversation/stale same-root references block; unknown
+layouts cannot be guessed. `Census.assurance` is explicitly `metadata-only`: this
+is not provider-content identity, live ownership, durability or readiness proof.
 There is no provider-path guessing or assumption that an agent ID is a native
-conversation ID. This is census support, not a claim that all three native CLIs
+conversation ID. Current registry records outrank retired history, matching existing resume
+semantics; a stale retired copy cannot overrule fresh registration. This is
+census support, not a claim that all three native CLIs
 already have governed restore launchers. The later dispatcher must refuse any
 unsupported launch path and verify current native identity/execution.
 
@@ -79,7 +90,11 @@ No path is resolved through a symlink/junction/reparse point, including ancestor
 Lexical traversal and unauthorized roots are rejected. These checks are not a
 sandbox against a malicious process swapping directories between check and I/O;
 writers require trusted local roots and the coordinator's ownership protections.
-Census snapshots can become stale immediately; later preflight must revalidate.
+Publication also requires `authorized_reference_roots`, an explicit host-supplied
+allowlist. Coordinator read-first, receipt and owner-memory references are checked
+for containment and links before writes; roots are not inferred from the manifest.
+This does not read/verify receipt contents. Census snapshots can become stale
+immediately; later preflight must revalidate before dereferencing any reference.
 
 ## Decisions: four recommendations, zero implicit approvals
 
@@ -155,7 +170,11 @@ rows, counts, blockers and allowed next actions. `accepted` is not `complete`.
 Each row has evidence/errors and its own allowed actions. `ready` counts both
 ready-idle and ready-held; `held` is its subset. Failed includes blocked rows.
 Other preparing/starting/saved states still contribute to expected. Counts must
-match rows exactly. Unknown rows may offer reconciliation, not automatic retry.
+match rows exactly. `validate_result_roster(result, manifest)` additionally joins
+exact seat-ID sets to the frozen checkpoint; a self-consistent smaller report is
+not sufficient. Journal result append/read enforces that join and binds restore
+request -> checkpoint -> result. Complete empty results refuse. Unknown rows may
+offer reconciliation, not automatic retry.
 Operation-result transitions and the readiness meaning belong to C/D, not this
 storage primitive.
 
@@ -165,13 +184,16 @@ Storage is caller-rooted at `<harnessRoot>/sessions/checkpoints/`:
 
 - `<checkpoint UUID>/manifest.json` — incomplete can be replaced while gathering
   evidence; expected/excluded roster, coordinator and creation/host/boot identity
-  stay frozen across retries; complete content is immutable;
+  stay frozen across retries, as do captured stable seat launch identities;
+  complete content is immutable;
 - `latest-complete.json` — checkpoint ID plus SHA-256 of canonical manifest JSON;
 - `operations/<request UUID>.json` — operation ID, bound request/actor, ordered events;
 - `.writer-lock` — exclusive writer reservation; no automatic stale deletion.
 
 Publication writes/flushed/fsyncs a temporary file, atomically replaces its
 same-directory target, and synchronizes the containing directory where supported.
+Newly created store/operation/checkpoint directories synchronize their parents
+before dependent records are acknowledged on hosts supporting directory fsync.
 Only a validated complete manifest advances the pointer, after the manifest is
 published. The pointer is monotonic by checkpoint `created_at`; older/tied distinct
 checkpoints remain available by explicit ID but do not displace it. Republishing
@@ -207,6 +229,34 @@ and `test_resume_by_name.py`. Fault injection covers partial writes, ENOSPC at
 fsync, manifest/pointer replace failures, journal interruption, stale sequence,
 request conflict and orphan publication. Link/reparse tests simulate `lstat`
 metadata; they create no machine links and are not an end-to-end junction test.
+Directory-sync ordering is simulated on Windows; POSIX power-loss testing has
+not been performed. JSON readers reject duplicate keys and nonstandard numeric
+constants, including strict rechecks of owned-home settings during census.
 No full suite, production fleet probe, real restart, provider spend, or installed
 MCP smoke test belongs to this card. Required merge review and human-look gates
 remain with the leader.
+
+### Card-A candidate evidence
+
+The builder's Windows/Python 3.11 focused run after review fixes completed with
+**122 passed** using:
+
+```text
+python -m pytest tests/test_checkpoint_contract.py tests/test_checkpoint_census.py tests/test_checkpoint_store.py tests/test_session_manager.py tests/test_resume_by_name.py -q
+```
+
+The new Python modules/tests also passed `compileall`; staged diff whitespace and
+public PII gates were clean. No project lint/type runner is configured here;
+optional `ruff` was unavailable. No full suite or running-product validation was
+performed. This receipt is not the leader's merge-time rerun or human-look gate.
+
+Retained red/green regressions include incomplete-roster shrink, old-complete
+pointer regression, result-roster omission, conflicting native model/thinking,
+same-root wrong-conversation transcript, changed resolved conversation, excluded
+name collisions, JSON duplicate/nonstandard values and unauthorized references.
+The failures were observed before their fixes. Interruption tests inject partial
+writes, ENOSPC at fsync, failed manifest/pointer replaces and journal interruption;
+retrying an orphan complete publication under the same checkpoint ID is covered.
+These are behavioral fault injections and regressions, **not a claim of a formal
+mutation-testing-tool run**. Directory-sync ordering and link metadata are mocked;
+real OS power-loss and real junction behavior remain unverified.

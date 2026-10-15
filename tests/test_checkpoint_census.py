@@ -171,3 +171,41 @@ def test_native_index_model_conflict_blocks(tmp_path):
     index[s.name]['model'] = 'different-model'
     put(harness / 'names.json', index)
     assert run([s], harness, [s.data_root]).blockers
+
+
+def test_native_thinking_must_be_corroborated(tmp_path):
+    harness, index = tmp_path / 'harness', {}
+    s = native(tmp_path / 'claude', harness, 1, 'claude', index)
+    put(harness / 'names.json', index)
+    changed = replace(s, execution=replace(s.execution, thinking_level='unproven'))
+    assert run([changed], harness, [s.data_root]).blockers
+
+
+def test_current_registry_authority_wins_over_retired_history(tmp_path):
+    harness, index = tmp_path / 'harness', {}
+    s = native(tmp_path / 'claude', harness, 1, 'claude', index)
+    put(harness / 'names.json', index)
+    put(harness / 'retired-agents' / f'{s.agent_id}.json', {'agent_id': s.agent_id, 'cli': 'old-cli'})
+    assert not run([s], harness, [s.data_root]).blockers
+
+
+def test_native_transcript_of_another_conversation_cannot_corroborate_selection(tmp_path):
+    harness, index = tmp_path / 'harness', {}
+    s = native(tmp_path / 'claude', harness, 1, 'claude', index)
+    put(harness / 'names.json', index)
+    registry_path = harness / 'agents' / f'{s.agent_id}.json'
+    record = json.loads(registry_path.read_text())
+    other = tmp_path / 'claude' / f'{uid(999)}.jsonl'
+    other.write_text('{"type":"meta"}\n')
+    record['transcript_path'] = str(other)
+    put(registry_path, record)
+    assert run([s], harness, [s.data_root]).blockers
+
+
+def test_census_is_explicitly_metadata_only(tmp_path):
+    s = owned(tmp_path / 'owned')
+    harness = tmp_path / 'harness'
+    put(harness / 'names.json', {})
+    result = run([s], harness, [s.data_root])
+    assert not result.blockers
+    assert result.assurance == 'metadata-only'

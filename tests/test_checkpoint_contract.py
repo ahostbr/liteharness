@@ -130,3 +130,23 @@ def test_owner_requires_preserved_profile_and_known_role(tmp_path):
     for role in ('owner', 'leader', 'unrecognized'):
         with pytest.raises(ContractError):
             wire(replace(m.seats[0], role=role))
+
+
+def test_result_must_join_frozen_manifest_roster(tmp_path):
+    from liteharness.checkpoint_contract import validate_result_roster
+    m = manifest(tmp_path, complete=False)
+    m = replace(m, expected=[*m.expected, ExpectedSeat(uid(9), 'Offline', 'explicit-offline')],
+                blockers=[Blocker('missing', uid(9), 'Reconcile')])
+    result = Result(1, uid(8), m.checkpoint_id, 'complete', Counts(1, 1, 0, 0, 0),
+                    [SeatResult(uid(1), 'ready-idle', [], [], [])], [], [])
+    with pytest.raises(ContractError):
+        validate_result_roster(result, m)
+
+
+def test_excluded_names_cannot_conflict_with_expected(tmp_path):
+    from liteharness.checkpoint_contract import Exclusion
+    m = manifest(tmp_path)
+    with pytest.raises(ContractError):
+        wire(replace(m, exclusions=[Exclusion(m.expected[0].name.lower(), uid(9), 'Not selected')]))
+    with pytest.raises(ContractError):
+        wire(Exclusion('../bad-name', uid(9), 'Not selected'))

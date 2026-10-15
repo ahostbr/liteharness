@@ -60,7 +60,7 @@ def native(root, harness, n, cli, index):
     transcript = root / f'{s.conversation_id}.jsonl'
     transcript.write_text('{"type":"meta"}\n', encoding='utf-8')
     put(harness / 'agents' / f'{s.agent_id}.json', {'agent_id': s.agent_id, 'name': s.name,
-        'cli': cli, 'role': s.role, 'transcript_path': str(transcript)})
+        'cli': cli, 'role': s.role, 'thinking_level': s.execution.thinking_level, 'transcript_path': str(transcript)})
     index[s.name] = {'agent_id': s.agent_id, 'convo_id': s.conversation_id,
                      'cwd': s.cwd, 'backend': cli, 'model': s.execution.model}
     return s

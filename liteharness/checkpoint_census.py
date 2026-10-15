@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 from .agent_store import AgentStore, StoreError
 from .roles import normalize_role
@@ -27,6 +28,7 @@ class CensusRow:
 class Census:
     rows: list[CensusRow]
     exclusions: list[Exclusion]
+    assurance: Literal['metadata-only'] = 'metadata-only'
 
     @property
     def expected_count(self) -> int:
@@ -103,6 +105,10 @@ def census(selected: list[Seat], *, harness_root: str | Path,
     excluded = [s.agent_id for s in exclusions]
     if len(set(excluded)) != len(excluded) or set(ids).intersection(excluded):
         raise ContractError('Invalid excluded roster')
+    excluded_names = [e.name.casefold() for e in exclusions]
+    if (len(set(excluded_names)) != len(excluded_names)
+            or set(excluded_names).intersection(s.name.casefold() for s in expected)):
+        raise ContractError('Excluded names conflict with frozen roster')
 
     # Global input failures still leave every selected row in the denominator.
     try:
@@ -121,8 +127,11 @@ def census(selected: list[Seat], *, harness_root: str | Path,
     # selects or wakes them. An unreadable catalog cannot prove unique ownership.
     for root in roots:
         try:
-            catalogs[str(root)] = AgentStore(root).list_agents()
-        except (StoreError, OSError):
+            agents = AgentStore(root).list_agents()
+            for agent in agents:
+                read_json(agent.directory / 'settings.json')  # also reject duplicate keys/non-JSON constants
+            catalogs[str(root)] = agents
+        except (StoreError, ContractError, OSError):
             catalog_errors.add(str(root))
 
     rows = []
@@ -187,10 +196,17 @@ def census(selected: list[Seat], *, harness_root: str | Path,
                 if (index_entry.get('model') != candidate.execution.model
                         or candidate.execution.backend != candidate.cli):
                     raise ContractError('Native execution conflicts with name index')
+                if registry.get('thinking_level') != candidate.execution.thinking_level:
+                    raise ContractError('Native thinking level is absent or conflicts with registry')
                 transcript_value = registry.get('transcript_path')
                 if not isinstance(transcript_value, str):
                     raise ContractError('Native transcript reference is absent')
                 transcript = checked_path(transcript_value, beneath=root)
+                conversation = candidate.conversation_id
+                if not (transcript.stem == conversation
+                        or (transcript.parent != root and transcript.parent.name == conversation)
+                        or (candidate.cli == 'codex' and transcript.stem.endswith('-' + conversation))):
+                    raise ContractError('Native transcript reference is not bound to selected conversation')
             if not transcript.is_file():
                 raise ContractError('Selected transcript is absent')
             rows.append(CensusRow(entry, seat, []))

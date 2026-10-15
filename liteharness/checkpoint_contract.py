@@ -221,7 +221,10 @@ class Exclusion:
 
     def validate(self):
         _id(self.agent_id)
-        _text(self.name)
+        try:
+            valid_name(self.name)
+        except StoreError as exc:
+            raise ContractError(str(exc)) from exc
         _text(self.reason)
 
 
@@ -334,6 +337,10 @@ class Manifest:
         excluded = [e.agent_id for e in self.exclusions]
         _require(len(set(excluded)) == len(excluded) and not set(ids).intersection(excluded),
                  'Excluded and expected identities must be disjoint')
+        excluded_names = [e.name.casefold() for e in self.exclusions]
+        _require(len(set(excluded_names)) == len(excluded_names)
+                 and not set(excluded_names).intersection(s.name.casefold() for s in self.expected),
+                 'Excluded and expected names must be unique and disjoint')
         _require(all(b.seat_id is None or b.seat_id in ids for b in self.blockers), 'Unknown blocker seat')
         _require(all(o.owner_id in ids for o in self.obligations), 'Unknown obligation owner')
         _require(len({o.key for o in self.obligations}) == len(self.obligations), 'Duplicate obligation')
@@ -458,9 +465,21 @@ class Result:
                         sum(s.state == 'unknown' for s in self.seats))
         _require(self.counts == counts, 'Result counts disagree with expected rows')
         if self.state == 'complete':
+            _require(bool(self.seats) and self.checkpoint_id is not None, 'Complete result needs a checkpoint roster')
             _require(not self.blockers and all(s.state in ('saved', 'ready-idle', 'ready-held')
                                               and not s.errors for s in self.seats),
                      'Incomplete rows cannot produce complete result')
+
+
+def validate_result_roster(result: Result, manifest: Manifest) -> None:
+    """Join reports to frozen authority, not a result's self-reported denominator."""
+    wire(result)
+    wire(manifest)
+    _require(result.checkpoint_id == manifest.checkpoint_id, 'Result checkpoint mismatch')
+    _require({s.seat_id for s in result.seats} == {s.agent_id for s in manifest.expected},
+             'Result must account for every frozen expected seat')
+    _require(all(r.checkpoint_id == manifest.checkpoint_id for s in result.seats for r in s.evidence),
+             'Result evidence checkpoint mismatch')
 
 
 def validate_runtime_versions(manifest: Manifest, supported: dict[str, set[str]]) -> None:

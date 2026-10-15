@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from .agent_store import StoreError, _unlinked, valid_id
 from .checkpoint_contract import (ContractError, Manifest, Request, Result,
-                                  decode, wire)
+                                  decode, validate_result_roster, wire)
 
 
 def checked_path(value: Path | str, *, beneath: Path | None = None) -> Path:
@@ -42,10 +42,15 @@ def _unique_object(pairs):
     return result
 
 
+def _invalid_constant(_value):
+    raise ContractError('Nonstandard JSON constant')
+
+
 def read_json(path: Path) -> dict:
     checked_path(path)
     try:
-        value = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=_unique_object)
+        value = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=_unique_object,
+                           parse_constant=_invalid_constant)
     except (OSError, ValueError) as exc:
         raise ContractError('JSON evidence is absent or unreadable') from exc
     if type(value) is not dict:
@@ -66,6 +71,32 @@ def _sync_directory(path: Path) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+
+def _mkdir(path: Path) -> None:
+    """Link newly created directories durably on hosts with directory fsync."""
+    checked_path(path)
+    if path.exists():
+        if not path.is_dir():
+            raise ContractError('Expected store directory')
+        return
+    _mkdir(path.parent)
+    path.mkdir(exist_ok=True)
+    _sync_directory(path.parent)
+
+
+def validate_manifest_references(manifest: Manifest, authorized_roots: list[Path | str]) -> None:
+    """Explicit host-supplied allowlist, never inferred from untrusted references."""
+    wire(manifest)
+    roots = [checked_path(root) for root in authorized_roots]
+    if not roots or any(not root.is_dir() for root in roots):
+        raise ContractError('Existing authorized reference roots required')
+    references = [manifest.coordinator.read_first, *(r.reference for r in manifest.receipts),
+                  *(s.owner_profile.memory_directory for s in manifest.seats if s.owner_profile)]
+    for reference in references:
+        path = checked_path(reference)
+        if not any(path.is_relative_to(root) for root in roots):
+            raise ContractError('Manifest reference is outside authorized roots')
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -117,9 +148,18 @@ class Operation:
             raise ContractError('Read-only requests cannot create journal operations')
         if [e.sequence for e in self.events] != list(range(len(self.events))):
             raise ContractError('Noncontiguous operation journal')
+        checkpoint_ids = set()
         for event in self.events:
-            if event.result and event.result.operation_id != self.operation_id:
-                raise ContractError('Result belongs to another operation')
+            if event.result:
+                if event.result.operation_id != self.operation_id:
+                    raise ContractError('Result belongs to another operation')
+                checkpoint = event.result.checkpoint_id
+                if checkpoint is not None:
+                    checkpoint_ids.add(checkpoint)
+                if self.request.action == 'restore' and checkpoint != self.request.checkpoint_id:
+                    raise ContractError('Result belongs to another requested checkpoint')
+        if len(checkpoint_ids) > 1:
+            raise ContractError('Operation cannot change checkpoint identity')
 
 
 class CheckpointStore:
@@ -135,7 +175,7 @@ class CheckpointStore:
     @contextmanager
     def _locked(self):
         checked_path(self.root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        _mkdir(self.root)
         lock = self._path('.writer-lock')
         try:
             fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -166,12 +206,13 @@ class CheckpointStore:
             raise ContractError('Latest-complete identity/content mismatch')
         return manifest
 
-    def publish(self, manifest: Manifest) -> None:
+    def publish(self, manifest: Manifest, *, authorized_reference_roots: list[Path | str]) -> None:
         payload = wire(manifest)
+        validate_manifest_references(manifest, authorized_reference_roots)
         with self._locked():
             latest = self.latest_complete()
             directory = self._path(manifest.checkpoint_id)
-            directory.mkdir(exist_ok=True)
+            _mkdir(directory)
             target = self._path(manifest.checkpoint_id, 'manifest.json')
             if target.exists():
                 previous = self.read_manifest(manifest.checkpoint_id)
@@ -180,6 +221,13 @@ class CheckpointStore:
                         or previous.created_at != manifest.created_at
                         or previous.host_id != manifest.host_id or previous.boot_id != manifest.boot_id):
                     raise ContractError('Checkpoint roster/origin is frozen; create a new checkpoint')
+                current_seats = {s.agent_id: s for s in manifest.seats}
+                stable = ('name', 'agent_id', 'conversation_id', 'cli', 'execution', 'data_root',
+                          'cwd', 'role', 'cognitive', 'parent_id', 'owner_profile', 'selection')
+                for old_seat in previous.seats:
+                    new_seat = current_seats.get(old_seat.agent_id)
+                    if new_seat is None or any(getattr(old_seat, key) != getattr(new_seat, key) for key in stable):
+                        raise ContractError('Resolved seat identity is frozen; reconcile with a new checkpoint')
                 if previous.state == 'complete' and wire(previous) != payload:
                     raise ContractError('Complete checkpoints are immutable')
             _atomic_json(target, payload)
@@ -204,6 +252,9 @@ class CheckpointStore:
         operation = decode(Operation, read_json(path))
         if operation.request.request_id != request_id:
             raise ContractError('Journal request identity mismatch')
+        for event in operation.events:
+            if event.result and event.result.checkpoint_id is not None and event.result.state != 'rejected':
+                validate_result_roster(event.result, self.read_manifest(event.result.checkpoint_id))
         return operation
 
     def operation(self, operation_id: str) -> Operation | None:
@@ -238,7 +289,7 @@ class CheckpointStore:
                 return existing
             operation = Operation(1, str(uuid4()), actor_id, request, [])
             record = wire(operation)
-            self._path('operations').mkdir(exist_ok=True)
+            _mkdir(self._path('operations'))
             _atomic_json(self._path('operations', f'{request.request_id}.json'), record)
             return operation
 
@@ -255,6 +306,13 @@ class CheckpointStore:
                 raise ContractError('Unknown operation')
             if len(operation.events) != expected_sequence or event.sequence != expected_sequence:
                 raise ContractError('Journal sequence changed; reconcile before append')
+            if event.result:
+                result = event.result
+                if (operation.request.action == 'restore'
+                        and result.checkpoint_id != operation.request.checkpoint_id):
+                    raise ContractError('Result does not match requested checkpoint')
+                if result.checkpoint_id is not None and result.state != 'rejected':
+                    validate_result_roster(result, self.read_manifest(result.checkpoint_id))
             updated = Operation(1, operation.operation_id, operation.actor_id,
                                 operation.request, [*operation.events, event])
             _atomic_json(self._path('operations', f'{operation.request.request_id}.json'), wire(updated))

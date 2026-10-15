@@ -13,18 +13,22 @@ from liteharness.checkpoint_store import CheckpointStore, JournalEvent
 from checkpoint_fixtures import manifest, request, uid
 
 
+def publish(store, value):
+    store.publish(value, authorized_reference_roots=[store.root.parents[1]])
+
+
 def test_complete_publication_partial_cannot_advance_or_rewrite(tmp_path):
     store = CheckpointStore(tmp_path)
     assert not store.root.exists()  # construction/read never initializes storage
     assert store.latest_complete() is None
     complete = manifest(tmp_path)
-    store.publish(complete)
+    publish(store, complete)
     assert store.latest_complete() == complete
-    store.publish(manifest(tmp_path, 501, complete=False))
+    publish(store, manifest(tmp_path, 501, complete=False))
     assert store.latest_complete() == complete
     assert store.read_manifest(uid(501)).state == 'incomplete'
     with pytest.raises(ContractError):
-        store.publish(replace(complete, state='incomplete'))
+        publish(store, replace(complete, state='incomplete'))
     assert store.latest_complete() == complete
     assert not (store.root / '.writer-lock').exists()
 
@@ -33,7 +37,7 @@ def test_complete_publication_partial_cannot_advance_or_rewrite(tmp_path):
 def test_publication_fault_preserves_previous_complete(tmp_path, monkeypatch, failure):
     store = CheckpointStore(tmp_path)
     old = manifest(tmp_path)
-    store.publish(old)
+    publish(store, old)
     old_bytes = (store.root / old.checkpoint_id / 'manifest.json').read_bytes()
     pointer_bytes = (store.root / 'latest-complete.json').read_bytes()
     new = manifest(tmp_path, 501)
@@ -63,7 +67,7 @@ def test_publication_fault_preserves_previous_complete(tmp_path, monkeypatch, fa
             return original_replace(source, target)
         monkeypatch.setattr(storage.os, 'replace', fail_replace)
     with pytest.raises(OSError):
-        store.publish(new)
+        publish(store, new)
     assert store.latest_complete() == old
     assert (store.root / old.checkpoint_id / 'manifest.json').read_bytes() == old_bytes
     assert (store.root / 'latest-complete.json').read_bytes() == pointer_bytes
@@ -127,7 +131,7 @@ def test_lock_is_not_reaped_and_no_second_writer(tmp_path):
     lock = store.root / '.writer-lock'
     lock.write_text('existing owner; crash requires reconciliation')
     with pytest.raises(ContractError, match='locked'):
-        store.publish(manifest(tmp_path))
+        publish(store, manifest(tmp_path))
     assert lock.read_text() == 'existing owner; crash requires reconciliation'
     assert not (store.root / uid(500)).exists()
 
@@ -143,13 +147,13 @@ def test_path_traversal_and_link_refusal(tmp_path, monkeypatch):
                         SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
                         if p == tmp_path else original(p, *a, **kw))
     with pytest.raises(ContractError, match='Linked'):
-        store.publish(manifest(tmp_path))
+        publish(store, manifest(tmp_path))
 
 
 def test_pointer_digest_and_directory_identity_detect_corruption(tmp_path):
     store = CheckpointStore(tmp_path)
     m = manifest(tmp_path)
-    store.publish(m)
+    publish(store, m)
     path = store.root / m.checkpoint_id / 'manifest.json'
     path.write_text(path.read_text().replace('fixture-host', 'changed-host'))
     with pytest.raises(ContractError, match='content mismatch'):
@@ -167,9 +171,9 @@ def test_republishing_old_complete_cannot_regress_latest(tmp_path):
     store = CheckpointStore(tmp_path)
     old = manifest(tmp_path)
     newer = replace(manifest(tmp_path, 501), created_at='2026-01-01T00:00:01+00:00')
-    store.publish(old)
-    store.publish(newer)
-    store.publish(old)
+    publish(store, old)
+    publish(store, newer)
+    publish(store, old)
     assert store.latest_complete() == newer
 
 
@@ -179,7 +183,97 @@ def test_partial_retry_cannot_shrink_frozen_expected_roster(tmp_path):
     base = manifest(tmp_path, complete=False)
     partial = replace(base, expected=[*base.expected, ExpectedSeat(uid(9), 'Offline', 'explicit-offline')],
                       blockers=[Blocker('missing', uid(9), 'Reconcile offline seat')])
-    store.publish(partial)
+    publish(store, partial)
     with pytest.raises(ContractError):
-        store.publish(base)
+        publish(store, base)
     assert store.read_manifest(base.checkpoint_id) == partial
+
+
+@pytest.mark.parametrize('constant', ['NaN', 'Infinity', '-Infinity'])
+def test_nonstandard_json_constants_refuse(tmp_path, constant):
+    path = tmp_path / 'evidence.json'
+    path.write_text('{"value":' + constant + '}')
+    with pytest.raises(ContractError):
+        storage.read_json(path)
+
+
+def test_publication_requires_authorized_reference_roots(tmp_path):
+    store = CheckpointStore(tmp_path / 'store')
+    authorized = tmp_path / 'authorized'
+    authorized.mkdir()
+    with pytest.raises(ContractError):
+        store.publish(manifest(tmp_path), authorized_reference_roots=[authorized])
+    assert not store.root.exists()
+
+
+def test_result_append_cannot_drop_expected_row(tmp_path):
+    from liteharness.checkpoint_contract import Blocker, Counts, ExpectedSeat, Result, SeatResult
+    store = CheckpointStore(tmp_path)
+    m = manifest(tmp_path, complete=False)
+    m = replace(m, expected=[*m.expected, ExpectedSeat(uid(9), 'Offline', 'explicit-offline')],
+                blockers=[Blocker('missing', uid(9), 'Reconcile')])
+    publish(store, m)
+    operation = store.submit(request(), actor_id='fixture')
+    result = Result(1, operation.operation_id, m.checkpoint_id, 'complete', Counts(1, 1, 0, 0, 0),
+                    [SeatResult(uid(1), 'ready-idle', [], [], [])], [], [])
+    with pytest.raises(ContractError):
+        store.append(operation.operation_id, JournalEvent(0, 'complete', None, result), expected_sequence=0)
+    assert not store.operation(operation.operation_id).events
+
+
+def test_created_directory_parents_are_synchronized_before_record_ack(tmp_path, monkeypatch):
+    store = CheckpointStore(tmp_path)
+    synchronized = []
+    monkeypatch.setattr(storage, '_sync_directory', synchronized.append)
+    store.submit(request(), actor_id='fixture')
+    assert synchronized == [tmp_path, tmp_path / 'sessions', store.root, store.root / 'operations']
+
+
+def test_partial_retry_cannot_change_resolved_conversation(tmp_path):
+    store = CheckpointStore(tmp_path)
+    m = manifest(tmp_path, complete=False)
+    publish(store, m)
+    changed = replace(m, seats=[replace(m.seats[0], conversation_id=uid(999))])
+    with pytest.raises(ContractError):
+        publish(store, changed)
+
+
+def test_restore_operation_rejects_result_from_another_checkpoint(tmp_path):
+    from liteharness.checkpoint_contract import Counts, Result, SeatResult, wire
+    from liteharness.checkpoint_store import Operation
+    r = request()
+    result = Result(1, uid(800), uid(501), 'complete', Counts(1, 1, 0, 0, 0),
+                    [SeatResult(uid(1), 'ready-idle', [], [], [])], [], [])
+    with pytest.raises(ContractError):
+        wire(Operation(1, uid(800), 'fixture', r, [JournalEvent(0, 'complete', None, result)]))
+
+
+def test_orphan_complete_can_be_retried_under_same_checkpoint_id(tmp_path, monkeypatch):
+    store = CheckpointStore(tmp_path)
+    old, new = manifest(tmp_path), manifest(tmp_path, 501)
+    publish(store, old)
+    original = os.replace
+    def interrupt(source, target):
+        if Path(target).name == 'latest-complete.json':
+            raise OSError('synthetic pointer interruption')
+        return original(source, target)
+    with monkeypatch.context() as patch:
+        patch.setattr(storage.os, 'replace', interrupt)
+        with pytest.raises(OSError):
+            publish(store, new)
+    assert store.latest_complete() == old
+    publish(store, new)
+    assert store.latest_complete() == new
+
+
+def test_reference_link_is_rejected_before_publication(tmp_path, monkeypatch):
+    store = CheckpointStore(tmp_path)
+    m = manifest(tmp_path)
+    reference = Path(m.coordinator.read_first)
+    original = type(reference).lstat
+    monkeypatch.setattr(type(reference), 'lstat', lambda p, *a, **kw:
+                        SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0)
+                        if p == reference else original(p, *a, **kw))
+    with pytest.raises(ContractError, match='Linked'):
+        publish(store, m)
+    assert not store.root.exists()
