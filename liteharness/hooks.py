@@ -2109,7 +2109,10 @@ def register_presence() -> None:
                              assuming the human can see a pane.
     POST /canvas/terminal    {{title, cwd}}          /canvas/claude     {{title, model}}
     POST /canvas/split       {{paneId, direction}}   /canvas/tab        {{paneId, leafId}}
-    POST /canvas/browser     {{url, paneId?}}        — paneId navigates THAT pane in place
+    POST /canvas/browser     {{url, paneId?, newPane?}} — opens a TAB in your one agent browser pane
+                             (per workspace/thread); newPane=true ONLY when a separate pane is
+                             asked for; paneId opens the tab in THAT pane, and newTab=false
+                             navigates its current tab in place (only when replacing is meant)
     POST /canvas/media       {{path|url}}            /canvas/editor     {{filePath}}
     POST /canvas/present|center|background {{kind, path|url}} — canvas action=help has the rules
     POST /canvas/clear       {{what?}}               GET /canvas/state
@@ -2138,7 +2141,8 @@ def register_presence() -> None:
                    --name X --prompt "..."   (typed launch = the RIGHT preamble at boot)
     --pty       -> background/overnight work nobody is watching. Nothing else.
 
-  TEST WEBPAGES in LiteSuite's OWN browser — display with /canvas/browser, measure with
+  TEST WEBPAGES in LiteSuite's OWN browser — display with /canvas/browser (each page is a TAB of
+  your one agent browser pane, never a new pane per page; `browser tabs` lists them), measure with
   /browser/* (screenshot, javascript, console). NEVER claude-in-chrome: that is the human's
   own Chrome, outside the canvas and invisible to this run's record.
 """)
