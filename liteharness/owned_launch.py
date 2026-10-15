@@ -81,6 +81,8 @@ def request(resolution: dict, *, root: Path, name: str, agent_id: str,
                for a in store.list_agents()) or store.agent_directory(name).exists():
             raise StoreError('Fresh agent home or identity already exists; resume it')
     args = launch['args']
+    if not fresh and args and args[-1] in ('--system-prompt-file', '--system-prompt'):
+        raise StoreError('Resolver returned bare system prompt flag')
     # Resolver may select execution flags, but never a different owned context.
     if any(a == flag or a.startswith(flag + '=') for a in args
            for flag in ('--agent', '--create-agent', '--agent-id', '--convo', '--owner', '--memory')):
@@ -118,13 +120,10 @@ def request(resolution: dict, *, root: Path, name: str, agent_id: str,
         args.extend(['--agent', name])
         if conversation_id is not None:
             args.extend(['--convo', valid_id(conversation_id)])
-        # A resumed transcript owns its system prompt, never a new role prompt.
-        for flag in ('--system-prompt-file', '--system-prompt'):
-            while flag in args:
-                i = args.index(flag)
-                if i + 1 >= len(args):
-                    raise StoreError('Resolver returned bare system prompt flag')
-                del args[i:i + 2]
+        # LiteTUI validates the complete launch text against the saved transcript
+        # before submitting --prompt. Keep role AND cognitive text: stripping the
+        # role guarantees a mismatch and silently leaves the resumed seat idle.
+        # The child refuses changed text; this does not replace its saved prompt.
     launch['env']['LITETUI_DATA_ROOT'] = str(root)
     launch['env']['LITEHARNESS_AGENT_ID'] = agent_id
     launch['env']['LITEHARNESS_NAME'] = name

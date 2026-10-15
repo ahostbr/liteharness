@@ -192,3 +192,48 @@ def test_claude_resume_without_root_does_not_discover_litetui(world, monkeypatch
     place.assert_not_called()
     assert launches[0]['spawn_cli'] == 'claude'
     assert launches[0]['additional_args'] == f'--resume {CID}'
+
+
+@pytest.mark.parametrize('role_args', [
+    ['--system-prompt-file', 'role.md'], ['--system-prompt', 'original role text'],
+    ['--system-prompt-file=role.md'],
+])
+def test_resume_preserves_complete_launch_text_and_first_turn(world, monkeypatch, role_args):
+    data, _, _, place, kwargs, original = world
+    transcript = data / '.agents' / NAME / 'conversations' / CID / 'convo.jsonl'
+    before = transcript.read_bytes()
+
+    def bridge(method, path, body=None):
+        result = original(method, path, body)
+        if path == '/harness/spawn/resolve':
+            result['request']['args'] = list(role_args)
+            if body.get('cognitive'):
+                result['request']['args'] += ['--cognitive-file', 'feynman.md']
+            if body.get('prompt'):
+                result['request']['args'] += ['--prompt', body['prompt']]
+        return result
+
+    monkeypatch.setattr(cli, '_bridge_request', bridge)
+    cli.cmd_spawn(**kwargs, cognitive='feynman', prompt='Reply READY')
+    args = place.call_args.kwargs['launch']['args']
+    assert args[:len(role_args)] == role_args
+    assert args[args.index('--cognitive-file') + 1] == 'feynman.md'
+    assert args[args.index('--prompt') + 1] == 'Reply READY'
+    assert args[args.index('--convo') + 1] == CID
+    assert transcript.read_bytes() == before  # child validates; parent never rewrites
+
+
+@pytest.mark.parametrize('flag', ['--system-prompt-file', '--system-prompt'])
+def test_bare_role_flag_refused_before_resume_placement(world, monkeypatch, flag):
+    _, _, _, place, kwargs, original = world
+
+    def bridge(method, path, body=None):
+        result = original(method, path, body)
+        if path == '/harness/spawn/resolve':
+            result['request']['args'] = [flag]
+        return result
+
+    monkeypatch.setattr(cli, '_bridge_request', bridge)
+    with pytest.raises(SystemExit):
+        cli.cmd_spawn(**kwargs)
+    place.assert_not_called()
