@@ -173,6 +173,55 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
                   prompt=prompt, cognitive=cognitive, additional_args=f"--resume {session_id}")
 
 
+def _bridge_data_root(value: str | None, *, tier: str | None, backend: str | None,
+                      model: str | None, thinking_level: str | None) -> Path | None:
+    """Discover a missing root; registry execution is a hint, never launch authority.
+
+    The existing resolver creates no seat or identity reservation (it may cache a
+    composed preamble). Discard its argv/identity; owned resume resolves again
+    with folder execution and requires the same root before placing anything.
+    """
+    from . import agent_names, cli, owned_launch
+    from .agent_store import StoreError
+
+    if not value:
+        return None
+    if not _UUID_SHAPE.fullmatch(value):
+        entry = agent_names.resolve_name(value)
+        if entry and str(entry.get('backend') or '').split('/', 1)[0].lower() == 'claude':
+            return None  # Claude needs neither a LiteTUI root nor bridge discovery.
+    records = {}
+    for directory in ('retired-agents', 'agents'):
+        for path in (config.get_root() / directory).glob('*.json'):
+            row = _read_json(path)
+            if row.get('agent_id') == path.stem:
+                records[path.stem] = row  # current presence beats its retired copy
+    matches = [row for row in records.values() if row['agent_id'] == value
+               or str(row.get('name') or '').casefold() == value.casefold()]
+    if len(matches) > 1:
+        raise StoreError('Ambiguous registry identity for root discovery')
+    row = matches[0] if matches else {}
+    if row:
+        if row.get('cli') != 'litetui':
+            return None
+        backend, model, thinking_level = (row.get(key) for key in ('backend', 'model', 'thinking_level'))
+    discovery_tier = roles.normalize_role(tier or roles.row_role(row))
+    if (discovery_tier not in roles.ROLES or any(not isinstance(v, str) or not v.strip()
+            for v in (backend, model, thinking_level))):
+        return None  # no fabricated provider/model just to discover a root
+    resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {
+        'cli': 'litetui', 'name': row.get('name') or value,
+        'tier': roles.wire_tier(discovery_tier), 'backend': backend,
+        'model': model, 'thinkingLevel': thinking_level,
+    })
+    if not isinstance(resolution, dict) or resolution.get('ok') is not True:
+        detail = resolution.get('error') if isinstance(resolution, dict) else resolution
+        raise StoreError(f'Owned data-root discovery refused: {detail}')
+    if resolution.get('liteTuiDataRoot') is None:
+        raise StoreError('Owned data-root discovery returned no liteTuiDataRoot')
+    return owned_launch.data_root(resolution)
+
+
 def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None,
                  direction: str | None, cwd: str | None, name: str | None,
                  tier: str | None, model: str | None, backend: str | None,
@@ -184,7 +233,9 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
     try:
         root = owned_launch.data_root()
     except owned_launch.RootUnknown:
-        root = None  # ONLY missing canonical resolver; corrupt/invalid roots still fail closed
+        # ONLY missing canonical resolver; corrupt/invalid roots still fail closed.
+        root = _bridge_data_root(agent_id, tier=tier, backend=backend, model=model,
+                                 thinking_level=thinking_level)
     if root is not None:
         store = AgentStore(root)
         agents = store.list_agents()  # strict even if selected folder is inactive/corrupt
@@ -192,7 +243,7 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
         membership = any(d.name == convo_id for a in agents for d in store.list_conversations(a)) if convo_id else False
         if (selected or membership or (agent_id and not _UUID_SHAPE.fullmatch(agent_id)
                                        and store.agent_directory(agent_id).exists())):
-            owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane,
+            owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane, root=root,
                                direction=direction, cwd=cwd, name=name, tier=tier,
                                model=model, backend=backend, thinking_level=thinking_level,
                                spawned_by=spawned_by, kill_old=kill_old, prompt=prompt,
@@ -221,7 +272,7 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
         return
     # Existing Claude route above is unchanged. LiteTUI archives never become
     # writable resume targets: require the authoritative owned folder instead.
-    owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane,
+    owned_resume.spawn(value=agent_id, conversation_id=convo_id, pane=pane, root=root,
                        direction=direction, cwd=cwd, name=name, tier=tier,
                        model=model, backend=backend, thinking_level=thinking_level,
                        spawned_by=spawned_by, kill_old=kill_old, prompt=prompt,
