@@ -291,6 +291,29 @@ def _rename_canvas_seat(session_id: str, name: str) -> str | None:
     return str(result.get("error") or "canvas rename failed")
 
 
+def _rename_canvas_seat_retrying(session_id: str, name: str, *, attempts: int = 4,
+                                 delay: float = 2.0) -> str | None:
+    """`_rename_canvas_seat`, tried again when the bridge is busy or the renderer is reloading.
+
+    A Claude seat re-asserts its tab at every registration (the SessionStart hook and
+    `register` both carry its canvas session). A LiteTUI seat cannot: it registers without a
+    canvas session id, so the spawner's own rename is the only one it will ever get, and one
+    failed attempt left the tab on the cwd folder name (T0077). Returns the last reason, or None
+    once a rename landed; never raises.
+    """
+    error: str | None = None
+    for attempt in range(attempts):
+        try:
+            error = _rename_canvas_seat(session_id, name)
+        except Exception as exc:  # noqa: BLE001 -- a transport failure is the same cosmetic miss
+            error = f"{type(exc).__name__}: {exc}"
+        if error is None:
+            return None
+        if attempt + 1 < attempts:
+            time.sleep(delay)
+    return error
+
+
 # Hook config filenames bundled in liteharness/hooks_configs/
 _HOOK_CONFIGS = {
     "claude-code": {
@@ -4104,9 +4127,10 @@ def _spawn_litetui_agent(
         print(f"SPAWN REFUSED: {why}; kill requested for session {session}; process reap pending: {json.dumps(cleanup)}")
         sys.exit(2)
     if split_mode:
-        rename_error = _rename_canvas_seat(str(session), name)
+        rename_error = _rename_canvas_seat_retrying(str(session), name)
         if rename_error:
-            print(f"Warning: canvas title not updated: {rename_error}; registration will retry", file=sys.stderr)
+            print(f"Warning: canvas title not updated after retries: {rename_error}; a LiteTUI seat "
+                  "does not re-assert it at registration", file=sys.stderr)
     # Folder is authoritative. No legacy .convos scan/index write on fresh birth.
     print(json.dumps({"agent_id": resolved["agentId"], "agent_home": str(root / '.agents' / name),
                       **created}, ensure_ascii=False))
