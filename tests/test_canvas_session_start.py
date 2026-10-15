@@ -9,7 +9,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_session_start_teaches_the_canvas_display_routes_and_result_habit(tmp_path):
+def _session_start_stdout(tmp_path) -> str:
+    """The SessionStart text of a seat inside LiteSuite, without a live app."""
     prompts = tmp_path / "prompts"
     (prompts / "preambles").mkdir(parents=True)
     for name in ("bootstrap-harness.md", "canvas-display.md", "preambles/worker-preamble.md"):
@@ -40,9 +41,22 @@ with patch.object(hooks, '_adopt_pid_owner', return_value='canvas-session-start-
         capture_output=True, text=True, encoding="utf-8", timeout=30,
     )
     assert out.returncode == 0, out.stdout + out.stderr
-    assert "POST /canvas/present|center|background {kind, path|url}" in out.stdout
-    assert "POST /canvas/clear" in out.stdout
-    assert "GET /canvas/state" in out.stdout
-    assert "canvas action=help has the rules" in out.stdout
-    assert "a RESULT to look at     -> canvas action=present (image/video/model)" in out.stdout
-    assert "glb -> center; image/video -> background" in out.stdout
+    return out.stdout
+
+
+def test_session_start_teaches_the_canvas_display_routes_and_result_habit(tmp_path):
+    stdout = _session_start_stdout(tmp_path)
+    assert "POST /canvas/present|center|background {kind, path|url}" in stdout
+    assert "POST /canvas/clear" in stdout
+    assert "GET /canvas/state" in stdout
+    assert "canvas action=help has the rules" in stdout
+    assert "a RESULT to look at     -> canvas action=present (image/video/model)" in stdout
+    assert "glb -> center; image/video -> background" in stdout
+
+
+def test_session_start_teaches_browser_tabs_by_default(tmp_path):
+    """T0234 (the user, 2026-09-30): agents use the tab system of one browser pane, not a new pane per page."""
+    stdout = _session_start_stdout(tmp_path)
+    assert "opens a TAB in your one agent browser pane" in stdout
+    assert "newPane=true ONLY when a separate pane is" in stdout
+    assert "each page is a TAB of" in stdout and "never a new pane per page" in stdout
