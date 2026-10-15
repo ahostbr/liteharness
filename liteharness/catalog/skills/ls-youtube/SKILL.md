@@ -6,7 +6,7 @@ allowed-tools: Bash(powershell.exe:*), Bash(yt-dlp:*), Bash(ffmpeg:*)
 
 # YouTube Grabber — video, transcript, frames
 
-Pull a YouTube video down, get its transcript, and cut it into frames — one script, one folder per video. Transcript retrieval does **not** require LiteSuite running or installed: yt-dlp is tried first, then the standalone Python `youtube-transcript-api` package if the subtitle route fails or returns no usable file. If LiteSuite is installed, transcripts are also saved to LiteSuite's YouTube database so they appear in the YouTube panel.
+Pull a YouTube video down, get its transcript, and cut it into frames — one script, one folder per video. Caption retrieval does **not** require LiteSuite running or installed: yt-dlp is tried first, then the standalone Python `youtube-transcript-api` package if the subtitle route fails or returns no usable file. Only after both caption routes fail, original-language audio is downloaded and transcribed using an **already-running** whisper.cpp server on `127.0.0.1:8080` (LiteSuite's Whisper). The script never starts a server or loads/downloads a model. If LiteSuite is installed, transcripts are also saved to LiteSuite's YouTube database so they appear in the YouTube panel.
 
 ## What lands where
 
@@ -44,7 +44,7 @@ Pull a YouTube video down, get its transcript, and cut it into frames — one sc
    powershell.exe -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/Get-YouTube.ps1" -Url "VIDEO_URL" -MediaRoot "D:/yt" -OutputPath "D:/yt/talk.md"
    ```
 
-3. **Present the output**: The script prints a formatted markdown transcript to stdout whose header names the **producing transcript route** (`yt-dlp` or `youtube-transcript-api`), the video path, the frame count and the save status. Display it, and tell the user where the video and frames landed.
+3. **Present the output**: The script prints a formatted markdown transcript to stdout whose header names the **producing transcript route** (`captions`, `transcript-api` or `whisper-audio`), the video path, the frame count and the save status. Display it, and tell the user where the video and frames landed.
 
 ## Parameters
 
@@ -63,17 +63,26 @@ Pull a YouTube video down, get its transcript, and cut it into frames — one sc
 | Exit Code | Meaning | Action |
 | --------- | ------- | ------ |
 | 1 | yt-dlp failure (video unavailable, private, or metadata error) | The message carries yt-dlp's own ERROR line — read it and tell the user what it says |
-| 2 | **No English subtitles** — the fallback retrieved a caption catalog and confirmed no `en`, `en-US` or `en-GB` track | Report the available catalog languages from the diagnostic; offer those, not invented English text |
-| 3 | **Subtitle routes FAILED** — neither route yielded a usable transcript (refusal, network, import/dependency or invalid data) | Do NOT report this as "no subtitles". Read both route diagnostics and explain the actual blocker |
+| 2 | **No English subtitles** — `Get-Transcript.py` retrieved a caption catalog and confirmed no `en`, `en-US` or `en-GB` track | The main script still tries audio; helper exit 2 alone does not end the run |
+| 3 | **Transcript routes FAILED** — no route yielded a usable transcript, including audio unavailable/failed | Do NOT infer "no subtitles" from refusal. Read the route diagnostics; a confirmed missing English track remains identified separately |
 
 🔴 **2 and 3 are different answers.** A refused fetch or missing file is not proof that English
 captions are absent. After yt-dlp exits non-zero, produces no file, or produces unusable JSON3,
 the script tries `Get-Transcript.py` using `python` on PATH. The helper calls
 `YouTubeTranscriptApi().list(video_id).find_transcript(["en", "en-US", "en-GB"]).fetch()` —
 the same package route as Suite, retaining caption timings, preferring manual tracks and
-accepting generated tracks. It does not translate, use ASR, cookies, proxies or the Suite bridge.
-Only a successful catalog lookup with no requested track yields exit 2. Disabled-caption,
-network, package and parse errors remain exit 3; there is no retry loop.
+accepting generated tracks. The caption helper does not translate or use ASR, cookies, proxies or the Suite bridge.
+Only a successful catalog lookup with no requested track yields helper exit 2. Disabled-caption,
+network, package and parse errors yield helper exit 3. Both proceed to the audio route.
+
+The audio route probes `http://127.0.0.1:8080/` for whisper.cpp before downloading anything.
+If unavailable or a different server answers, the run exits 3 and explains that it needs
+LiteSuite's Whisper running. **Never start whisper-server, load a model or download one to
+make this route work.** It selects audio-only formats by yt-dlp metadata, preferring the
+`original` format note (not an auto-dub); after a direct/DASH failure such as HTTP 403, it
+tries HLS (`m3u8`) audio. No format IDs are hard-coded. ffmpeg converts the audio to mono
+16 kHz PCM WAV; curl sends it to `/inference` for English speech recognition. This is ASR,
+not a verified caption or translation. Temporary audio is removed on success and failure.
 
 - If `yt-dlp` is not installed, tell the user: `pip install yt-dlp`
 - **Fallback dependency is optional for successful yt-dlp transcripts.** If absent from the selected `python` interpreter, the diagnostic names that interpreter and gives one command: `python -m pip install youtube-transcript-api`. Explain it; do not silently install or upgrade anything. An incompatible or broken installed package is an import failure, not "no captions".
@@ -93,7 +102,7 @@ network, package and parse errors remain exit 3; there is no retry loop.
   yt-dlp configuration.
 - **Failures name their cause.** yt-dlp's stderr is captured separately from its stdout and the
   decisive `ERROR:` line is put FIRST in the message, so a truncated diagnostic still says why.
-- **Frames require `ffmpeg`**: `winget install Gyan.FFmpeg`. Everything else works without it.
+- **Frames and audio fallback require `ffmpeg`**: `winget install Gyan.FFmpeg`. Caption routes work without it. Audio fallback also requires `curl.exe` on PATH.
 - Re-running is cheap: an existing `video.mp4` is not re-downloaded, and the DB inserts are idempotent on `video_id`.
 - The video is fetched as `bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b` and merged to mp4 — a bare `b[ext=mp4]` silently hands back a lower resolution, because YouTube serves 1080p and above as video-only streams.
 - Auto-generated subtitles (YouTube speech recognition) are included via `--write-auto-sub`; manual/uploaded subtitles are preferred via `--write-sub`.

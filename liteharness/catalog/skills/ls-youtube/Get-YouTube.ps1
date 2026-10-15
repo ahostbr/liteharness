@@ -107,6 +107,55 @@ function Get-DiagText([object[]]$lines, [int]$maxLen = 400) {
     return $text
 }
 
+# Audio is the last resort, using ONLY an already-running whisper.cpp server.
+function Get-AudioTranscript([string]$output) {
+    try {
+        $server = Invoke-WebRequest 'http://127.0.0.1:8080/' -UseBasicParsing -TimeoutSec 3 -MaximumRedirection 0 -ErrorAction Stop
+        if ($server.Content -notmatch '(?i)whisper\.cpp') { throw 'not whisper.cpp' }
+    } catch { throw "Audio route needs LiteSuite's Whisper running on 127.0.0.1:8080 (whisper.cpp): $($_.Exception.Message)" }
+    foreach ($tool in @('ffmpeg', 'curl.exe')) {
+        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) { throw "$tool not on PATH" }
+    }
+    $infoResult = & yt-dlp @JsRuntimeArgs --dump-single-json --skip-download --no-playlist $Url 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Audio formats: $(Get-DiagText $infoResult)" }
+    $info = ($infoResult | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n" | ConvertFrom-Json -ErrorAction Stop
+    $audio = @($info.formats | Where-Object { $_.vcodec -eq 'none' -and $_.acodec -and $_.acodec -ne 'none' })
+    $original = @($audio | Where-Object { $_.format_note -match '\boriginal\b' })
+    if ($original.Count) { $audio = $original }
+    elseif (@($audio.language | Where-Object { $_ } | Select-Object -Unique).Count -gt 1 -or @($audio | Where-Object { $_.format_note -match '\bdubbed\b' }).Count) {
+        throw 'Cannot identify original audio among dubbed/language tracks'
+    }
+    # One best direct candidate, then one HLS candidate; IDs come from metadata.
+    $candidates = @($audio | Where-Object { $_.protocol -notmatch 'm3u8' } | Sort-Object abr -Descending | Select-Object -First 1)
+    $candidates += @($audio | Where-Object { $_.protocol -match 'm3u8' } | Sort-Object abr -Descending | Select-Object -First 1)
+    $audioPath = "$SubFileBase.audio"
+    $wavPath = "$SubFileBase.audio.wav"
+    $downloaded = $false
+    $downloadDiag = @()
+    foreach ($format in $candidates) {
+        Remove-Item -LiteralPath $audioPath -Force -ErrorAction SilentlyContinue
+        $result = & yt-dlp @JsRuntimeArgs --no-playlist --no-part -f $format.format_id -o $audioPath $Url 2>&1
+        if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $audioPath) -and (Get-Item -LiteralPath $audioPath).Length -gt 0) {
+            Write-Host "Audio: $($format.format_id) [$($format.format_note)] via $($format.protocol)" -ForegroundColor DarkGray
+            $downloaded = $true; break
+        }
+        $downloadDiag += "$($format.format_id): $(Get-DiagText $result)"
+        Write-Warning "Audio format failed: $($downloadDiag[-1])"
+    }
+    if (-not $downloaded) { throw "Audio download failed (no usable formats): $($downloadDiag -join '; ')" }
+    $result = & ffmpeg -hide_banner -loglevel error -y -i $audioPath -ar 16000 -ac 1 -c:a pcm_s16le $wavPath 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $wavPath)) { throw "Audio conversion failed: $(Get-DiagText $result)" }
+    $result = & curl.exe --silent --show-error --fail --max-time 300 http://127.0.0.1:8080/inference -F "file=@$wavPath" -F response_format=verbose_json -F language=en 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Whisper inference failed: $(Get-DiagText $result)" }
+    $response = ($result -join "`n") | ConvertFrom-Json -ErrorAction Stop
+    $events = @($response.segments | Where-Object { $_.text -and $_.text.Trim() } | ForEach-Object {
+        if ($null -eq $_.start -or $null -eq $_.end -or $_.start -lt 0 -or $_.end -lt $_.start) { throw 'invalid Whisper timing' }
+        @{ tStartMs = [math]::Round($_.start * 1000); dDurationMs = [math]::Round(($_.end - $_.start) * 1000); segs = @(@{utf8 = $_.text}) }
+    })
+    if (-not $events.Count) { throw 'Whisper returned no usable transcript text' }
+    @{events = $events} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $output -Encoding UTF8 -ErrorAction Stop
+}
+
 try {
     # ── 2. Fetch metadata ─────────────────────────────────────────────────────
 
@@ -229,7 +278,7 @@ try {
     # Glob for the subtitle file (yt-dlp appends .en.json3, .en-US.json3, etc.)
     $SubFile = Get-ChildItem "$SubFileBase*.json3" -ErrorAction SilentlyContinue | Select-Object -First 1
 
-    $transcriptRoute = 'yt-dlp (JSON3 subtitles)'
+    $transcriptRoute = 'captions (yt-dlp JSON3)'
     $primaryDataDiag = ''
     if ($subExit -eq 0 -and $SubFile) {
         try {
@@ -261,19 +310,24 @@ try {
             $fallbackExit = 3
             $fallbackDiag = $_.Exception.Message
         }
+        $transcriptRoute = 'transcript-api (standalone Python captions)'
         if ($fallbackExit -eq 2) {
-            Write-Error "No English subtitles (youtube-transcript-api catalog confirmed). $fallbackDiag; primary route: $primaryDiag"
-            exit 2
+            Write-Warning "No English subtitles (youtube-transcript-api catalog confirmed). $fallbackDiag"
         }
         if ($fallbackExit -ne 0 -or -not (Test-Path -LiteralPath $fallbackPath)) {
-            Write-Error "Subtitle fetch FAILED on all routes - NOT no-subs. $primaryDiag; youtube-transcript-api exit ${fallbackExit}: $fallbackDiag"
-            exit 3
+            Write-Warning "Caption routes failed; trying whisper-audio."
+            try {
+                Get-AudioTranscript $fallbackPath
+                $transcriptRoute = 'whisper-audio (local speech recognition, not captions)'
+            } catch {
+                Write-Error "Transcript fetch FAILED on all routes. $primaryDiag; youtube-transcript-api exit ${fallbackExit}: $fallbackDiag; whisper-audio: $($_.Exception.Message)"
+                exit 3
+            }
         }
         $SubFile = Get-Item -LiteralPath $fallbackPath
-        $transcriptRoute = 'youtube-transcript-api (standalone Python captions)'
     }
 
-    # ── 4. Parse JSON3 (both routes share the existing renderer) ───────────────
+    # ── 4. Parse JSON3 (all routes share the existing renderer) ───────────────
 
     try {
         $json = Get-Content -Raw -Encoding UTF8 -LiteralPath $SubFile.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
@@ -561,6 +615,7 @@ $transcript
 
 } finally {
     # ── 7. Cleanup ────────────────────────────────────────────────────────────
+    Remove-Item "$SubFileBase.audio*" -Force -ErrorAction SilentlyContinue
     Remove-Item "$SubFileBase*.json3" -Force -ErrorAction SilentlyContinue
     Remove-Item $SavePayloadPath -Force -ErrorAction SilentlyContinue
 }

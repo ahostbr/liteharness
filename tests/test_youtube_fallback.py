@@ -1,6 +1,7 @@
 """Offline tests at the real PowerShell/Python script boundaries. No live services."""
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -77,6 +78,23 @@ function yt-dlp {
         'Title'; 'Channel'; 'fg3LR1UHI1c'; 'https://youtube.com/@channel'
         $global:LASTEXITCODE = 0; return
     }
+    if ($args -contains '--dump-single-json') {
+        $formats = '{"formats":[{"format_id":"dub","vcodec":"none","acodec":"aac","format_note":"English dubbed","protocol":"https","abr":999},{"format_id":"original-dash","vcodec":"none","acodec":"aac","format_note":"English original (default)","protocol":"https","abr":128},{"format_id":"original-hls","vcodec":"none","acodec":"aac","format_note":"English original (default)","protocol":"m3u8_native","abr":64}]}'
+        $formats = $formats | ConvertFrom-Json
+        if ($env:AUDIO_MODE -eq 'ambiguous') { $formats.formats | ForEach-Object { $_.format_note = 'dubbed' } }
+        if ($env:AUDIO_MODE -eq 'hls_only') { $formats.formats = @($formats.formats | Where-Object { $_.protocol -match 'm3u8' }) }
+        if ($env:AUDIO_MODE -eq 'no_audio') { $formats.formats = @() }
+        $formats | ConvertTo-Json -Depth 5 -Compress
+        $global:LASTEXITCODE = 0; return
+    }
+    if ($args -contains '-f' -and $args -contains '--no-playlist') {
+        if ($args -contains 'original-dash' -or $env:AUDIO_MODE -eq 'download_fail') {
+            Write-Error 'ERROR: audio HTTP Error 403: Forbidden'; $global:LASTEXITCODE = 1; return
+        }
+        $target = $args[([array]::IndexOf($args, '-o') + 1)]
+        [IO.File]::WriteAllText($target, 'mock audio')
+        $global:LASTEXITCODE = 0; return
+    }
     if ($args -contains '--write-auto-sub') {
         $base = $args[([array]::IndexOf($args, '-o') + 1)]
         if ($env:SUB_MODE -in @('ok', 'partial', 'invalid', 'empty')) {
@@ -96,9 +114,23 @@ function yt-dlp {
 }
 function ffmpeg {
     Add-Content -LiteralPath $env:CALL_LOG -Value 'ffmpeg'
+    if ($env:AUDIO_MODE -eq 'ffmpeg_fail') { $global:LASTEXITCODE = 1; 'invalid audio'; return }
     $target = $args[-1] -replace '%05d', '00001'
     [IO.File]::WriteAllText($target, 'mock frame')
     $global:LASTEXITCODE = 0
+}
+function Invoke-WebRequest {
+    Add-Content -LiteralPath $env:CALL_LOG -Value 'whisper-probe'
+    if ($env:AUDIO_MODE -eq 'down') { throw 'connection refused' }
+    if ($env:AUDIO_MODE -eq 'wrong_server') { return @{Content = 'unrelated server'} }
+    return @{Content = '<title>Whisper.cpp Server</title>'}
+}
+function curl.exe {
+    Add-Content -LiteralPath $env:CALL_LOG -Value ('curl ' + ($args -join ' '))
+    $global:LASTEXITCODE = 0
+    if ($env:AUDIO_MODE -eq 'empty') { '{"segments":[]}'; return }
+    if ($env:AUDIO_MODE -eq 'inference_fail') { $global:LASTEXITCODE = 22; 'HTTP 500'; return }
+    '{"segments":[{"start":2.5,"end":5.0,"text":"Audio transcript"}]}'
 }
 function python {
     Add-Content -LiteralPath $env:CALL_LOG -Value ('python ' + ($args -join ' '))
@@ -109,13 +141,13 @@ function python {
 exit $LASTEXITCODE
 ''', encoding="utf-8-sig")
 
-    def run(sub="fail", api="ok", media=False, frames=False, metadata_fail=False):
+    def run(sub="fail", api="ok", media=False, frames=False, metadata_fail=False, audio="down"):
         output.unlink(missing_ok=True)
         log.unlink(missing_ok=True)
         env = os.environ.copy()
         env.update(TEMP=str(sandbox), TMP=str(sandbox), APPDATA=str(sandbox / "appdata"),
                    PYTHONPATH=str(sandbox), PYTHONIOENCODING="utf-8", CAPTION_MODE=api,
-                   CALL_LOG=str(log), SUB_MODE=sub, META_FAIL="1" if metadata_fail else "0",
+                   AUDIO_MODE=audio, CALL_LOG=str(log), SUB_MODE=sub, META_FAIL="1" if metadata_fail else "0",
                    LITEYT_ARCHIVE_SCRIPT="", YT_DLP_JS_RUNTIME="node")
         if api == "missing":
             (package / "__init__.py").write_text(
@@ -129,7 +161,7 @@ exit $LASTEXITCODE
         if not frames:
             args.append("-NoFrames")
         result = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", env=env, timeout=30)
-        text = result.stdout + result.stderr
+        text = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
         markdown = output.read_text(encoding="utf-8") if output.exists() else ""
         calls = log.read_text(encoding="utf-8-sig") if log.exists() else ""
         return result.returncode, text, markdown, calls, sandbox
@@ -139,9 +171,10 @@ exit $LASTEXITCODE
 def test_primary_success_never_needs_optional_package(run_skill):
     code, text, md, calls, folder = run_skill(sub="ok", api="missing")
     assert code == 0, text
-    assert "**Transcript route:** yt-dlp (JSON3 subtitles)" in md
+    assert "**Transcript route:** captions (yt-dlp JSON3)" in md
     assert "**01:05** Primary caption" in md
     assert "Get-Transcript.py" not in calls
+    assert "whisper-probe" not in calls
     assert not list(folder.glob("yt-transcript-*.json3"))
 
 
@@ -150,10 +183,11 @@ def test_fallback_uses_shared_renderer_and_standalone_archive(run_skill, sub):
     code, text, md, calls, folder = run_skill(sub=sub)
     assert code == 0, text
     assert any(cause in text for cause in ("HTTP Error 429", "no subtitle file produced", "Subtitle data FAILED"))
-    assert "**Transcript route:** youtube-transcript-api (standalone Python captions)" in md
+    assert "**Transcript route:** transcript-api (standalone Python captions)" in md
     assert "**01:05** Hello café world's $value; & literal" in md
     assert "**01:01:01** Later" in md
     assert md.count("Hello café") == 1
+    assert "whisper-probe" not in calls
     assert "Primary caption" not in md
     assert calls.count("api-list") == 1
     assert not list(folder.glob("yt-transcript-*.json3"))
@@ -167,9 +201,11 @@ def test_fallback_uses_shared_renderer_and_standalone_archive(run_skill, sub):
 
 
 @pytest.mark.parametrize("sub", ["fail", "nofile"])
-def test_only_catalog_confirmed_no_english_is_exit2(run_skill, sub):
+def test_catalog_absence_still_attempts_audio(run_skill, sub):
     code, text, md, calls, folder = run_skill(sub=sub, api="no_english")
-    assert code == 2, text
+    assert code == 3, text
+    assert "whisper-probe" in calls
+    assert "needs LiteSuite" in text
     assert "catalog confirmed" in text
     assert "available languages: de" in text
     assert md == ""
@@ -184,7 +220,7 @@ def test_only_catalog_confirmed_no_english_is_exit2(run_skill, sub):
 ])
 def test_all_routes_failed_are_exit3_with_diagnostics(run_skill, api, diagnostic):
     code, text, md, calls, folder = run_skill(api=api)
-    text = ' '.join(text.split())  # Windows PowerShell wraps Write-Error to console width.
+    text = ' '.join(re.sub(r"(?m)^\s*\|\s?", "", text).split())  # Windows PowerShell wraps Write-Error to console width.
     assert code == 3, text
     assert "FAILED on all routes" in text
     assert "HTTP Error 429" in text
@@ -218,6 +254,7 @@ def test_metadata_failure_preserves_exit1_and_does_not_fetch(run_skill):
     assert "metadata unavailable" in text
     assert "--write-auto-sub" not in calls
     assert "Get-Transcript.py" not in calls
+    assert "whisper-probe" not in calls
 
 
 def test_video_failure_remains_best_effort_and_no_frames(run_skill):
@@ -239,3 +276,37 @@ def test_no_video_can_still_extract_existing_video_frames(run_skill):
     assert "**Video:** Skipped (-NoVideo)" in md
     assert "**Frames:** 1 frame(s)" in md
     assert "ffmpeg" in calls
+
+
+@pytest.mark.parametrize("api", ["fetch_error", "no_english"])
+def test_audio_uses_original_hls_after_direct_403(run_skill, api):
+    code, text, md, calls, folder = run_skill(api=api, audio="ok")
+    assert code == 0, text
+    assert "**Transcript route:** whisper-audio" in md
+    assert "**00:02** Audio transcript" in md
+    assert "-f original-dash" in calls and "-f original-hls" in calls
+    assert "-f dub" not in calls
+    assert calls.index("api-list") < calls.index("whisper-probe")
+    assert calls.index("-f original-dash") < calls.index("-f original-hls")
+    assert "response_format=verbose_json" in calls
+    assert not list(folder.glob("yt-transcript-*"))
+
+
+@pytest.mark.parametrize("audio", ["wrong_server", "download_fail", "inference_fail", "empty", "ambiguous", "no_audio", "ffmpeg_fail"])
+def test_audio_failures_never_claim_success(run_skill, audio):
+    code, text, md, calls, folder = run_skill(api="no_english", audio=audio)
+    assert code == 3, text
+    assert not md
+    assert "whisper-audio" in text
+    if audio == "wrong_server":
+        assert "--dump-single-json" not in calls
+        assert "curl " not in calls
+    assert not list(folder.glob("yt-transcript-*"))
+
+
+def test_original_hls_only_does_not_need_direct_format(run_skill):
+    code, text, md, calls, folder = run_skill(api="fetch_error", audio="hls_only")
+    assert code == 0, text
+    assert "**Transcript route:** whisper-audio" in md
+    assert "-f original-hls" in calls
+    assert "-f original-dash" not in calls
