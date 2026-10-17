@@ -1803,9 +1803,6 @@ def register_presence() -> None:
     except Exception as _idx_exc:  # noqa: BLE001
         print(f"[LITEHARNESS] project index unavailable ({_idx_exc!r})")
 
-    if not compacting:
-        _print_lore(agent_id)
-
     # Cognitive architecture — mechanical injection (RULING, the user 2026-08-07:
     # polymaths were not being instructed to read their prompts; discipline-
     # based delivery fails silently). Set by `liteharness spawn` when --name or
@@ -2242,9 +2239,6 @@ def register_presence() -> None:
     except Exception as exc:  # noqa: BLE001 — delivery must never kill SessionStart
         print(f"[LITEHARNESS] ⚠ TIER PREAMBLE DELIVERY FAILED ({exc!r}) — "
               f"you are operating without tier doctrine; report this upward.")
-
-    if compacting:
-        _print_lore(agent_id)
 
     # Spawn Brief: printed at the TOP of this hook's output (see the block above
     # the [LITEHARNESS] banner). It lived here at the bottom until 2026-08-07 —
@@ -3598,6 +3592,14 @@ def main() -> None:
             print("[paste-history] display unavailable; existing hook continues", file=sys.stderr)
 
     if action == "check":
+        # The lore rides the `check` hook, not `register`: a spawned seat's boot
+        # output from `register` (brief, index screen, architecture, banner) is
+        # ~30 KB, which Claude Code persists to a file and shows as a 2 KB preview,
+        # so anything printed late there is never seen. `check` prints nothing at
+        # SessionStart, so the lore arrives as its own small inline attachment.
+        # A subagent has no transcript_path and, like `register`, gets none.
+        if hook_input.get("hook_event_name") == "SessionStart" and hook_input.get("transcript_path"):
+            _print_lore(config.get_agent_id())
         check_inbox()
         update_heartbeat()
     elif action in ("register", "register-quiet") and not hook_input and not (
@@ -3620,6 +3622,8 @@ def main() -> None:
         if not transcript and not is_litecode:
             # Silent exit — sub-agent, don't pollute the agents directory
             return
+        if is_litecode:
+            _print_lore(config.get_agent_id())  # leads the output; the guard keeps it once if LiteCode also runs `check`
         register_presence()
     elif action == "register-quiet":
         # Register without printing identity block (for CLIs that ignore stdout)

@@ -11,6 +11,7 @@ Contract (Ryan: LiteHarness ships only the reader and an empty default):
 """
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -201,60 +202,60 @@ class SessionStartTests(LoreCase):
         self.addCleanup(patcher.stop)
         os.environ.pop(lore.LORE_ENV, None)
 
-    def test_boot_prints_it_after_the_project_index_and_before_the_banner(self) -> None:
-        repo = self.base / "repo"
-        (repo / ".git").mkdir(parents=True)
-        (repo / "AGENT_INDEX.md").write_text("# Agent index\n", encoding="utf-8")
-        out = self.register_in(repo)
-        self.assertLess(out.index("Agent index"), out.index(lore.HEADER))
-        self.assertLess(out.index(lore.HEADER), out.index("Inter-agent messaging active"))
-
-    def register_in(self, cwd: Path, **env: str) -> str:
+    def session_start(self, source: str = "startup", event: str = "SessionStart", transcript: bool = True) -> str:
+        """The stdout of `hooks check` for one hook event, run through the real dispatcher."""
+        payload = {"hook_event_name": event, "session_id": "agent-lore-1", "source": source}
+        if transcript:
+            payload["transcript_path"] = str(self.base / "t.jsonl")
         buf = io.StringIO()
-        full = {"LITEHARNESS_AGENT_ID": "agent-lore-1", "LITEHARNESS_CLI": "claude-code",
-                "LITEHARNESS_MODEL": "claude-opus", **env}
-        with mock.patch.dict(hooks.os.environ, full, clear=False), \
-                mock.patch.object(hooks.os, "getcwd", return_value=str(cwd)), redirect_stdout(buf):
-            hooks.register_presence()
+        with mock.patch.dict(hooks.os.environ, {"LITEHARNESS_AGENT_ID": "agent-lore-1"}, clear=False),                 mock.patch.object(sys, "argv", ["hooks", "check"]),                 mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),                 redirect_stdout(buf):
+            hooks.main()
         return buf.getvalue()
 
     def test_boot_prints_it(self) -> None:
-        out = self.register()
-        self.assertIn(f"{lore.HEADER}\n\n## THE ZERO\nProve your search can hit.", out)
+        out = self.session_start()
+        self.assertEqual(out, f"{lore.HEADER}\n\n## THE ZERO\nProve your search can hit.\n\n")
 
-    def test_compact_prints_it_after_the_tier_card(self) -> None:
-        out = self.register(LITEHARNESS_HOOK_SOURCE="compact")
-        self.assertIn("context was compacted", out)
-        self.assertIn(lore.HEADER, out)
-        self.assertLess(out.index("context was compacted"), out.index(lore.HEADER))
+    def test_compact_prints_it(self) -> None:
+        self.assertIn(lore.HEADER, self.session_start("compact"))
+
+    def test_resume_and_clear_print_it(self) -> None:
+        for source in ("resume", "clear"):
+            self.assertIn(lore.HEADER, self.session_start(source), source)
+
+    def test_register_no_longer_prints_it_so_it_cannot_land_below_the_fold(self) -> None:
+        for source in ("startup", "compact"):
+            out = self.register(LITEHARNESS_HOOK_SOURCE=source)
+            self.assertNotIn(lore.HEADER, out)
+
+    def test_only_session_start_with_a_transcript_prints_it(self) -> None:
+        self.assertNotIn(lore.HEADER, self.session_start(event="PostToolUse"))
+        self.assertNotIn(lore.HEADER, self.session_start(transcript=False))  # a subagent
 
     def test_missing_file_prints_nothing_at_all(self) -> None:
         self.lore_file.unlink()
         for source in ("startup", "compact"):
-            out = self.register(LITEHARNESS_HOOK_SOURCE=source)
-            self.assertNotIn(lore.HEADER, out)
-            self.assertNotIn("[... lore", out)
-            self.assertNotIn("lore unavailable", out)
+            self.assertEqual(self.session_start(source), "")
 
     def test_blank_file_prints_nothing_at_all(self) -> None:
         self.write("\n  \n")
-        self.assertNotIn(lore.HEADER, self.register())
+        self.assertEqual(self.session_start(), "")
 
     def test_the_two_concurrent_hooks_print_it_once(self) -> None:
-        first, second = self.register(), self.register()
+        first, second = self.session_start(), self.session_start()
         self.assertEqual(first.count(lore.HEADER), 1)
         self.assertEqual(second.count(lore.HEADER), 0)
 
     def test_boot_and_compact_are_separate_events(self) -> None:
-        self.assertEqual(self.register().count(lore.HEADER), 1)
-        self.assertEqual(self.register(LITEHARNESS_HOOK_SOURCE="compact").count(lore.HEADER), 1)
+        self.assertEqual(self.session_start().count(lore.HEADER), 1)
+        self.assertEqual(self.session_start("compact").count(lore.HEADER), 1)
 
     def test_a_later_event_of_the_same_kind_prints_again(self) -> None:
-        self.assertEqual(self.register(LITEHARNESS_HOOK_SOURCE="compact").count(lore.HEADER), 1)
+        self.assertEqual(self.session_start("compact").count(lore.HEADER), 1)
         marker = next((self.root / ".printed_once").iterdir())
         old = time.time() - 120
         os.utime(marker, (old, old))
-        self.assertEqual(self.register(LITEHARNESS_HOOK_SOURCE="compact").count(lore.HEADER), 1)
+        self.assertEqual(self.session_start("compact").count(lore.HEADER), 1)
 
     def test_exactly_one_of_many_racing_hooks_wins(self) -> None:
         wins: list[bool] = []
@@ -325,10 +326,96 @@ class SessionStartTests(LoreCase):
         self.assertEqual([p.name for p in (self.root / ".printed_once").iterdir()], ["one.key.1"])
 
     def test_a_lore_error_never_kills_session_start(self) -> None:
-        with mock.patch.object(lore, "lore_block", side_effect=RuntimeError("boom")):
-            out = self.register()
+        with mock.patch.object(lore, "lore_block", side_effect=RuntimeError("boom")), \
+                mock.patch.object(hooks, "check_inbox") as inbox:
+            out = self.session_start()
         self.assertIn("lore unavailable", out)
-        self.assertIn("Inter-agent messaging active", out)
+        inbox.assert_called_once()  # the inbox check still ran after the lore failed
+
+
+class HookDrivenSeatTests(LoreCase):
+    """Codex (codex_hooks session-start-register) and LiteCode (hooks register) have no SessionStart `check`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write("## THE ZERO\nProve your search can hit.\n")
+        patcher = mock.patch.dict(os.environ, {"LITEHARNESS_AGENT_ID": "agent-lore-1", "LITEHARNESS_HOOK_SOURCE": ""},
+                                  clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop(lore.LORE_ENV, None)
+
+    def codex(self, command: str = "session-start-register", register=None) -> tuple[int, str]:
+        from liteharness import codex_hooks
+        register = register or (lambda: print("[LITEHARNESS] registered"))
+        out = io.StringIO()
+        with mock.patch.object(hooks, "_read_hook_stdin", return_value={"session_id": "agent-lore-1"}), \
+                mock.patch.object(hooks, "_apply_hook_context"), \
+                mock.patch.object(hooks, "register_presence", register), \
+                mock.patch.object(codex_hooks, "ERROR_LOG_PATH", self.base / "codex_err.log"), \
+                redirect_stdout(out):
+            code = codex_hooks.main([command])
+        return code, out.getvalue()
+
+    def context(self, output: str) -> str:
+        return json.loads(output)["hookSpecificOutput"]["additionalContext"]
+
+    def test_codex_session_start_leads_with_the_lore_then_the_register_text(self) -> None:
+        code, out = self.codex()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.context(out), f"{lore.HEADER}\n\n## THE ZERO\nProve your search can hit.\n\n[LITEHARNESS] registered")
+
+    def test_codex_prints_it_once_per_event(self) -> None:
+        self.assertIn(lore.HEADER, self.context(self.codex()[1]))
+        self.assertEqual(self.context(self.codex()[1]), "[LITEHARNESS] registered")
+
+    def test_codex_without_a_lore_file_is_unchanged(self) -> None:
+        self.lore_file.unlink()
+        self.assertEqual(self.context(self.codex()[1]), "[LITEHARNESS] registered")
+
+    def test_codex_other_commands_get_no_lore(self) -> None:
+        code, out = self.codex("user-prompt-submit-memory-nudge", register=lambda: None)
+        self.assertNotIn(lore.HEADER, out)
+
+    def test_codex_register_failure_still_delivers_the_lore(self) -> None:
+        def boom() -> None:
+            raise RuntimeError("boom")
+        code, out = self.codex(register=boom)
+        payload = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertIn(lore.HEADER, payload["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("failed during session-start-register", payload["systemMessage"])
+
+    def litecode(self, **env: str) -> str:
+        payload = {"hook_event_name": "SessionStart", "session_id": "agent-lore-1", "source": "litecode"}
+        out = io.StringIO()
+        with mock.patch.dict(hooks.os.environ, {"LITEHARNESS_CLI": "litecode", **env}, clear=False), \
+                mock.patch.object(sys, "argv", ["hooks", "register"]), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(hooks, "register_presence", lambda: print("REGISTERED")), \
+                redirect_stdout(out):
+            hooks.main()
+        return out.getvalue()
+
+    def test_litecode_register_leads_with_the_lore(self) -> None:
+        out = self.litecode()
+        self.assertEqual(out, f"{lore.HEADER}\n\n## THE ZERO\nProve your search can hit.\n\nREGISTERED\n")
+
+    def test_litecode_prints_it_once_even_if_it_also_runs_check(self) -> None:
+        self.assertIn(lore.HEADER, self.litecode())
+        self.assertNotIn(lore.HEADER, self.litecode())
+
+    def test_a_claude_register_still_prints_none(self) -> None:
+        payload = {"hook_event_name": "SessionStart", "session_id": "agent-lore-1", "source": "startup",
+                   "transcript_path": str(self.base / "t.jsonl")}
+        out = io.StringIO()
+        with mock.patch.dict(hooks.os.environ, {"LITEHARNESS_CLI": "claude-code"}, clear=False), \
+                mock.patch.object(sys, "argv", ["hooks", "register"]), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(hooks, "register_presence", lambda: print("REGISTERED")), \
+                redirect_stdout(out):
+            hooks.main()
+        self.assertEqual(out.getvalue(), "REGISTERED\n")
 
 
 class CheckTests(LoreCase):

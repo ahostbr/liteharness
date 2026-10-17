@@ -45,6 +45,14 @@ def _capture_stdout(action_name: str) -> str:
     return buffer.getvalue().strip()
 
 
+def _capture_lore() -> str:
+    """The lore block (once per SessionStart event), to lead the context so no host preview cuts it."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        hooks._print_lore(config.get_agent_id())
+    return buffer.getvalue().strip()
+
+
 def _emit_payload(
     *,
     event_name: str,
@@ -92,16 +100,20 @@ def _run(command_name: str, event_name: str, action_name: str) -> int:
     if hook_input:
         hooks._apply_hook_context(hook_input)
 
+    # Claude seats get the lore from the `check` hook; Codex has no such hook wired.
+    lore_text = _capture_lore() if command_name == "session-start-register" else ""
     try:
         captured_output = _capture_stdout(action_name)
     except Exception as error:
         _log_error(command_name, error)
         _emit_payload(
             event_name=event_name,
+            additional_context=lore_text or None,
             system_message=f"LiteHarness Codex hook adapter failed during {command_name}: {error}",
         )
         return 0
 
+    captured_output = "\n\n".join(part for part in (lore_text, captured_output) if part)
     if captured_output:
         _emit_payload(event_name=event_name, additional_context=captured_output)
     return 0
