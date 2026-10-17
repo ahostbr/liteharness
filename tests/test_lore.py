@@ -91,6 +91,19 @@ class PathTests(LoreCase):
             env.pop(lore.LORE_ENV, None)
             self.assertEqual(lore.lore_path(), other)
 
+    def test_a_non_string_or_empty_config_value_falls_through_to_the_default(self) -> None:
+        for bad in (5, ["x"], {"a": 1}, None, ""):
+            config.save({"lore_file": bad})
+            with mock.patch.dict(os.environ, clear=False) as env:
+                env.pop(lore.LORE_ENV, None)
+                self.assertEqual(lore.lore_path(), self.lore_file, bad)
+
+    def test_a_config_that_is_not_an_object_falls_through_to_the_default(self) -> None:
+        config.CONFIG_PATH.write_text("[1, 2]", encoding="utf-8")
+        with mock.patch.dict(os.environ, clear=False) as env:
+            env.pop(lore.LORE_ENV, None)
+            self.assertEqual(lore.lore_path(), self.lore_file)
+
     def test_env_wins_over_config(self) -> None:
         config.save({"lore_file": str(self.base / "config.md")})
         with mock.patch.dict(os.environ, {lore.LORE_ENV: str(self.base / "env.md")}):

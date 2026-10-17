@@ -32,7 +32,9 @@ _SECTION = re.compile(r"^## ", re.MULTILINE)
 
 
 def lore_path() -> Path:
-    raw = os.environ.get(LORE_ENV) or config.load().get("lore_file") or ""
+    cfg = config.load()
+    configured = cfg.get("lore_file") if isinstance(cfg, dict) else None
+    raw = os.environ.get(LORE_ENV) or (configured if isinstance(configured, str) else "")
     return Path(raw).expanduser() if raw else config.get_root() / "lore.md"
 
 
