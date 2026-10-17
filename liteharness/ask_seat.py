@@ -12,6 +12,7 @@ seats are read from ~/.claude/projects; LiteTUI seats ONLY from the `.agents` la
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
@@ -19,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -223,7 +225,60 @@ def resolve_seat(target: str) -> dict:
                          + (f"; ask {successor} instead" if successor else ""))
     if cli._live_owner_pid(presence):
         raise AskRefused(f"live: message {entry['name']} by inbox instead")
+    if not is_claude(entry):
+        _refuse_owned_live(entry)
     return entry
+
+
+def _refuse_owned_live(entry: dict) -> None:
+    """Point-in-time preflight, not a lease held across the ask or an offline guarantee.
+
+    Presence is insufficient: inspect the folder-authoritative AgentSession byte/flock
+    and current PTYs, without creating, initializing or repairing anything in the store.
+    Missing lease still requires a complete PTY response; unknown always refuses.
+    """
+    from . import cli
+    from .agent_ownership import AGENT_LEASE_NAME
+    from .agent_store import AgentStore, StoreError, _unlinked, read_agent
+
+    root = litetui_root(entry["agent_id"])
+    try:
+        agent = read_agent(AgentStore(root).agent_directory(entry["name"]))
+        if agent.agent_id != entry["agent_id"]:
+            raise StoreError("Agent folder identity disagrees with the selected seat")
+        path = _unlinked(agent.directory / AGENT_LEASE_NAME)
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            pass  # A seat may have PTY ownership even without a persisted lease.
+        else:
+            try:
+                os.set_inheritable(fd, False)
+                try:
+                    if sys.platform == "win32":
+                        import msvcrt
+                        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise AskRefused(f"live: message {entry['name']} by inbox instead") from exc
+                    raise
+            finally:
+                os.close(fd)  # Also releases the probe lock, even on an empty file.
+    except (OSError, StoreError) as exc:
+        raise AskRefused(f"Cannot inspect owned session for {entry['name']}: {exc}") from exc
+    try:
+        rows = cli._bridge_request("GET", "/pty/list")
+    except (OSError, ValueError) as exc:
+        raise AskRefused(f"Cannot inspect current PTYs; ask-seat deferred: {exc}") from exc
+    if (not isinstance(rows, dict) or rows.get("error") or rows.get("ok") is False
+            or not isinstance(rows.get("sessions"), list)
+            or any(not isinstance(row, dict) for row in rows["sessions"])):
+        raise AskRefused("Cannot inspect current PTYs; ask-seat deferred")
+    if any(row.get("harnessAgentId") == agent.agent_id for row in rows["sessions"]):
+        raise AskRefused(f"live: message {entry['name']} by inbox instead")
 
 
 def is_claude(entry: dict) -> bool:
@@ -337,14 +392,16 @@ def _export_conversation(convo: Path, out: Path) -> None:
 
 
 def read_litetui(path: Path) -> list[Message]:
-    out = ask_dir() / "export" / f"{path.parent.name}.md"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.unlink(missing_ok=True)   # --export-output wants a NEW file
-    _export_conversation(path, out)
-    if not out.is_file():
-        raise AskRefused(f"litetui export wrote nothing for {path}")
-    markdown = out.read_text(encoding="utf-8", errors="replace")
-    out.unlink(missing_ok=True)
+    directory = ask_dir() / "export"
+    directory.mkdir(parents=True, exist_ok=True)
+    # Each invocation owns its directory and only its directory. The exporter
+    # requires a NEW output file; do not pre-create or unlink a shared filename.
+    with tempfile.TemporaryDirectory(prefix="ask-", dir=directory) as scratch:
+        out = Path(scratch) / "conversation.md"
+        _export_conversation(path, out)
+        if not out.is_file():
+            raise AskRefused(f"litetui export wrote nothing for {path}")
+        markdown = out.read_text(encoding="utf-8", errors="replace")
     messages: list[Message] = []
     # The export is "## You|Assistant|Tool" sections with no timestamps; messages are cited by number.
     for role, body in re.findall(r"^## (You|Assistant|Tool)\n\n(.*?)(?=^## (?:You|Assistant|Tool)\n|\Z)",
@@ -606,71 +663,32 @@ def wake_argv(entry: dict, question: str, asker: str | None, model: str | None) 
 
 
 class _WakeLock:
-    """One wake at a time per seat, refused (not awaited) when held.
+    """One kernel-owned wake per seat, nonblocking and automatically crash-released.
 
-    Locks are numbered generations, <agent_id>.lock.<n> in ~/.liteharness/ask-seat, each holding its
-    owner's pid. The newest one decides: live (its pid exists and is the process that wrote it, and it
-    is younger than any wake can run) refuses; otherwise the asker that creates generation n+1
-    exclusively wins. Nothing is deleted while contending, so a third asker cannot undo a rival's
-    claim (unlink-then-create let two askers through in 2 of 300 threaded trials, per the critic;
-    same pattern as hooks._first_to_print)."""
+    Reuse the established ownership primitive and a persistent inode: never unlink
+    or replace it. A contender delayed across any number of releases/reacquisitions
+    must still lock the same resource. PID/age eviction cannot prove exclusion.
+    """
     def __init__(self, entry: dict):
-        self.dir = ask_dir()
-        self.prefix = f"{entry['agent_id']}.lock."
+        from .agent_ownership import _KernelLease
+
+        self.path = ask_dir() / f"{entry['agent_id']}.lock"
         self.name = entry["name"]
-        self.path: Path | None = None
-
-    def _generations(self) -> list[int]:
-        return sorted(int(n[len(self.prefix):]) for n in os.listdir(self.dir)
-                      if n.startswith(self.prefix) and n[len(self.prefix):].isdigit())
-
-    def _live(self, path: Path) -> str | None:
-        """Who holds this lock, as text, or None when the holder is gone."""
-        try:
-            age = time.time() - path.stat().st_mtime
-            text = path.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            return None
-        except OSError:
-            return "unknown holder"
-        if age > WAKE_TIMEOUT_SECONDS + 60:
-            return None
-        if not text:
-            return f"holder not yet written, {age:.0f}s ago" if age < 10 else None
-        try:
-            import psutil
-            pid = int(text)
-            alive = psutil.pid_exists(pid) and psutil.Process(pid).create_time() <= path.stat().st_mtime + 5
-        except (ValueError, OSError, ImportError):
-            return "unreadable holder"
-        except Exception:   # psutil.Error: the process vanished between the two calls
-            alive = False
-        return f"pid {text}, {age:.0f}s ago" if alive else None
+        self.lease = _KernelLease(self.path)
 
     def __enter__(self):
-        self.dir.mkdir(parents=True, exist_ok=True)
-        gens = self._generations()
-        if gens:
-            newest = self.dir / f"{self.prefix}{gens[-1]}"
-            holder = self._live(newest)
-            if holder:
-                raise AskRefused(f"{self.name} is already being woken ({holder}; lock {newest}). "
-                                 "If that ask crashed, the lock clears itself once its pid is gone")
-        mine = self.dir / f"{self.prefix}{gens[-1] + 1 if gens else 0}"
+        from .agent_ownership import OwnershipError
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            fd = os.open(mine, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except (FileExistsError, PermissionError) as exc:   # a rival claimed this generation first
-            raise AskRefused(f"{self.name} is already being woken by another ask (lock {mine})") from exc
-        with os.fdopen(fd, "w") as handle:
-            handle.write(str(os.getpid()))
-        self.path = mine
-        for old in gens:   # retire the dead generations; contenders only ever read the newest
-            (self.dir / f"{self.prefix}{old}").unlink(missing_ok=True)
+            self.lease.acquire()
+        except OwnershipError as exc:
+            raise AskRefused(f"{self.name} is already being woken or its lock is inaccessible "
+                             f"(lock {self.path})") from exc
         return self
 
     def __exit__(self, *exc):
-        if self.path:
-            self.path.unlink(missing_ok=True)
+        self.lease.release()
 
 
 def _wake(entry: dict, path: Path, question: str, model: str | None, asker: str | None, yes: bool) -> Result:

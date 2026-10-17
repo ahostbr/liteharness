@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from types import ModuleType
 
 import pytest
 
@@ -26,6 +27,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "get_root", lambda: root)
     monkeypatch.setattr(ask_seat, "_claude_projects", lambda: projects)
     monkeypatch.setattr(cli, "_live_owner_pid", lambda presence: None)
+    monkeypatch.setattr(cli, "_bridge_request", lambda *a, **kw: {"sessions": []})
     monkeypatch.setattr(ask_seat.shutil, "which", lambda name: name)
     return root, projects
 
@@ -220,7 +222,14 @@ def test_convos_era_litetui_seat_is_refused_with_one_clear_line(env, tmp_path, m
         ask_seat.litetui_transcript(agent_names.resolve_name("Old"))
 
 
-def test_agents_layout_litetui_seat_is_read_through_the_venv_python_not_a_shim(env, tmp_path, monkeypatch):
+@pytest.fixture
+def no_litetui_exporter(monkeypatch):
+    # Control the optional import even when this runner has LiteTUI installed.
+    monkeypatch.setitem(sys.modules, "litetui.conversation_export", None)
+
+
+def test_agents_layout_litetui_seat_is_read_through_the_venv_python_not_a_shim(
+        env, tmp_path, monkeypatch, no_litetui_exporter):
     data_root, home = _agents_store(tmp_path, monkeypatch)
     venv_python = data_root / ".venv" / "Scripts" / "python.exe"
     venv_python.parent.mkdir(parents=True)
@@ -244,10 +253,197 @@ def test_agents_layout_litetui_seat_is_read_through_the_venv_python_not_a_shim(e
     assert not argv[0].lower().endswith((".cmd", ".bat")) and kwargs["cwd"] == str(data_root)
 
 
-def test_no_exporter_is_a_clear_refusal(env, tmp_path, monkeypatch):
+def test_no_exporter_is_a_clear_refusal(env, tmp_path, monkeypatch, no_litetui_exporter):
     data_root, home = _agents_store(tmp_path, monkeypatch)                 # no .venv under the root
     with pytest.raises(ask_seat.AskRefused, match="LiteTUI exporter unavailable.*no .venv"):
         ask_seat.read_litetui(home / "conversations" / CONVO / "convo.jsonl")
+
+
+def test_importable_litetui_exporter_runs_in_process(env, tmp_path, monkeypatch):
+    _, home = _agents_store(tmp_path, monkeypatch)
+    calls = []
+    module = ModuleType("litetui.conversation_export")
+
+    def export(convo, output):
+        assert not output.exists()  # exporter requires a NEW file
+        calls.append((convo, output))
+        output.write_text("## Assistant\n\nin-process answer\n", encoding="utf-8")
+    module.export = export
+    monkeypatch.setitem(sys.modules, "litetui", ModuleType("litetui"))
+    monkeypatch.setitem(sys.modules, "litetui.conversation_export", module)
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **kw: pytest.fail("in-process only"))
+    path = home / "conversations" / CONVO / "convo.jsonl"
+    assert [m.text for m in ask_seat.read_litetui(path)] == ["in-process answer"]
+    assert calls[0][0] == path and not calls[0][1].exists()
+
+
+@pytest.mark.parametrize("failure", ["partial", "missing", "read"])
+def test_export_resources_are_cleaned_on_every_failure(env, tmp_path, monkeypatch, failure):
+    root, _ = env
+    _, home = _agents_store(tmp_path, monkeypatch)
+    outputs = []
+
+    def export(convo, output):
+        assert not output.exists()
+        outputs.append(output)
+        if failure == "missing":
+            return
+        output.write_text("## Assistant\n\npartial\n", encoding="utf-8")
+        if failure == "partial":
+            raise ask_seat.AskRefused("fixture exporter failed after output")
+    monkeypatch.setattr(ask_seat, "_export_conversation", export)
+    original = type(home).read_text
+
+    def read(path, *a, **kw):
+        if outputs and path == outputs[0] and failure == "read":
+            raise PermissionError("fixture output unreadable")
+        return original(path, *a, **kw)
+    monkeypatch.setattr(type(home), "read_text", read)
+    with pytest.raises((ask_seat.AskRefused, PermissionError)):
+        ask_seat.read_litetui(home / "conversations" / CONVO / "convo.jsonl")
+    assert len(outputs) == 1 and not outputs[0].exists()
+    assert list((root / "ask-seat" / "export").iterdir()) == []
+
+
+@pytest.mark.parametrize("registry", ["missing", "stale"])
+@pytest.mark.parametrize("indexed", [False, True])
+def test_owned_session_refuses_read_with_missing_or_stale_registry(
+        env, tmp_path, monkeypatch, registry, indexed):
+    from liteharness.agent_ownership import AgentSession
+    from liteharness.agent_store import AgentStore
+    root, _ = env
+    data_root, home = _agents_store(tmp_path, monkeypatch)
+    if indexed:
+        agent_names.record_name("Newer", SEAT_ID, CONVO, None, backend="codex")
+    if registry == "stale":
+        _presence(root, SEAT_ID, session_pid=1, exited_at="2026-01-01", cli="litetui")
+    with AgentSession.acquire_existing(AgentStore(data_root), agent_id=SEAT_ID):
+        before = {p: (p.stat().st_size, p.stat().st_mtime_ns) for p in home.rglob("*") if p.is_file()}
+        for target in ("Newer", SEAT_ID):
+            with pytest.raises(ask_seat.AskRefused, match="live: message Newer by inbox instead"):
+                ask_seat.resolve_seat(target)
+        assert before == {p: (p.stat().st_size, p.stat().st_mtime_ns)
+                          for p in home.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("registry", ["missing", "stale"])
+def test_live_pty_refuses_even_without_an_owned_lease(env, tmp_path, monkeypatch, registry):
+    root, _ = env
+    _, home = _agents_store(tmp_path, monkeypatch)
+    if registry == "stale":
+        _presence(root, SEAT_ID, session_pid=1, exited_at="2026-01-01", cli="litetui")
+    calls = []
+
+    def ptys(method, route):
+        calls.append((method, route))
+        return {"sessions": [{"harnessAgentId": SEAT_ID}]}
+    monkeypatch.setattr(cli, "_bridge_request", ptys)
+    before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    with pytest.raises(ask_seat.AskRefused, match="live: message Newer by inbox instead"):
+        ask_seat.resolve_seat("Newer")
+    assert calls == [("GET", "/pty/list")]
+    assert before == {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("response", [None, {}, {"error": "down"}, {"ok": False, "sessions": []},
+                                       {"sessions": "bad"}, {"sessions": [None]}])
+def test_unknown_owned_pty_state_is_not_offline(env, tmp_path, monkeypatch, response):
+    _agents_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "_bridge_request", lambda *a, **kw: response)
+    with pytest.raises(ask_seat.AskRefused, match="Cannot inspect current PTYs"):
+        ask_seat.resolve_seat("Newer")
+
+
+@pytest.mark.parametrize("lease", ["missing", "empty", "released"])
+def test_offline_owned_liveness_probe_does_not_write(env, tmp_path, monkeypatch, lease):
+    from liteharness.agent_ownership import AGENT_LEASE_NAME, AgentSession
+    from liteharness.agent_store import AgentStore
+    data_root, home = _agents_store(tmp_path, monkeypatch)
+    if lease == "empty":
+        (home / AGENT_LEASE_NAME).touch()
+    elif lease == "released":
+        with AgentSession.acquire_existing(AgentStore(data_root), agent_id=SEAT_ID):
+            pass
+    before = {p: (p.read_bytes(), p.stat().st_size, p.stat().st_mtime_ns)
+              for p in home.rglob("*") if p.is_file()}
+    assert ask_seat.resolve_seat("Newer")["agent_id"] == SEAT_ID
+    assert before == {p: (p.read_bytes(), p.stat().st_size, p.stat().st_mtime_ns)
+                      for p in home.rglob("*") if p.is_file()}
+    # The probe released its handle; a real owner can immediately acquire.
+    with AgentSession.acquire_existing(AgentStore(data_root), agent_id=SEAT_ID):
+        pass
+
+
+def test_uninspectable_owned_lease_fails_closed(env, tmp_path, monkeypatch):
+    from pathlib import Path
+    from liteharness.agent_ownership import AGENT_LEASE_NAME
+    _, home = _agents_store(tmp_path, monkeypatch)
+    original = ask_seat.os.open
+
+    def denied(path, *a, **kw):
+        if Path(path) == home / AGENT_LEASE_NAME:
+            raise PermissionError("fixture inaccessible lease")
+        return original(path, *a, **kw)
+    monkeypatch.setattr(ask_seat.os, "open", denied)
+    with pytest.raises(ask_seat.AskRefused, match="Cannot inspect owned session"):
+        ask_seat.resolve_seat("Newer")
+
+
+def test_owned_probe_is_noncreating_noninheritable_and_closes_its_descriptor(env, tmp_path, monkeypatch):
+    from pathlib import Path
+    from liteharness.agent_ownership import AGENT_LEASE_NAME
+    _, home = _agents_store(tmp_path, monkeypatch)
+    lease = home / AGENT_LEASE_NAME
+    lease.touch()  # Empty existing lease must stay empty.
+    original_open, original_close = os.open, os.close
+    observed = []
+
+    def opened(path, flags, *a, **kw):
+        fd = original_open(path, flags, *a, **kw)
+        if Path(path) == lease:
+            assert not flags & (os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_RDWR)
+            observed.append(fd)
+        return fd
+
+    def closed(fd):
+        if fd in observed:
+            assert not os.get_inheritable(fd)
+        return original_close(fd)
+    monkeypatch.setattr(os, "open", opened)
+    monkeypatch.setattr(os, "close", closed)
+    assert ask_seat.resolve_seat("Newer")["agent_id"] == SEAT_ID
+    assert len(observed) == 1 and lease.read_bytes() == b""
+    with pytest.raises(OSError):
+        os.fstat(observed[0])
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_uninspectable_pty_request_fails_closed(env, tmp_path, monkeypatch, error):
+    _agents_store(tmp_path, monkeypatch)
+
+    def failed(*a, **kw):
+        raise error("fixture unavailable PTYs")
+    monkeypatch.setattr(cli, "_bridge_request", failed)
+    with pytest.raises(ask_seat.AskRefused, match="Cannot inspect current PTYs"):
+        ask_seat.resolve_seat("Newer")
+
+
+def test_in_process_exporter_error_removes_partial_output(env, tmp_path, monkeypatch):
+    _, home = _agents_store(tmp_path, monkeypatch)
+    module = ModuleType("litetui.conversation_export")
+    outputs = []
+
+    def export(convo, output):
+        outputs.append(output)
+        output.write_text("partial", encoding="utf-8")
+        raise ValueError("fixture exporter error")
+    module.export = export
+    monkeypatch.setitem(sys.modules, "litetui", ModuleType("litetui"))
+    monkeypatch.setitem(sys.modules, "litetui.conversation_export", module)
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **kw: pytest.fail("no subprocess"))
+    with pytest.raises(ask_seat.AskRefused, match="litetui export failed: fixture exporter error"):
+        ask_seat.read_litetui(home / "conversations" / CONVO / "convo.jsonl")
+    assert len(outputs) == 1 and not outputs[0].parent.exists()
 
 
 def test_excerpt_takes_the_hit_with_forty_messages_either_side_and_is_capped(env):
@@ -417,7 +613,7 @@ def test_wake_runs_in_the_seats_cwd_prints_context_and_mails_the_fork(env, tmp_p
     assert mail["msg_type"] == "ANSWER" and "Fork session: 77777777" in body and "wake" in body
     row = json.loads((root / "ask-seat" / "asks.jsonl").read_text().splitlines()[0])
     assert (row["mode"], row["fork"]) == ("wake", result.fork_id)
-    assert _locks(root) == []                                        # released
+    _assert_lock_released(root)                                        # released
 
 
 def test_wake_above_150k_refuses_without_yes_and_names_the_read_cost(env, tmp_path, monkeypatch):
@@ -441,83 +637,85 @@ def test_the_limit_itself_is_allowed(env, tmp_path, monkeypatch):
     assert ask_seat.ask("Mason", "q", wake=True).mode == "wake"
 
 
-def _locks(root):
-    return sorted(p.name for p in (root / "ask-seat").glob(f"{SEAT_ID}.lock.*"))
-
-
-def _dead_pid():
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
-    child.wait()
-    return child.pid
+def _assert_lock_released(root):
+    path = root / "ask-seat" / f"{SEAT_ID}.lock"
+    assert path.is_file()  # A persistent inode, not a presence marker.
+    inode = path.stat().st_ino
+    with ask_seat._WakeLock({"agent_id": SEAT_ID, "name": "Mason"}):
+        assert path.stat().st_ino == inode
+    assert path.stat().st_ino == inode
 
 
 def test_only_one_wake_at_a_time_per_seat(env, tmp_path, monkeypatch):
     root, projects = env
     _claude_seat(root, projects, cwd=tmp_path, context=1000)
-    held = root / "ask-seat" / f"{SEAT_ID}.lock.3"
-    held.parent.mkdir(parents=True)
-    held.write_text(str(os.getpid()))                                # a live holder: this very process
+    entry = ask_seat.resolve_seat("Mason")
     monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **k: pytest.fail("a locked seat must not wake"))
-    with pytest.raises(ask_seat.AskRefused, match=rf"Mason is already being woken \(pid {os.getpid()}, \d+s ago; lock .*lock\.3\)"):
-        ask_seat.ask("Mason", "q", wake=True)
-    assert held.exists()                                             # the other asker's lock is not ours to remove
+    with ask_seat._WakeLock(entry) as lock:
+        inode = lock.path.stat().st_ino
+        with pytest.raises(ask_seat.AskRefused, match="Mason is already being woken"):
+            ask_seat.ask("Mason", "q", wake=True)
+        assert lock.path.stat().st_ino == inode
+    _assert_lock_released(root)
 
 
-def test_a_lock_whose_pid_is_gone_is_taken_over_as_the_next_generation(env, tmp_path, monkeypatch):
+def test_an_unheld_persistent_lock_is_reused_without_pid_eviction(env, tmp_path, monkeypatch):
     root, projects = env
     _claude_seat(root, projects, cwd=tmp_path, context=1000)
-    stale = root / "ask-seat" / f"{SEAT_ID}.lock.3"
-    stale.parent.mkdir(parents=True)
-    stale.write_text(str(_dead_pid()))
-    seen = []
-    run = _wake_run()
-    monkeypatch.setattr(ask_seat.subprocess, "run", lambda argv, **k: seen.append(_locks(root)) or run(argv))
-    assert ask_seat.ask("Mason", "q", wake=True).mode == "wake"
-    assert seen == [[f"{SEAT_ID}.lock.4"]] and _locks(root) == []    # 4 while it ran; 3 retired; 4 released
-
-
-def test_a_lock_older_than_any_wake_is_stale_even_if_its_pid_exists(env, tmp_path, monkeypatch):
-    root, projects = env
-    _claude_seat(root, projects, cwd=tmp_path, context=1000)
-    old = root / "ask-seat" / f"{SEAT_ID}.lock.0"
-    old.parent.mkdir(parents=True)
-    old.write_text(str(os.getpid()))
-    aged = time.time() - ask_seat.WAKE_TIMEOUT_SECONDS - 120
-    os.utime(old, (aged, aged))
+    path = root / "ask-seat" / f"{SEAT_ID}.lock"
+    path.parent.mkdir(parents=True)
+    path.write_text("99999999")  # Persisted bytes do not grant ownership.
+    inode = path.stat().st_ino
     monkeypatch.setattr(ask_seat.subprocess, "run", _wake_run())
     assert ask_seat.ask("Mason", "q", wake=True).mode == "wake"
+    assert path.stat().st_ino == inode and path.read_text() == "99999999"
+    _assert_lock_released(root)
 
 
-def test_two_askers_racing_for_a_stale_lock_never_both_win(env, tmp_path):
+def test_age_never_evicts_a_live_kernel_holder(env, tmp_path, monkeypatch):
+    root, projects = env
+    _claude_seat(root, projects, cwd=tmp_path, context=1000)
+    entry = ask_seat.resolve_seat("Mason")
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **k: pytest.fail("must not evict holder"))
+    with ask_seat._WakeLock(entry) as lock:
+        aged = time.time() - ask_seat.WAKE_TIMEOUT_SECONDS - 120
+        os.utime(lock.path, (aged, aged))
+        with pytest.raises(ask_seat.AskRefused, match="already being woken"):
+            ask_seat.ask("Mason", "q", wake=True)
+    _assert_lock_released(root)
+
+
+def test_two_askers_racing_never_both_win(env, tmp_path):
     import threading
     root, projects = env
     _claude_seat(root, projects, cwd=tmp_path, context=1000)
     entry = ask_seat.resolve_seat("Mason")
-    directory = root / "ask-seat"
-    directory.mkdir(parents=True)
-    dead, double, none = _dead_pid(), 0, 0
     for _ in range(150):
-        for stale in directory.glob("*.lock.*"):
-            stale.unlink()
-        (directory / f"{SEAT_ID}.lock.0").write_text(str(dead))
-        barrier, won = threading.Barrier(2), []
+        barrier, won, errors = threading.Barrier(2), [], []
 
         def contend():
             lock = ask_seat._WakeLock(entry)
-            barrier.wait()
+            barrier.wait(timeout=10)
             try:
                 lock.__enter__()
             except ask_seat.AskRefused:
                 return
+            except BaseException as exc:
+                errors.append(exc)
+                return
             won.append(lock)
         threads = [threading.Thread(target=contend) for _ in range(2)]
-        [t.start() for t in threads]
-        [t.join() for t in threads]
-        double += len(won) > 1
-        none += len(won) == 0
-        for lock in won:
-            lock.__exit__()
-    assert (double, none) == (0, 0)                                  # exactly one winner, every trial
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        try:
+            assert not any(thread.is_alive() for thread in threads)
+            assert len(won) == 1 and errors == []
+        finally:
+            for lock in won:
+                lock.__exit__()
+    _assert_lock_released(root)
 
 
 def test_a_failed_wake_still_releases_its_lock(env, tmp_path, monkeypatch):
@@ -527,7 +725,7 @@ def test_a_failed_wake_still_releases_its_lock(env, tmp_path, monkeypatch):
                         lambda argv, **k: subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"boom"))
     with pytest.raises(ask_seat.AskRefused, match="the wake failed"):
         ask_seat.ask("Mason", "q", wake=True)
-    assert _locks(root) == []
+    _assert_lock_released(root)
 
 
 def test_a_claude_shim_is_refused_for_the_reader_and_the_wake(env, monkeypatch):
@@ -556,7 +754,8 @@ def test_wake_needs_the_original_cwd(env, monkeypatch):
         ask_seat.ask("Mason", "q", wake=True)
 
 
-def test_wake_on_a_litetui_seat_is_refused_and_reading_is_still_offered(env, monkeypatch, capsys):
+def test_wake_on_a_litetui_seat_is_refused_and_reading_is_still_offered(env, tmp_path, monkeypatch, capsys):
+    _agents_store(tmp_path, monkeypatch, name="Lite")
     agent_names.record_name("Lite", SEAT_ID, CONVO, None, backend="codex", model="gpt")
     monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **k: pytest.fail("refused before any process"))
     with pytest.raises(ask_seat.AskRefused, match="wake is Claude-only in v1; reading works"):
