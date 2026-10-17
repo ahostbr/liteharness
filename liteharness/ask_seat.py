@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -31,7 +32,7 @@ CHARS_PER_TOKEN = 4
 EXCERPT_CHAR_CAP = EXCERPT_TOKEN_CAP * CHARS_PER_TOKEN
 HANDOFF_CHAR_CAP = 16_000
 MESSAGE_CHAR_CAP = 2_000             # one message; tool results are the bulk of a transcript
-CONTEXT_MESSAGES = 40                # either side of each hit
+CONTEXT_MESSAGES = 40                # most that is taken either side of a hit
 MAX_HITS = 12
 ANSWER_TIMEOUT_SECONDS = 300
 WAKE_CONTEXT_LIMIT = 150_000         # above this a wake is refused without --yes (DESIGN.md 1.7)
@@ -40,9 +41,14 @@ TAIL_BYTES = 8 * 1024 * 1024         # where the seat's final assistant turn is 
 
 _UUID_SHAPE = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 _STOPWORDS = frozenset(
-    "the and for was were what why how did does with that this from have has had you your are not "
-    "who when where which about into out its can could would should there their them then than "
-    "seat ask asked decide decided".split())
+    "the and for was were what why how did does with that this these those from have has had you your are not "
+    "who when where which whom whose about into onto out its can could would should will might must there their "
+    "them then than they she him her his our ours also just like some any all been being get got gone went "
+    "going use used using need needed want wanted say said tell told ask asked see saw seen look looked "
+    "thing things stuff way ways time times really actually maybe please thanks still yet already ever never "
+    "always often much many few more most very only same such own other another again once here "
+    "change changed changes changing happen happened happening work worked working works done make made "
+    "does doing decide decided decision seat agent session conversation transcript project".split())
 
 INSTRUCTION = (
     "You are answering a question about a past AI coding session, using ONLY the transcript "
@@ -297,32 +303,58 @@ def find_handoff(name: str, messages: list[Message]) -> str:
         if summaries else ""
 
 
+def _weights(messages: list[Message], terms: list[str]) -> dict[str, float]:
+    """Rarity per question term: log(N / df), df = messages containing it. A term in every message weighs 0."""
+    lows = [m.text.lower() for m in messages]
+    weights = {}
+    for term in terms:
+        df = sum(term in low for low in lows)
+        if df and df < len(messages):
+            weights[term] = math.log(len(messages) / df)
+    return weights
+
+
 def build_excerpt(messages: list[Message], question: str, handoff: str = "") -> str:
-    """Hits for the question terms, +-CONTEXT_MESSAGES around each, capped at EXCERPT_CHAR_CAP."""
+    """The messages that carry the question's rarest terms, with context, capped at EXCERPT_CHAR_CAP.
+
+    Hits are ranked by the summed rarity of the terms they hold (ties go to the later message), so
+    "why was W changed?" finds W's message instead of a thousand that say "changed". The budget is
+    spent by trimming, never by skipping: every hit's own message goes in first, then the windows
+    grow outward one message at a time, hit by hit, until the cap."""
     handoff = handoff[:HANDOFF_CHAR_CAP]
     budget = EXCERPT_CHAR_CAP - len(handoff)
-    terms = _terms(question)
+    weights = _weights(messages, _terms(question))
     scored = []
     for message in messages:
         low = message.text.lower()
-        score = sum(term in low for term in terms)
+        score = sum(w for term, w in weights.items() if term in low)
         if score:
-            scored.append((-score, message.index))
+            scored.append((-score, -message.index))
+    hits = [-neg for _, neg in sorted(scored)[:MAX_HITS]]
+    costs: dict[int, int] = {}
     keep: set[int] = set()
     size = 0
-    for _, hit in sorted(scored)[:MAX_HITS]:
-        window = set(range(max(0, hit - CONTEXT_MESSAGES), min(len(messages), hit + CONTEXT_MESSAGES + 1)))
-        extra = sum(len(_render(messages[i])) + 1 for i in window - keep)
-        if size + extra <= budget:
-            keep |= window
-            size += extra
-    if not keep:   # no hit fits: the tail of the session is the best guess
-        for i in range(len(messages) - 1, -1, -1):
-            cost = len(_render(messages[i])) + 1
-            if size + cost > budget:
-                break
+
+    def take(i: int) -> None:
+        nonlocal size
+        if i in keep or not 0 <= i < len(messages):
+            return
+        cost = costs.setdefault(i, len(_render(messages[i])) + 1)
+        if size + cost <= budget:
             keep.add(i)
             size += cost
+
+    for hit in hits:
+        take(hit)
+    for radius in range(1, CONTEXT_MESSAGES + 1):
+        for hit in hits:
+            take(hit - radius)
+            take(hit + radius)
+    note = f"{len(hits)} best-matching messages and the context around them"
+    if not hits:   # nothing in the transcript matches: say so, so the reader can answer UNKNOWN
+        for i in range(len(messages) - 1, -1, -1):
+            take(i)
+        note = "NO MESSAGE MATCHES THE QUESTION'S TERMS; these are only the last messages"
     lines, previous = [], None
     for i in sorted(keep):
         if previous is not None and i != previous + 1:
@@ -330,7 +362,7 @@ def build_excerpt(messages: list[Message], question: str, handoff: str = "") -> 
         lines.append(_render(messages[i]))
         previous = i
     head = f"=== HANDOFF ===\n{handoff}\n\n" if handoff else ""
-    return f"{head}=== TRANSCRIPT ({len(keep)} of {len(messages)} messages) ===\n" + "\n".join(lines)
+    return f"{head}=== TRANSCRIPT ({len(keep)} of {len(messages)} messages: {note}) ===\n" + "\n".join(lines)
 
 
 # ---- answering -------------------------------------------------------------------------

@@ -418,3 +418,47 @@ def test_wake_on_a_litetui_seat_is_refused_and_reading_is_still_offered(env, mon
         ask_seat.ask("Lite", "q", wake=True)
     assert ask_seat.main(["Lite", "q", "--wake"]) == 1
     assert "reading works" in capsys.readouterr().err
+
+
+# ---- excerpt recall (critic finding 1 and 2) ----------------------------------------------
+
+def _generic_fixture(count=1200, target=700):
+    """Every message says the generic words; one message holds the rare term. Ties used to go to message 0."""
+    messages = [ask_seat.Message(i, "", "assistant",
+                                 f"We changed the work and it happened again in step {i}. " + "filler " * 40)
+                for i in range(count)]
+    messages[target] = ask_seat.Message(target, "", "assistant",
+                                        "The zorblax module was changed because of the race. " + "filler " * 40)
+    return messages
+
+
+@pytest.mark.parametrize("question", ["zorblax", "why was zorblax changed?",
+                                      "what happened with zorblax in this work?",
+                                      "why did we change the zorblax work that happened?"])
+def test_a_generic_word_question_still_finds_the_rare_term(question):
+    messages = _generic_fixture()
+    excerpt = ask_seat.build_excerpt(messages, question)
+    assert "[#700 " in excerpt and len(excerpt) <= ask_seat.EXCERPT_CHAR_CAP + 300
+
+
+def test_rarer_terms_outrank_more_terms():
+    messages = [ask_seat.Message(i, "", "user", "alpha beta gamma delta " + "x " * 10) for i in range(300)]
+    messages[250] = ask_seat.Message(250, "", "user", "only quokka here")
+    excerpt = ask_seat.build_excerpt(messages, "alpha beta gamma delta quokka")
+    assert "[#250 " in excerpt
+
+
+def test_every_hit_survives_when_the_windows_cannot_all_fit():
+    messages = [ask_seat.Message(i, "", "assistant", f"line {i} " + "y" * 1900) for i in range(400)]
+    messages[100] = ask_seat.Message(100, "", "assistant", "the quokka was renamed")
+    messages[300] = ask_seat.Message(300, "", "assistant", "the wombat was deleted")
+    excerpt = ask_seat.build_excerpt(messages, "what happened to the quokka and the wombat?")
+    assert "[#100 " in excerpt and "[#300 " in excerpt           # both hits, each trimmed to fit
+    assert "NO MESSAGE MATCHES" not in excerpt and len(excerpt) <= ask_seat.EXCERPT_CHAR_CAP + 300
+    assert "[#99 " in excerpt and "[#301 " in excerpt            # trimmed windows, not dropped ones
+
+
+def test_a_question_that_matches_nothing_says_so_instead_of_pretending():
+    messages = [ask_seat.Message(i, "", "user", f"line {i}") for i in range(30)]
+    excerpt = ask_seat.build_excerpt(messages, "quokka wombat")
+    assert "NO MESSAGE MATCHES THE QUESTION'S TERMS" in excerpt and "[#29 " in excerpt
