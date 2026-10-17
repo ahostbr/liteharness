@@ -3622,6 +3622,8 @@ def main() -> None:
         if not transcript and not is_litecode:
             # Silent exit — sub-agent, don't pollute the agents directory
             return
+        if is_litecode:
+            _print_lore(config.get_agent_id())  # leads the output; the guard keeps it once if LiteCode also runs `check`
         register_presence()
     elif action == "register-quiet":
         # Register without printing identity block (for CLIs that ignore stdout)
