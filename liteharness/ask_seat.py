@@ -79,19 +79,37 @@ def _claude_projects() -> Path:
     return Path.home() / ".claude" / "projects"
 
 
-def project_slug(cwd: str) -> str:
-    """Claude Code's project folder name: every non-alphanumeric character becomes `-`.
-
-    Checked 2026-10-17 against ~/.claude/projects: 241 of 242 folders match their
-    transcript's own `cwd`; the one miss is a drive root, which Claude lower-cases."""
-    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
-
-
 # ---- resolution and guards -------------------------------------------------------------
 
-def _successor_name(agent_id: str, presence: dict) -> str | None:
-    """The name of the later registration that took over this record's session_pid."""
-    pid, mine = presence.get("session_pid"), str(presence.get("registered_at") or "")
+def _registry_rows() -> list[dict]:
+    """Every Claude Code presence row: agents/ first, then retired-agents/ (what resume_seat._registry reads)."""
+    rows: dict[str, dict] = {}
+    for directory in ("agents", "retired-agents"):
+        for path in (config.get_root() / directory).glob("*.json"):
+            if path.stem in rows:
+                continue   # a current presence beats its retired copy
+            try:
+                row = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(row, dict) and row.get("agent_id") == path.stem and row.get("cli") == "claude-code":
+                rows[path.stem] = row
+    return list(rows.values())
+
+
+def _claude_entry(row: dict) -> dict:
+    return {"name": row.get("name") or row["agent_id"], "agent_id": row["agent_id"],
+            "convo_id": row["agent_id"],   # for a Claude seat the agent id IS the session id
+            "cwd": row.get("cwd"), "backend": "claude", "model": row.get("model")}
+
+
+def _registered(row: dict) -> str:
+    return str(row.get("registered_at") or "")
+
+
+def _successor(agent_id: str, presence: dict) -> str | None:
+    """Name (else id) of the later registration that took over this record's session_pid."""
+    pid, mine = presence.get("session_pid"), _registered(presence)
     for path in (config.get_root() / "agents").glob("*.json"):
         if path.stem == agent_id:
             continue
@@ -100,34 +118,51 @@ def _successor_name(agent_id: str, presence: dict) -> str | None:
         except (OSError, ValueError):
             continue
         if (isinstance(other, dict) and other.get("session_pid") == pid and not other.get("exited_at")
-                and str(other.get("registered_at") or "") > mine):
-            return agent_names.name_for_agent(path.stem)
+                and _registered(other) > mine):
+            return other.get("name") or path.stem
     return None
 
 
 def resolve_seat(target: str) -> dict:
-    """The names.json entry for a name or a raw agent id, or an AskRefused."""
+    """The seat to ask, as a names.json-shaped entry, or an AskRefused.
+
+    Claude seats come from the registry (agents/ then retired-agents/): of several rows sharing
+    a name the latest `registered_at` is the seat, and an older one asked for by id is refused.
+    LiteTUI seats come from names.json."""
     from . import cli, resume_seat
 
     target = (target or "").strip()
+    try:
+        named = agent_names.list_names()
+    except agent_names.IndexCorrupt as exc:
+        raise AskRefused(f"names index unreadable: {exc}") from exc
+    rows = _registry_rows()
+    row = entry = None
     if _UUID_SHAPE.match(target):
-        presence = resume_seat._registry(target)
-        if presence and cli._superseded_by_later_registration(target, presence):
-            successor = _successor_name(target, presence)
-            raise AskRefused(f"{target} is superseded by a later registration"
-                             + (f"; ask {successor} instead" if successor else
-                                " (the name index does not know its successor)"))
-        entry = next((e for e in agent_names.list_names() if e["agent_id"] == target), None)
-        if entry is None:
-            raise AskRefused(f"no named seat has agent id {target}; liteharness names --list")
+        row = next((r for r in rows if r["agent_id"] == target), None)
+        entry = next((e for e in named if e["agent_id"] == target), None)
+        if row is None and entry is None:
+            raise AskRefused(f"no seat has agent id {target}; liteharness names --list")
     else:
-        try:
-            entry = agent_names.resolve_name(target)
-        except agent_names.IndexCorrupt as exc:
-            raise AskRefused(f"names index unreadable: {exc}") from exc
-        if entry is None:
-            raise AskRefused(f"no agent named {target}; liteharness names --list")
-    if cli._live_owner_pid(resume_seat._registry(entry["agent_id"])):
+        entry = next((e for e in named if e["name"].casefold() == target.casefold()), None)
+        if entry is None or is_claude(entry):   # the registry, not names.json, owns Claude seats
+            same = [r for r in rows if str(r.get("name") or "").casefold() == target.casefold()]
+            row = max(same, key=_registered) if same else None
+            if row is None and entry is None:
+                raise AskRefused(f"no agent named {target}; liteharness names --list")
+    if row is not None:
+        latest = max((r for r in rows if r.get("name") and r["name"].casefold() == str(row.get("name")).casefold()),
+                     key=_registered, default=row)
+        if latest["agent_id"] != row["agent_id"]:
+            raise AskRefused(f"{row['agent_id']} is superseded by {latest['agent_id']} ({latest['name']}); "
+                             f"ask {latest['name']} instead")
+        entry = _claude_entry(row)
+    presence = resume_seat._registry(entry["agent_id"])
+    if presence and cli._superseded_by_later_registration(entry["agent_id"], presence):
+        successor = _successor(entry["agent_id"], presence)
+        raise AskRefused(f"{entry['name']} ({entry['agent_id']}) is superseded by a later registration"
+                         + (f"; ask {successor} instead" if successor else ""))
+    if cli._live_owner_pid(presence):
         raise AskRefused(f"live: message {entry['name']} by inbox instead")
     return entry
 
@@ -143,13 +178,10 @@ def claude_transcript(entry: dict) -> Path:
     if not _UUID_SHAPE.match(convo):
         raise AskRefused(f"{entry['name']} has no valid conversation id in the name index")
     projects = _claude_projects()
-    if entry.get("cwd"):
-        direct = projects / project_slug(entry["cwd"]) / f"{convo}.jsonl"
-        if direct.is_file():
-            return direct
-    found = list(projects.glob(f"*/{convo}.jsonl"))   # names.json rows can carry cwd None
+    found = sorted(projects.glob(f"*/{convo}.jsonl"))
     if len(found) != 1:
-        raise AskRefused(f"{entry['name']}: {len(found)} transcripts named {convo}.jsonl under {projects}")
+        raise AskRefused(f"{entry['name']}: {len(found)} transcripts named {convo}.jsonl under {projects}"
+                         + "".join(f"\n  {p}" for p in found))
     return found[0]
 
 

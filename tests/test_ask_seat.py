@@ -18,6 +18,7 @@ CWD = "C:\\Projects\\demo.app"
 def env(tmp_path, monkeypatch):
     root = tmp_path / "h"
     (root / "agents").mkdir(parents=True)
+    (root / "retired-agents").mkdir()
     projects = tmp_path / "claude-projects"
     projects.mkdir()
     monkeypatch.setattr(config, "get_root", lambda: root)
@@ -27,20 +28,23 @@ def env(tmp_path, monkeypatch):
     return root, projects
 
 
-def _claude_seat(root, projects, name="Mason", cwd=CWD, messages=None):
-    agent_names.record_name(name, SEAT_ID, CONVO, cwd, backend="claude", model="claude-opus-5-5")
-    folder = projects / (ask_seat.project_slug(cwd) if cwd else "other-folder")
+def _claude_seat(root, projects, name="Mason", agent_id=SEAT_ID, retired=False,
+                 registered_at="2026-10-01T10:00:00+00:00", messages=None, **fields):
+    """A Claude seat as the registry holds it: a presence row, and a transcript named by its agent id."""
+    _presence(root, agent_id, retired=retired, cli="claude-code", name=name, registered_at=registered_at,
+              model="claude-opus-5-5", **fields)
+    folder = projects / "some-project"
     folder.mkdir(parents=True, exist_ok=True)
     lines = []
     for i, (role, text) in enumerate(messages or [("user", "hello"), ("assistant", "hi")]):
-        lines.append(json.dumps({"type": role, "timestamp": f"2026-10-01T10:00:{i:02d}Z",
+        lines.append(json.dumps({"type": role, "timestamp": f"2026-10-01T10:00:{i:02d}Z", "cwd": CWD,
                                  "message": {"role": role, "content": text}}))
-    (folder / f"{CONVO}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (folder / f"{agent_id}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _presence(root, agent_id, **fields):
-    (root / "agents" / f"{agent_id}.json").write_text(
-        json.dumps({"agent_id": agent_id, **fields}), encoding="utf-8")
+def _presence(root, agent_id, retired=False, **fields):
+    folder = root / ("retired-agents" if retired else "agents")
+    (folder / f"{agent_id}.json").write_text(json.dumps({"agent_id": agent_id, **fields}), encoding="utf-8")
 
 
 class FakeRun:
@@ -55,61 +59,86 @@ class FakeRun:
         return subprocess.CompletedProcess(argv, 0, stdout=self.payload, stderr=b"")
 
 
-def test_project_slug_matches_claude_code_folder_names():
-    assert ask_seat.project_slug("C:\\Projects\\.scratch\\T0242") == "C--Projects--scratch-T0242"
-    assert ask_seat.project_slug("C:\\Projects\\liteharness-oss\\.worktrees\\T0583-AB") \
-        == "C--Projects-liteharness-oss--worktrees-T0583-AB"
-
-
-def test_unknown_name_is_refused(env):
+def test_unknown_name_and_unknown_id_are_refused(env):
     with pytest.raises(ask_seat.AskRefused, match="no agent named Nobody"):
         ask_seat.resolve_seat("Nobody")
+    with pytest.raises(ask_seat.AskRefused, match="no seat has agent id"):
+        ask_seat.resolve_seat(SEAT_ID)
 
 
-def test_name_resolves_case_insensitively(env):
+def test_claude_seat_resolves_through_the_registry_case_insensitively(env):
     root, projects = env
     _claude_seat(root, projects)
-    assert ask_seat.resolve_seat("mason")["agent_id"] == SEAT_ID
+    entry = ask_seat.resolve_seat("mason")
+    assert (entry["agent_id"], entry["convo_id"], entry["name"], entry["model"])         == (SEAT_ID, SEAT_ID, "Mason", "claude-opus-5-5")
+    assert ask_seat.resolve_seat(SEAT_ID)["name"] == "Mason"
+    assert ask_seat.claude_transcript(entry).name == f"{SEAT_ID}.jsonl"
 
 
-def test_live_seat_is_refused_by_name(env, monkeypatch):
+def test_a_retired_seat_resolves_from_retired_agents(env):
+    root, projects = env
+    _claude_seat(root, projects, retired=True, exited_at="2026-10-01T11:00:00+00:00")
+    assert ask_seat.resolve_seat("Mason")["agent_id"] == SEAT_ID
+
+
+def test_the_registry_beats_a_stale_names_json_claude_row(env):
     root, projects = env
     _claude_seat(root, projects)
-    _presence(root, SEAT_ID, session_pid=4242)
+    agent_names.record_name("Mason", "55555555-5555-4555-8555-555555555555", CONVO, None, backend="claude")
+    assert ask_seat.resolve_seat("Mason")["agent_id"] == SEAT_ID
+
+
+def test_of_several_rows_for_one_name_the_latest_registered_is_the_seat(env):
+    root, projects = env
+    newer = "66666666-6666-4666-8666-666666666666"
+    _claude_seat(root, projects, retired=True, registered_at="2026-09-01T10:00:00+00:00")
+    _claude_seat(root, projects, agent_id=newer, registered_at="2026-10-01T10:00:00+00:00")
+    assert ask_seat.resolve_seat("Mason")["agent_id"] == newer
+
+
+def test_an_older_row_asked_for_by_id_is_refused_naming_the_latest(env):
+    root, projects = env
+    newer = "66666666-6666-4666-8666-666666666666"
+    _claude_seat(root, projects, retired=True, registered_at="2026-09-01T10:00:00+00:00")
+    _claude_seat(root, projects, agent_id=newer, registered_at="2026-10-01T10:00:00+00:00")
+    with pytest.raises(ask_seat.AskRefused, match=rf"superseded by {newer} \(Mason\); ask Mason instead"):
+        ask_seat.resolve_seat(SEAT_ID)
+
+
+def test_live_seat_is_refused_by_name_and_by_id(env, monkeypatch):
+    root, projects = env
+    _claude_seat(root, projects, session_pid=4242)
     monkeypatch.setattr(cli, "_live_owner_pid", lambda presence: 4242)
-    with pytest.raises(ask_seat.AskRefused, match="live: message Mason by inbox instead"):
-        ask_seat.resolve_seat("Mason")
+    for target in ("Mason", SEAT_ID):
+        with pytest.raises(ask_seat.AskRefused, match="live: message Mason by inbox instead"):
+            ask_seat.resolve_seat(target)
 
 
-def test_superseded_raw_id_is_refused_naming_the_successor(env):
+def test_a_seat_whose_pid_a_later_registration_took_is_refused_naming_it(env):
     root, projects = env
     successor = "33333333-3333-4333-8333-333333333333"
-    agent_names.record_name("Mason", successor, CONVO, CWD, backend="claude")
-    _presence(root, SEAT_ID, session_pid=777, registered_at="2026-10-01T09:00:00+00:00")
-    _presence(root, successor, session_pid=777, registered_at="2026-10-01T10:00:00+00:00")
-    with pytest.raises(ask_seat.AskRefused, match="superseded.*ask Mason instead"):
-        ask_seat.resolve_seat(SEAT_ID)
+    _claude_seat(root, projects, session_pid=777)
+    _presence(root, successor, cli="claude-code", name="Mason-2", session_pid=777,
+              registered_at="2026-10-01T12:00:00+00:00")
+    for target in ("Mason", SEAT_ID):
+        with pytest.raises(ask_seat.AskRefused, match="superseded by a later registration; ask Mason-2 instead"):
+            ask_seat.resolve_seat(target)
 
 
-def test_superseded_raw_id_without_a_known_successor_still_refuses(env):
-    root, _ = env
-    other = "44444444-4444-4444-8444-444444444444"
-    _presence(root, SEAT_ID, session_pid=5, registered_at="2026-10-01T09:00:00+00:00")
-    _presence(root, other, session_pid=5, registered_at="2026-10-01T10:00:00+00:00")
-    with pytest.raises(ask_seat.AskRefused, match="does not know its successor"):
-        ask_seat.resolve_seat(SEAT_ID)
-
-
-def test_raw_id_unknown_to_the_name_index_is_refused(env):
-    with pytest.raises(ask_seat.AskRefused, match="no named seat has agent id"):
-        ask_seat.resolve_seat(SEAT_ID)
-
-
-def test_transcript_found_without_a_recorded_cwd(env):
+def test_transcript_is_found_by_session_id_and_ambiguity_is_refused_with_the_paths(env):
     root, projects = env
-    _claude_seat(root, projects, cwd=None)
-    entry = agent_names.resolve_name("Mason")
-    assert ask_seat.claude_transcript(entry).parent.name == "other-folder"
+    _claude_seat(root, projects)
+    entry = ask_seat.resolve_seat("Mason")
+    second = projects / "another-project"
+    second.mkdir()
+    (second / f"{SEAT_ID}.jsonl").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ask_seat.AskRefused, match="2 transcripts") as refused:
+        ask_seat.claude_transcript(entry)
+    assert "some-project" in str(refused.value) and "another-project" in str(refused.value)
+    (second / f"{SEAT_ID}.jsonl").unlink()
+    (projects / "some-project" / f"{SEAT_ID}.jsonl").unlink()
+    with pytest.raises(ask_seat.AskRefused, match="0 transcripts"):
+        ask_seat.claude_transcript(entry)
 
 
 def test_convos_era_litetui_seat_is_refused_with_one_clear_line(env, tmp_path, monkeypatch):
