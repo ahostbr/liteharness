@@ -6027,6 +6027,8 @@ def main() -> None:
         print("                                 Read-only inventory of legacy handoff files + owner resolution")
         print("  index --check --project ROOT   Check ROOT/AGENT_INDEX.md: exit 1 on a missing index, >12000 chars,")
         print("                                 or a dead [text](target) markdown link (fenced code blocks are skipped)")
+        print("  lore --check [--file PATH]     Check the lore file (default ~/.liteharness/lore.md, config lore_file,")
+        print("                                 env LITEHARNESS_LORE_FILE): exit 1 over 2400 chars or over 4 '## ' sections")
         print("  spawn [options]                Spawn a new Claude Code session")
         print("  litetui [--agent-id ID] <verb>  LiteTUI GUI JSONL control (litetui --help)")
         print("  fleet-check --backend B --model M --thinking-level T | --agent-id ID [--backend B] [--wait S] [--allow-silent]")
@@ -6631,6 +6633,16 @@ def main() -> None:
         parser.add_argument("--project", required=True, help="repo root holding AGENT_INDEX.md")
         args = parser.parse_args(sys.argv[2:])
         ok, report = project_index.check(args.project)
+        print("\n".join(report))
+        sys.exit(0 if ok else 1)
+    elif cmd == "lore":
+        import argparse
+        from . import lore
+        parser = argparse.ArgumentParser(prog="liteharness lore")
+        parser.add_argument("--check", action="store_true", required=True)
+        parser.add_argument("--file", help="lore file to check (default: the configured lore file)")
+        args = parser.parse_args(sys.argv[2:])
+        ok, report = lore.check(args.file)
         print("\n".join(report))
         sys.exit(0 if ok else 1)
     elif cmd == "discover":

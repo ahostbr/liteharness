@@ -1635,6 +1635,51 @@ def _adopt_pid_owner(agent_id: str) -> str:
     return agent_id
 
 
+def _first_to_print(key: str, window: float = 20.0) -> bool:
+    """True for exactly one of the concurrent SessionStart hooks that share this event.
+
+    Both SessionStart entries (settings.json and the plugin's hooks.json) run
+    `register` at the same moment, so a marker written AFTER printing (the
+    `.cog_printed` guard) loses the race: each hook printed the whole 68 KB block
+    on 2026-10-17. Markers are numbered generations, `<key>.<n>`: the newest one,
+    if younger than `window` seconds, means a sibling already printed; otherwise
+    the event is new and the one hook that creates `<key>.<n+1>` exclusively wins.
+    Nothing is renamed or deleted while contending, so no third contender can
+    undo a rival's claim (unlink-then-create and rename-then-create both let two
+    hooks through: 257/300 threaded trials for the first, per the critic).
+    """
+    folder = config.get_root() / ".printed_once"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        gens = sorted(int(n[len(key) + 1:]) for n in os.listdir(folder)
+                      if n.startswith(key + ".") and n[len(key) + 1:].isdigit())
+        if gens:
+            try:
+                if time.time() - (folder / f"{key}.{gens[-1]}").stat().st_mtime < window:
+                    return False
+            except FileNotFoundError:
+                return False  # a newer winner already retired it
+        os.close(os.open(folder / f"{key}.{gens[-1] + 1 if gens else 0}", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return False  # a rival claimed this generation first
+    except OSError:
+        return True  # when the guard itself fails, show the lore rather than lose it
+    for g in gens:
+        (folder / f"{key}.{g}").unlink(missing_ok=True)
+    return True
+
+
+def _print_lore(agent_id: str) -> None:
+    """The lore file, once per SessionStart event. Never kills SessionStart."""
+    try:
+        from . import lore as _lore
+        text = _lore.lore_block()
+        if text and _first_to_print(f"lore.{agent_id}.{os.environ.get('LITEHARNESS_HOOK_SOURCE') or 'startup'}"):
+            print(text)
+    except Exception as _lore_exc:  # noqa: BLE001
+        print(f"[LITEHARNESS] lore unavailable ({_lore_exc!r})")
+
+
 def register_presence() -> None:
     """
     Write a presence file and output agent identity block.
@@ -1757,6 +1802,9 @@ def register_presence() -> None:
             print(_index_text)
     except Exception as _idx_exc:  # noqa: BLE001
         print(f"[LITEHARNESS] project index unavailable ({_idx_exc!r})")
+
+    if not compacting:
+        _print_lore(agent_id)
 
     # Cognitive architecture — mechanical injection (RULING, the user 2026-08-07:
     # polymaths were not being instructed to read their prompts; discipline-
@@ -2194,6 +2242,9 @@ def register_presence() -> None:
     except Exception as exc:  # noqa: BLE001 — delivery must never kill SessionStart
         print(f"[LITEHARNESS] ⚠ TIER PREAMBLE DELIVERY FAILED ({exc!r}) — "
               f"you are operating without tier doctrine; report this upward.")
+
+    if compacting:
+        _print_lore(agent_id)
 
     # Spawn Brief: printed at the TOP of this hook's output (see the block above
     # the [LITEHARNESS] banner). It lived here at the bottom until 2026-08-07 —
