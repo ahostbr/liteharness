@@ -50,19 +50,20 @@ def lore_block(path: str | os.PathLike | None = None) -> str:
     text = _read(path)
     if not text:
         return ""
+    where = str(path).replace("\\", "/")
     notes: list[str] = []
     heads = [m.start() for m in _SECTION.finditer(text)]
     if len(heads) > MAX_SECTIONS:
         text = text[: heads[MAX_SECTIONS]].rstrip()
-        notes.append(f"[... lore {path}: {len(heads)} sections, only the first {MAX_SECTIONS} are injected]")
+        notes.append(f"[... lore {where}: {len(heads)} sections, only the first {MAX_SECTIONS} are injected]")
     if len(text) > LORE_CAP:
         size = len(text)
         kept = text[:LORE_CAP]
         if text[LORE_CAP] != "\n" and "\n" in kept:
             kept = kept[: kept.rindex("\n")]
         text = kept.rstrip()
-        notes.append(f"[... lore {path} truncated at {LORE_CAP} of {size} chars]")
-    return "\n".join([HEADER, text, *notes]) + "\n"
+        notes.append(f"[... lore {where} truncated at {LORE_CAP} of {size} chars]")
+    return "\n".join([HEADER, "", text, *notes]) + "\n"
 
 
 def check(path: str | os.PathLike | None = None) -> tuple[bool, list[str]]:

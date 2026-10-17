@@ -53,6 +53,10 @@ class LoreCase(unittest.TestCase):
         config.CONFIG_PATH = self.original_config_path
         self._tmp.cleanup()
 
+    @property
+    def where(self) -> str:
+        return str(self.lore_file).replace("\\", "/")
+
     def write(self, text: str, path: Path | None = None) -> Path:
         path = path or self.lore_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,7 +101,7 @@ class BlockTests(LoreCase):
     def test_header_then_the_file(self) -> None:
         self.write("## THE ZERO\nProve your search can hit.\n")
         block = lore.lore_block(self.lore_file)
-        self.assertEqual(block, f"{lore.HEADER}\n## THE ZERO\nProve your search can hit.\n")
+        self.assertEqual(block, f"{lore.HEADER}\n\n## THE ZERO\nProve your search can hit.\n")
 
     def test_missing_file_is_empty(self) -> None:
         self.assertEqual(lore.lore_block(self.lore_file), "")
@@ -115,14 +119,14 @@ class BlockTests(LoreCase):
         self.write("\n".join([line] * 40))  # 3,999 chars
         block = lore.lore_block(self.lore_file)
         body, note = block.rstrip("\n").rsplit("\n", 1)
-        kept = body.split("\n", 1)[1]
+        kept = body.split("\n", 2)[2]
         self.assertLessEqual(len(kept), lore.LORE_CAP)
         self.assertTrue(all(row == line for row in kept.split("\n")))  # no half line
-        self.assertEqual(note, f"[... lore {self.lore_file} truncated at 2400 of 3999 chars]")
+        self.assertEqual(note, f"[... lore {self.where} truncated at 2400 of 3999 chars]")
 
     def test_a_cut_landing_exactly_on_a_line_end_keeps_that_line(self) -> None:
         self.write("\n".join(["y" * 99] * 24 + ["z" * 99]))  # line 24 ends at char 2400
-        kept = lore.lore_block(self.lore_file).split("\n", 1)[1].split("\n[... lore")[0]
+        kept = lore.lore_block(self.lore_file).split("\n", 2)[2].split("\n[... lore")[0]
         self.assertEqual(kept.count("y"), 24 * 99)
         self.assertNotIn("z", kept)
 
@@ -132,7 +136,7 @@ class BlockTests(LoreCase):
         self.assertIn("Four stories.", block)
         self.assertIn("## STORY4", block)
         self.assertNotIn("STORY5", block)
-        self.assertTrue(block.endswith(f"[... lore {self.lore_file}: 6 sections, only the first 4 are injected]\n"))
+        self.assertTrue(block.endswith(f"[... lore {self.where}: 6 sections, only the first 4 are injected]\n"))
 
     def test_both_limits_cut_sections_first_then_the_cap(self) -> None:
         self.write("\n\n".join(f"## S{i}\n" + "\n".join(["w" * 99] * 8) for i in range(1, 7)))
@@ -176,7 +180,7 @@ class SessionStartTests(LoreCase):
 
     def test_boot_prints_it(self) -> None:
         out = self.register()
-        self.assertIn(f"{lore.HEADER}\n## THE ZERO\nProve your search can hit.", out)
+        self.assertIn(f"{lore.HEADER}\n\n## THE ZERO\nProve your search can hit.", out)
 
     def test_compact_prints_it_after_the_tier_card(self) -> None:
         out = self.register(LITEHARNESS_HOOK_SOURCE="compact")
