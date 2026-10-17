@@ -6032,6 +6032,9 @@ def main() -> None:
         print("  fleet-check --backend B --model M --thinking-level T | --agent-id ID [--backend B] [--wait S] [--allow-silent]")
         print("              [--expect-model M] [--expect-thinking T]")
         print("                                 Check a launch (or a live seat) against the fleet floor")
+        print("  ask-seat <Name|id> \"question\" [--model M] [--from ID]")
+        print("                                 Ask a past (not live) seat one question, answered from its saved")
+        print("                                 transcript; the answer is printed and mailed as an ANSWER")
         print("  sessions <cmd> [options]       Save/restore terminal agent sessions")
         # 🔴 TWO HELP TEXTS FOR ONE COMMAND. Keep them equal to register's own
         # usage line (search "Usage: liteharness register"), because they drift and
@@ -6605,6 +6608,9 @@ def main() -> None:
         cmd_spawn(**_parse_spawn_args(sys.argv[2:]))
     elif cmd == "names":
         cmd_names(sys.argv[2:])
+    elif cmd == "ask-seat":
+        from .ask_seat import main as ask_seat_main
+        sys.exit(ask_seat_main(sys.argv[2:]))
     elif cmd == "fleet-check":
         cmd_fleet_check(sys.argv[2:])
     elif cmd == "handoffs":
