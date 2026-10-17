@@ -452,11 +452,21 @@ def build_excerpt(messages: list[Message], question: str, handoff: str = "") -> 
 
 # ---- answering -------------------------------------------------------------------------
 
-def answer_argv(model: str) -> list[str]:
-    """The reader: no tools, no MCP servers, no hooks, nothing saved. The excerpt arrives on stdin."""
+def _claude_exe() -> str:
+    """The claude executable. A .cmd/.bat shim is refused: it runs through cmd.exe, where a question
+    containing `" & cmd & "` ran the injected command (the critic's control test, 2026-10-17)."""
     claude = shutil.which("claude")
     if not claude:
         raise AskRefused("claude CLI not found on PATH")
+    if claude.lower().endswith((".cmd", ".bat")):
+        raise AskRefused(f"claude resolves to a shell shim ({claude}), which runs through cmd.exe and "
+                         "could execute the question; put claude.exe first on PATH")
+    return claude
+
+
+def answer_argv(model: str) -> list[str]:
+    """The reader: no tools, no MCP servers, no hooks, nothing saved. The excerpt arrives on stdin."""
+    claude = _claude_exe()
     return [claude, "-p", "--model", model, "--tools", "", "--no-session-persistence",
             "--strict-mcp-config", "--settings", '{"disableAllHooks":true}', "--output-format", "json"]
 
@@ -528,6 +538,7 @@ def ask(target: str, question: str, *, model: str | None = None, asker: str | No
 
 def _read_prompt(entry: dict, messages: list[Message], question: str) -> str:
     excerpt = build_excerpt(messages, question, find_handoff(entry["name"], messages))
+    excerpt = excerpt.replace("</transcript_excerpt>", "<\\/transcript_excerpt>")   # it must not end the block early
     return f"{INSTRUCTION}\n\nQuestion: {question}\n\n<transcript_excerpt>\n{excerpt}\n</transcript_excerpt>\n"
 
 
@@ -583,9 +594,7 @@ def transcript_cwd(entry: dict, path: Path) -> Path:
 
 def wake_argv(entry: dict, question: str, asker: str | None, model: str | None) -> list[str]:
     """DESIGN.md 1.4: a forked, read-only, hook-less, MCP-less resume that answers once and exits."""
-    claude = shutil.which("claude")
-    if not claude:
-        raise AskRefused("claude CLI not found on PATH")
+    claude = _claude_exe()
     preamble = (f"You are being asked one question by {asker or 'another seat'}. "
                 "Answer from your own memory of this work. Do not act.")
     argv = [claude, "-p", f"{preamble}\n\n{question}", "--resume", entry["convo_id"], "--fork-session"]
@@ -597,28 +606,71 @@ def wake_argv(entry: dict, question: str, asker: str | None, model: str | None) 
 
 
 class _WakeLock:
-    """One wake at a time per seat: ~/.liteharness/ask-seat/<agent_id>.lock, refused (not awaited) when held."""
+    """One wake at a time per seat, refused (not awaited) when held.
+
+    Locks are numbered generations, <agent_id>.lock.<n> in ~/.liteharness/ask-seat, each holding its
+    owner's pid. The newest one decides: live (its pid exists and is the process that wrote it, and it
+    is younger than any wake can run) refuses; otherwise the asker that creates generation n+1
+    exclusively wins. Nothing is deleted while contending, so a third asker cannot undo a rival's
+    claim (unlink-then-create let two askers through in 2 of 300 threaded trials, per the critic;
+    same pattern as hooks._first_to_print)."""
     def __init__(self, entry: dict):
-        self.path = ask_dir() / f"{entry['agent_id']}.lock"
+        self.dir = ask_dir()
+        self.prefix = f"{entry['agent_id']}.lock."
         self.name = entry["name"]
+        self.path: Path | None = None
+
+    def _generations(self) -> list[int]:
+        return sorted(int(n[len(self.prefix):]) for n in os.listdir(self.dir)
+                      if n.startswith(self.prefix) and n[len(self.prefix):].isdigit())
+
+    def _live(self, path: Path) -> str | None:
+        """Who holds this lock, as text, or None when the holder is gone."""
+        try:
+            age = time.time() - path.stat().st_mtime
+            text = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return "unknown holder"
+        if age > WAKE_TIMEOUT_SECONDS + 60:
+            return None
+        if not text:
+            return f"holder not yet written, {age:.0f}s ago" if age < 10 else None
+        try:
+            import psutil
+            pid = int(text)
+            alive = psutil.pid_exists(pid) and psutil.Process(pid).create_time() <= path.stat().st_mtime + 5
+        except (ValueError, OSError, ImportError):
+            return "unreadable holder"
+        except Exception:   # psutil.Error: the process vanished between the two calls
+            alive = False
+        return f"pid {text}, {age:.0f}s ago" if alive else None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
-            try:
-                os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-                return self
-            except FileExistsError:
-                try:
-                    if time.time() - self.path.stat().st_mtime <= WAKE_TIMEOUT_SECONDS + 60:
-                        break
-                    self.path.unlink(missing_ok=True)   # older than any wake can run: a crashed asker
-                except OSError:
-                    break
-        raise AskRefused(f"{self.name} is already being woken by another ask ({self.path})")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        gens = self._generations()
+        if gens:
+            newest = self.dir / f"{self.prefix}{gens[-1]}"
+            holder = self._live(newest)
+            if holder:
+                raise AskRefused(f"{self.name} is already being woken ({holder}; lock {newest}). "
+                                 "If that ask crashed, the lock clears itself once its pid is gone")
+        mine = self.dir / f"{self.prefix}{gens[-1] + 1 if gens else 0}"
+        try:
+            fd = os.open(mine, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except (FileExistsError, PermissionError) as exc:   # a rival claimed this generation first
+            raise AskRefused(f"{self.name} is already being woken by another ask (lock {mine})") from exc
+        with os.fdopen(fd, "w") as handle:
+            handle.write(str(os.getpid()))
+        self.path = mine
+        for old in gens:   # retire the dead generations; contenders only ever read the newest
+            (self.dir / f"{self.prefix}{old}").unlink(missing_ok=True)
+        return self
 
     def __exit__(self, *exc):
-        self.path.unlink(missing_ok=True)
+        if self.path:
+            self.path.unlink(missing_ok=True)
 
 
 def _wake(entry: dict, path: Path, question: str, model: str | None, asker: str | None, yes: bool) -> Result:
