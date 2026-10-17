@@ -133,12 +133,56 @@ def _successor(agent_id: str, presence: dict) -> str | None:
     return None
 
 
+def litetui_root(value: str | None = None) -> Path:
+    """The LiteTUI data root, found the way resume does: the canonical resolver, then the LiteSuite bridge."""
+    from . import owned_launch, resume_seat
+    from .agent_store import StoreError
+
+    try:
+        return owned_launch.data_root()
+    except owned_launch.RootUnknown:
+        pass
+    except StoreError as exc:
+        raise AskRefused(f"LiteTUI data root unusable: {exc}") from exc
+    try:
+        root = resume_seat._bridge_data_root(value, tier=None, backend=None, model=None, thinking_level=None)
+    except (StoreError, ValueError, OSError) as exc:
+        raise AskRefused(f"LiteTUI data root unknown (the bridge refused: {exc})") from exc
+    if root is None:
+        raise AskRefused("LiteTUI data root unknown: set LITETUI_DATA_ROOT, or start LiteSuite so its bridge can name it")
+    return root
+
+
+def _store_entry(value: str) -> dict | None:
+    """An `.agents`-layout seat that names.json does not hold, read from the agent store itself.
+    Its conversation is the newest transcript in the agent's folder."""
+    from .agent_store import AgentStore, StoreError, TRANSCRIPT_NAME
+
+    store = AgentStore(litetui_root(value))
+    try:
+        found = next((a for a in store.list_agents()
+                      if a.agent_id == value or a.name.casefold() == value.casefold()), None)
+        convos = store.list_conversations(found) if found else []
+    except StoreError as exc:
+        raise AskRefused(f"LiteTUI agent store unreadable: {exc}") from exc
+    if found is None:
+        return None
+    convos = [d for d in convos if (d / TRANSCRIPT_NAME).is_file()]
+    if not convos:
+        raise AskRefused(f"{found.name} has no conversation transcript under {found.conversations_root}")
+    newest = max(convos, key=lambda d: (d / TRANSCRIPT_NAME).stat().st_mtime)
+    execution = found.settings.get("execution") or {}
+    return {"name": found.name, "agent_id": found.agent_id, "convo_id": newest.name, "cwd": None,
+            "backend": execution.get("backend"), "model": execution.get("model"),
+            "transcript": newest / TRANSCRIPT_NAME}
+
+
 def resolve_seat(target: str) -> dict:
     """The seat to ask, as a names.json-shaped entry, or an AskRefused.
 
     Claude seats come from the registry (agents/ then retired-agents/): of several rows sharing
     a name the latest `registered_at` is the seat, and an older one asked for by id is refused.
-    LiteTUI seats come from names.json."""
+    LiteTUI seats come from names.json, else from the `.agents` store itself."""
     from . import cli, resume_seat
 
     target = (target or "").strip()
@@ -151,15 +195,20 @@ def resolve_seat(target: str) -> dict:
     if _UUID_SHAPE.match(target):
         row = next((r for r in rows if r["agent_id"] == target), None)
         entry = next((e for e in named if e["agent_id"] == target), None)
-        if row is None and entry is None:
-            raise AskRefused(f"no seat has agent id {target}; liteharness names --list")
     else:
         entry = next((e for e in named if e["name"].casefold() == target.casefold()), None)
         if entry is None or is_claude(entry):   # the registry, not names.json, owns Claude seats
             same = [r for r in rows if str(r.get("name") or "").casefold() == target.casefold()]
             row = max(same, key=_registered) if same else None
-            if row is None and entry is None:
-                raise AskRefused(f"no agent named {target}; liteharness names --list")
+    if row is None and entry is None:
+        try:
+            entry = _store_entry(target)
+        except AskRefused as exc:
+            raise AskRefused(f"no seat matches {target} in the registry or names.json, and the LiteTUI "
+                             f".agents store could not be searched: {exc}") from exc
+        if entry is None:
+            raise AskRefused(f"no agent named {target}" if not _UUID_SHAPE.match(target)
+                             else f"no seat has agent id {target}")
     if row is not None:
         latest = max((r for r in rows if r.get("name") and r["name"].casefold() == str(row.get("name")).casefold()),
                      key=_registered, default=row)
@@ -196,18 +245,30 @@ def claude_transcript(entry: dict) -> Path:
 
 
 def litetui_transcript(entry: dict) -> Path:
-    from . import owned_launch
-    from .agent_store import AgentStore, StoreError, TRANSCRIPT_NAME
+    """The seat's transcript in the `.agents` layout: <root>/.agents/<Name>/conversations/<id>/convo.jsonl.
 
-    refusal = (f"ask-seat supports .agents-layout LiteTUI agents only; "
-               f"{entry['name']} is a .convos-era seat")
+    Goes straight to the agent's folder: AgentStore.locate_conversation re-lists every agent once per
+    agent (333 agents measured 2026-10-17: minutes), and the folder is named after the seat."""
+    from .agent_store import AgentStore, StoreError, TRANSCRIPT_NAME, read_agent, valid_id
+
+    if entry.get("transcript"):   # resolved from the store itself
+        return Path(entry["transcript"])
+    root = litetui_root(entry["agent_id"])
+    convo = str(entry.get("convo_id") or "")
     try:
-        directory = AgentStore(owned_launch.data_root()).locate_conversation(str(entry.get("convo_id") or ""))
+        store = AgentStore(root)
+        agent = read_agent(store.agent_directory(entry["name"]))
+        if agent.agent_id != entry["agent_id"]:
+            raise StoreError(f"the folder {entry['name']} belongs to agent {agent.agent_id}")
+        path = agent.conversations_root / valid_id(convo) / TRANSCRIPT_NAME
+        if not path.is_file():
+            raise StoreError(f"no {TRANSCRIPT_NAME} for conversation {convo}")
     except StoreError as exc:
-        raise AskRefused(f"{refusal} ({exc})") from exc
-    path = directory / TRANSCRIPT_NAME
-    if not path.is_file():
-        raise AskRefused(f"{refusal} (no {TRANSCRIPT_NAME} in {directory})")
+        if convo and (root / ".convos" / convo).exists():
+            raise AskRefused(f"ask-seat supports .agents-layout LiteTUI agents only; "
+                             f"{entry['name']} is a .convos-era seat") from exc
+        raise AskRefused(f"{entry['name']}: conversation {convo} is not in the .agents store under {root} "
+                         f"({exc})") from exc
     return path
 
 
@@ -247,17 +308,41 @@ def read_claude(path: Path) -> list[Message]:
     return messages
 
 
+_EXPORT_CODE = ("import sys; from pathlib import Path; from litetui.conversation_export import export; "
+                "export(Path(sys.argv[1]), Path(sys.argv[2]))")
+
+
+def _export_conversation(convo: Path, out: Path) -> None:
+    """LiteTUI's own exporter, called without the `litetui.cmd` shim (a shim goes through cmd.exe).
+
+    In-process when litetui is importable here, else through the python of the venv at the data root
+    (<root>/.agents/<Name>/conversations/<id>/convo.jsonl -> root is five parents up)."""
+    try:
+        from litetui.conversation_export import export
+    except ImportError:
+        root = convo.parents[4]
+        python = next((p for p in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python")
+                       if p.is_file()), None)
+        if python is None:
+            raise AskRefused(f"LiteTUI exporter unavailable: litetui is not importable here and {root} has no .venv")
+        done = subprocess.run([str(python), "-c", _EXPORT_CODE, str(convo), str(out)], cwd=str(root),
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=120, **_no_window())
+        if done.returncode:
+            raise AskRefused(f"litetui export failed ({done.returncode}): {done.stderr.strip()[-300:]}")
+        return
+    try:
+        export(convo, out)
+    except (OSError, ValueError) as exc:
+        raise AskRefused(f"litetui export failed: {exc}") from exc
+
+
 def read_litetui(path: Path) -> list[Message]:
-    executable = shutil.which("litetui")
-    if not executable:
-        raise AskRefused("LiteTUI CLI not found on PATH; it exports the conversation for reading")
     out = ask_dir() / "export" / f"{path.parent.name}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)   # --export-output wants a NEW file
-    result = subprocess.run([executable, "--export-conversation", str(path), "--export-output", str(out)],
-                            capture_output=True, text=True, timeout=120, **_no_window())
-    if result.returncode or not out.is_file():
-        raise AskRefused(f"litetui export failed ({result.returncode}): {result.stderr.strip()[:300]}")
+    _export_conversation(path, out)
+    if not out.is_file():
+        raise AskRefused(f"litetui export wrote nothing for {path}")
     markdown = out.read_text(encoding="utf-8", errors="replace")
     out.unlink(missing_ok=True)
     messages: list[Message] = []

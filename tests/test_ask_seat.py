@@ -65,11 +65,72 @@ class FakeRun:
         return subprocess.CompletedProcess(argv, 0, stdout=self.payload, stderr=b"")
 
 
-def test_unknown_name_and_unknown_id_are_refused(env):
+def test_unknown_name_and_unknown_id_are_refused(env, tmp_path, monkeypatch):
+    from liteharness import owned_launch
+    (tmp_path / "litetui" / ".agents").mkdir(parents=True)               # a data root that holds no such seat
+    monkeypatch.setattr(owned_launch, "data_root", lambda resolution=None: tmp_path / "litetui")
     with pytest.raises(ask_seat.AskRefused, match="no agent named Nobody"):
         ask_seat.resolve_seat("Nobody")
     with pytest.raises(ask_seat.AskRefused, match="no seat has agent id"):
         ask_seat.resolve_seat(SEAT_ID)
+
+
+def test_unknown_name_with_no_litetui_root_says_the_store_was_not_searched(env, monkeypatch):
+    from liteharness import owned_launch
+
+    def unknown(resolution=None):
+        raise owned_launch.RootUnknown("LiteTUI data root unknown; configure LITETUI_DATA_ROOT")
+    monkeypatch.setattr(owned_launch, "data_root", unknown)
+    with pytest.raises(ask_seat.AskRefused, match=r"no seat matches Nobody.*could not be searched.*data root unknown"):
+        ask_seat.resolve_seat("Nobody")
+
+
+def _agents_store(tmp_path, monkeypatch, name="Newer", agent_id=SEAT_ID, convo=CONVO):
+    """A LiteTUI data root in the `.agents` layout, with one agent and one conversation."""
+    from liteharness import owned_launch
+    data_root = tmp_path / "litetui"
+    home = data_root / ".agents" / name
+    (home / "conversations" / convo).mkdir(parents=True)
+    (home / "settings.json").write_text(json.dumps({
+        "schema_version": 1, "name": name, "agent_id": agent_id,
+        "execution": {"backend": "codex", "model": "gpt", "thinking_level": "high"}}), encoding="utf-8")
+    (home / "conversations" / convo / "convo.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(owned_launch, "data_root", lambda resolution=None: data_root)
+    return data_root, home
+
+
+def test_an_agents_seat_unknown_to_names_json_resolves_from_the_store_newest_conversation(env, tmp_path, monkeypatch):
+    data_root, home = _agents_store(tmp_path, monkeypatch)
+    newer = "88888888-8888-4888-8888-888888888888"
+    (home / "conversations" / newer).mkdir()
+    (home / "conversations" / newer / "convo.jsonl").write_text("{}\n", encoding="utf-8")
+    os.utime(home / "conversations" / CONVO / "convo.jsonl", (1, 1))      # the older one
+    for target in ("newer", SEAT_ID):
+        entry = ask_seat.resolve_seat(target)
+        assert (entry["name"], entry["agent_id"], entry["convo_id"], entry["backend"]) \
+            == ("Newer", SEAT_ID, newer, "codex")
+    assert ask_seat.litetui_transcript(entry) == home / "conversations" / newer / "convo.jsonl"
+
+
+def test_an_unknown_litetui_root_is_not_called_convos_era(env, monkeypatch):
+    from liteharness import owned_launch
+
+    def unknown(resolution=None):
+        raise owned_launch.RootUnknown("LiteTUI data root unknown; configure LITETUI_DATA_ROOT")
+    monkeypatch.setattr(owned_launch, "data_root", unknown)
+    with pytest.raises(ask_seat.AskRefused, match="LiteTUI data root unknown") as refused:
+        ask_seat.litetui_transcript({"name": "Old", "agent_id": SEAT_ID, "convo_id": CONVO})
+    assert ".convos-era" not in str(refused.value)
+
+
+def test_the_root_comes_from_the_bridge_when_the_resolver_has_none(env, tmp_path, monkeypatch):
+    from liteharness import owned_launch, resume_seat
+
+    def unknown(resolution=None):
+        raise owned_launch.RootUnknown("unknown")
+    monkeypatch.setattr(owned_launch, "data_root", unknown)
+    monkeypatch.setattr(resume_seat, "_bridge_data_root", lambda value, **kw: tmp_path / "from-bridge")
+    assert ask_seat.litetui_root("Newer") == tmp_path / "from-bridge"
 
 
 def test_claude_seat_resolves_through_the_registry_case_insensitively(env):
@@ -159,30 +220,34 @@ def test_convos_era_litetui_seat_is_refused_with_one_clear_line(env, tmp_path, m
         ask_seat.litetui_transcript(agent_names.resolve_name("Old"))
 
 
-def test_agents_layout_litetui_seat_is_read_through_the_exporter(env, tmp_path, monkeypatch):
-    from liteharness import owned_launch
-    data_root = tmp_path / "litetui"
-    home = data_root / ".agents" / "Newer"
-    (home / "conversations" / CONVO).mkdir(parents=True)
-    (home / "settings.json").write_text(json.dumps({
-        "schema_version": 1, "name": "Newer", "agent_id": SEAT_ID,
-        "execution": {"backend": "codex", "model": "gpt", "thinking_level": "high"}}), encoding="utf-8")
-    (home / "conversations" / CONVO / "convo.jsonl").write_text("{}\n", encoding="utf-8")
-    monkeypatch.setattr(owned_launch, "data_root", lambda resolution=None: data_root)
+def test_agents_layout_litetui_seat_is_read_through_the_venv_python_not_a_shim(env, tmp_path, monkeypatch):
+    data_root, home = _agents_store(tmp_path, monkeypatch)
+    venv_python = data_root / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("")
     agent_names.record_name("Newer", SEAT_ID, CONVO, None, backend="codex", model="gpt")
-    entry = agent_names.resolve_name("Newer")
-
-    path = ask_seat.litetui_transcript(entry)
+    path = ask_seat.litetui_transcript(agent_names.resolve_name("Newer"))
     assert path == home / "conversations" / CONVO / "convo.jsonl"
 
+    calls = []
+
     def export(argv, **kwargs):
-        assert argv[1:3] == ["--export-conversation", str(path)]
-        open(argv[4], "w", encoding="utf-8").write(
+        calls.append((argv, kwargs))
+        open(argv[-1], "w", encoding="utf-8").write(
             "# Conversation\n\n## You\n\n```\nwhy red?\n```\n\n## Assistant\n\n```\nbecause X\n```\n")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
     monkeypatch.setattr(ask_seat.subprocess, "run", export)
     messages = ask_seat.read_litetui(path)
     assert [(m.role, "because X" in m.text) for m in messages] == [("you", False), ("assistant", True)]
+    argv, kwargs = calls[0]
+    assert argv[0] == str(venv_python) and argv[1] == "-c" and argv[3:5] == [str(path), argv[-1]]
+    assert not argv[0].lower().endswith((".cmd", ".bat")) and kwargs["cwd"] == str(data_root)
+
+
+def test_no_exporter_is_a_clear_refusal(env, tmp_path, monkeypatch):
+    data_root, home = _agents_store(tmp_path, monkeypatch)                 # no .venv under the root
+    with pytest.raises(ask_seat.AskRefused, match="LiteTUI exporter unavailable.*no .venv"):
+        ask_seat.read_litetui(home / "conversations" / CONVO / "convo.jsonl")
 
 
 def test_excerpt_takes_the_hit_with_forty_messages_either_side_and_is_capped(env):
