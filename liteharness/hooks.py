@@ -1641,23 +1641,32 @@ def _first_to_print(key: str, window: float = 20.0) -> bool:
     Both SessionStart entries (settings.json and the plugin's hooks.json) run
     `register` at the same moment, so a marker written AFTER printing (the
     `.cog_printed` guard) loses the race: each hook printed the whole 68 KB block
-    on 2026-10-17. The marker is created exclusively BEFORE printing; one that is
-    older than `window` seconds belongs to an earlier event and is replaced.
+    on 2026-10-17. Markers are numbered generations, `<key>.<n>`: the newest one,
+    if younger than `window` seconds, means a sibling already printed; otherwise
+    the event is new and the one hook that creates `<key>.<n+1>` exclusively wins.
+    Nothing is renamed or deleted while contending, so no third contender can
+    undo a rival's claim (unlink-then-create and rename-then-create both let two
+    hooks through: 257/300 threaded trials for the first, per the critic).
     """
-    marker = config.get_root() / ".printed_once" / key
+    folder = config.get_root() / ".printed_once"
     try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
+        folder.mkdir(parents=True, exist_ok=True)
+        gens = sorted(int(n[len(key) + 1:]) for n in os.listdir(folder)
+                      if n.startswith(key + ".") and n[len(key) + 1:].isdigit())
+        if gens:
             try:
-                os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-                return True
-            except FileExistsError:
-                if time.time() - marker.stat().st_mtime < window:
+                if time.time() - (folder / f"{key}.{gens[-1]}").stat().st_mtime < window:
                     return False
-                marker.unlink()
+            except FileNotFoundError:
+                return False  # a newer winner already retired it
+        os.close(os.open(folder / f"{key}.{gens[-1] + 1 if gens else 0}", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return False  # a rival claimed this generation first
     except OSError:
         return True  # when the guard itself fails, show the lore rather than lose it
-    return False
+    for g in gens:
+        (folder / f"{key}.{g}").unlink(missing_ok=True)
+    return True
 
 
 def _print_lore(agent_id: str) -> None:

@@ -39,9 +39,13 @@ def lore_path() -> Path:
 
 
 def _read(path: Path) -> str:
-    """The stripped file text; '' when it is missing, unreadable or blank."""
+    """The stripped file text; '' when it is missing, unreadable or blank.
+
+    A BOM is dropped and CRLF is read as LF, so the cap and the section count see
+    the same characters whatever editor wrote the file.
+    """
     try:
-        return path.read_bytes().decode("utf-8", errors="replace").strip()
+        return path.read_bytes().decode("utf-8-sig", errors="replace").replace("\r\n", "\n").strip()
     except OSError:
         return ""
 
@@ -61,11 +65,11 @@ def lore_block(path: str | os.PathLike | None = None) -> str:
     if len(text) > LORE_CAP:
         size = len(text)
         kept = text[:LORE_CAP]
-        if text[LORE_CAP] != "\n" and "\n" in kept:
-            kept = kept[: kept.rindex("\n")]
+        if text[LORE_CAP] != "\n":  # the cut lands inside a line: keep whole lines only
+            kept = kept[: kept.rindex("\n")] if "\n" in kept else ""
         text = kept.rstrip()
         notes.append(f"[... lore {where} truncated at {LORE_CAP} of {size} chars]")
-    return "\n".join([HEADER, "", text, *notes]) + "\n"
+    return "\n".join([HEADER, "", *([text] if text else []), *notes]) + "\n"
 
 
 def check(path: str | os.PathLike | None = None) -> tuple[bool, list[str]]:

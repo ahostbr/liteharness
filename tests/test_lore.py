@@ -160,6 +160,33 @@ class BlockTests(LoreCase):
         self.assertIn("truncated at 2400 of", notes[1])
         self.assertNotIn("## S5", block)
 
+    def test_no_line_boundary_in_the_cap_keeps_no_partial_line(self) -> None:
+        self.write("a" * 3000)
+        self.assertEqual(
+            lore.lore_block(self.lore_file),
+            f"{lore.HEADER}\n\n[... lore {self.where} truncated at 2400 of 3000 chars]\n",
+        )
+
+    def test_one_line_of_exactly_the_cap_is_whole(self) -> None:
+        self.write("a" * 2400)
+        self.assertEqual(lore.lore_block(self.lore_file), f"{lore.HEADER}\n\n{'a' * 2400}\n")
+
+    def test_a_bom_is_dropped_and_does_not_hide_the_first_section(self) -> None:
+        self.lore_file.write_bytes(b"\xef\xbb\xbf" + SECTIONS.split("\n\n## STORY6")[0].encode("utf-8"))  # 5 sections
+        block = lore.lore_block(self.lore_file)
+        self.assertNotIn("﻿", block)
+        self.assertTrue(block.startswith(f"{lore.HEADER}\n\n## STORY1\n"))
+        self.assertIn("5 sections, only the first 4", block)
+        self.assertNotIn("STORY5", block)
+
+    def test_crlf_cuts_on_the_same_line_as_lf(self) -> None:
+        rows = [f"row {i:03d} " + "x" * 80 for i in range(40)]
+        self.write("\n".join(rows))
+        as_lf = lore.lore_block(self.lore_file)
+        self.write("\r\n".join(rows))
+        self.assertEqual(lore.lore_block(self.lore_file), as_lf)
+        self.assertNotIn("\r", as_lf)
+
     def test_triple_hash_is_not_a_section(self) -> None:
         self.write("## ONE\n" + "\n".join(f"### sub {i}" for i in range(10)))
         self.assertNotIn("only the first", lore.lore_block(self.lore_file))
@@ -243,6 +270,59 @@ class SessionStartTests(LoreCase):
         for t in threads:
             t.join()
         self.assertEqual(wins.count(True), 1)
+
+    def stale(self, key: str) -> Path:
+        marker = self.root / ".printed_once" / f"{key}.0"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(b"")
+        old = time.time() - 300
+        os.utime(marker, (old, old))
+        return marker
+
+    def test_exactly_one_of_many_threads_wins_a_stale_marker(self) -> None:
+        for trial in range(200):
+            key = f"stale.thread.{trial}"
+            self.stale(key)
+            wins: list[bool] = []
+            gate = threading.Barrier(8)
+
+            def race() -> None:
+                gate.wait()
+                wins.append(hooks._first_to_print(key))
+
+            threads = [threading.Thread(target=race) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(wins.count(True), 1, f"trial {trial}: {wins}")
+
+    def test_exactly_one_of_two_real_processes_wins_a_stale_marker(self) -> None:
+        script = (
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "from liteharness import config, hooks\n"
+            "config.HARNESS_ROOT = Path(sys.argv[1])\n"
+            "while time.time() < float(sys.argv[3]):\n"
+            "    pass\n"
+            "print(hooks._first_to_print(sys.argv[2]))\n"
+        )
+        for trial in range(10):
+            key = f"stale.proc.{trial}"
+            self.stale(key)
+            start = str(time.time() + 1.0)
+            procs = [
+                subprocess.Popen([sys.executable, "-c", script, str(self.root), key, start],
+                                 stdout=subprocess.PIPE, text=True)
+                for _ in range(2)
+            ]
+            wins = [p.communicate(timeout=60)[0].strip() for p in procs]
+            self.assertEqual(sorted(wins), ["False", "True"], f"trial {trial}: {wins}")
+
+    def test_a_retired_stale_marker_leaves_only_the_new_one_behind(self) -> None:
+        self.stale("one.key")
+        self.assertTrue(hooks._first_to_print("one.key"))
+        self.assertEqual([p.name for p in (self.root / ".printed_once").iterdir()], ["one.key.1"])
 
     def test_a_lore_error_never_kills_session_start(self) -> None:
         with mock.patch.object(lore, "lore_block", side_effect=RuntimeError("boom")):
