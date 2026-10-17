@@ -6032,7 +6032,7 @@ def main() -> None:
         print("  fleet-check --backend B --model M --thinking-level T | --agent-id ID [--backend B] [--wait S] [--allow-silent]")
         print("              [--expect-model M] [--expect-thinking T]")
         print("                                 Check a launch (or a live seat) against the fleet floor")
-        print("  ask-seat <Name|id> \"question\" [--model M] [--from ID]")
+        print("  ask-seat <Name|id> \"question\" [--wake [--yes]] [--model M] [--from ID]")
         print("                                 Ask a past (not live) seat one question, answered from its saved")
         print("                                 transcript; the answer is printed and mailed as an ANSWER")
         print("  sessions <cmd> [options]       Save/restore terminal agent sessions")

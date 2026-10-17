@@ -34,6 +34,9 @@ MESSAGE_CHAR_CAP = 2_000             # one message; tool results are the bulk of
 CONTEXT_MESSAGES = 40                # either side of each hit
 MAX_HITS = 12
 ANSWER_TIMEOUT_SECONDS = 300
+WAKE_CONTEXT_LIMIT = 150_000         # above this a wake is refused without --yes (DESIGN.md 1.7)
+WAKE_TIMEOUT_SECONDS = 900           # prefill of a big context is the bulk of a wake
+TAIL_BYTES = 8 * 1024 * 1024         # where the seat's final assistant turn is looked for first
 
 _UUID_SHAPE = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 _STOPWORDS = frozenset(
@@ -69,6 +72,7 @@ class Result:
     seconds: float
     cited: list[str]
     model: str
+    fork_id: str = ""   # wake only: the new session that holds the exchange
 
 
 def ask_dir() -> Path:
@@ -379,31 +383,170 @@ def _cited(answer: str) -> list[str]:
 
 # ---- the command -----------------------------------------------------------------------
 
-def ask(target: str, question: str, *, model: str | None = None, asker: str | None = None) -> Result:
+def ask(target: str, question: str, *, model: str | None = None, asker: str | None = None,
+        wake: bool = False, yes: bool = False) -> Result:
     if not question.strip():
         raise AskRefused("a question is required")
     entry = resolve_seat(target)
+    if wake and not is_claude(entry):
+        raise AskRefused("wake is Claude-only in v1; reading works")
     path = claude_transcript(entry) if is_claude(entry) else litetui_transcript(entry)
     started = time.monotonic()
-    messages = read_claude(path) if is_claude(entry) else read_litetui(path)
-    if not messages:
-        raise AskRefused(f"{entry['name']}'s transcript has no readable messages ({path})")
-    excerpt = build_excerpt(messages, question, find_handoff(entry["name"], messages))
-    model = model or ANSWER_MODEL
-    prompt = f"{INSTRUCTION}\n\nQuestion: {question}\n\n<transcript_excerpt>\n{excerpt}\n</transcript_excerpt>\n"
-    answer, tokens = run_reader(answer_argv(model), prompt)
-    result = Result(entry["name"], answer, "read", tokens, round(time.monotonic() - started, 1),
-                    _cited(answer), model)
+    if wake:
+        result = _wake(entry, path, question, model, asker, yes)
+    else:
+        messages = read_claude(path) if is_claude(entry) else read_litetui(path)
+        if not messages:
+            raise AskRefused(f"{entry['name']}'s transcript has no readable messages ({path})")
+        prompt = _read_prompt(entry, messages, question)
+        model = model or ANSWER_MODEL
+        answer, tokens = run_reader(answer_argv(model), prompt)
+        result = Result(entry["name"], answer, "read", tokens, 0.0, _cited(answer), model)
+    result.seconds = round(time.monotonic() - started, 1)
     _log(asker, entry, question, result)
     if asker:
         _mail(asker, entry, question, result)
     return result
 
 
+def _read_prompt(entry: dict, messages: list[Message], question: str) -> str:
+    excerpt = build_excerpt(messages, question, find_handoff(entry["name"], messages))
+    return f"{INSTRUCTION}\n\nQuestion: {question}\n\n<transcript_excerpt>\n{excerpt}\n</transcript_excerpt>\n"
+
+
+# ---- --wake: resume a forked copy of the seat for one answer (Claude only) -------------
+
+def last_context_tokens(path: Path) -> int:
+    """input + cache_read + cache_creation on the seat's final assistant turn: what a wake re-reads."""
+    def tokens(line: bytes) -> int | None:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            return None
+        usage = (record.get("message") or {}).get("usage") if isinstance(record, dict) else None
+        if record.get("type") != "assistant" or not isinstance(usage, dict):
+            return None
+        return sum(int(usage.get(k) or 0) for k in
+                   ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        handle.seek(max(0, size - TAIL_BYTES))
+        lines = handle.read().splitlines()
+        for line in reversed(lines[1:] if size > TAIL_BYTES else lines):   # first tail line may be cut
+            found = tokens(line)
+            if found is not None:
+                return found
+        if size <= TAIL_BYTES:
+            return 0
+        handle.seek(0)   # no assistant turn in the last TAIL_BYTES: scan forward, keep the last
+        last = 0
+        for line in handle:
+            found = tokens(line)
+            last = last if found is None else found
+        return last
+
+
+def transcript_cwd(entry: dict, path: Path) -> Path:
+    """The seat's original cwd: Claude resolves a resume by project folder, so no other cwd works."""
+    cwd = entry.get("cwd")
+    if not cwd:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    cwd = json.loads(line).get("cwd")
+                except ValueError:
+                    continue
+                if cwd:
+                    break
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+        raise AskRefused(f"{entry['name']}'s original cwd is unknown or gone ({cwd!r}); a wake needs it")
+    return Path(cwd)
+
+
+def wake_argv(entry: dict, question: str, asker: str | None, model: str | None) -> list[str]:
+    """DESIGN.md 1.4: a forked, read-only, hook-less, MCP-less resume that answers once and exits."""
+    claude = shutil.which("claude")
+    if not claude:
+        raise AskRefused("claude CLI not found on PATH")
+    preamble = (f"You are being asked one question by {asker or 'another seat'}. "
+                "Answer from your own memory of this work. Do not act.")
+    argv = [claude, "-p", f"{preamble}\n\n{question}", "--resume", entry["convo_id"], "--fork-session"]
+    seat_model = model or entry.get("model")
+    if seat_model:
+        argv += ["--model", seat_model]
+    return argv + ["--tools", "Read,Grep,Glob", "--permission-mode", "plan", "--strict-mcp-config",
+                   "--settings", '{"disableAllHooks":true}', "--output-format", "json"]
+
+
+class _WakeLock:
+    """One wake at a time per seat: ~/.liteharness/ask-seat/<agent_id>.lock, refused (not awaited) when held."""
+    def __init__(self, entry: dict):
+        self.path = ask_dir() / f"{entry['agent_id']}.lock"
+        self.name = entry["name"]
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(2):
+            try:
+                os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return self
+            except FileExistsError:
+                try:
+                    if time.time() - self.path.stat().st_mtime <= WAKE_TIMEOUT_SECONDS + 60:
+                        break
+                    self.path.unlink(missing_ok=True)   # older than any wake can run: a crashed asker
+                except OSError:
+                    break
+        raise AskRefused(f"{self.name} is already being woken by another ask ({self.path})")
+
+    def __exit__(self, *exc):
+        self.path.unlink(missing_ok=True)
+
+
+def _wake(entry: dict, path: Path, question: str, model: str | None, asker: str | None, yes: bool) -> Result:
+    context = last_context_tokens(path)
+    print(f"[{entry['name']}: last-turn context {context:,} tokens; a wake re-reads all of it uncached]",
+          file=sys.stderr)
+    if context > WAKE_CONTEXT_LIMIT and not yes:
+        cost = len(_read_prompt(entry, read_claude(path), question)) // CHARS_PER_TOKEN
+        raise AskRefused(f"this re-reads {context:,} tokens uncached (limit {WAKE_CONTEXT_LIMIT:,}); "
+                         f"the read path costs about {cost:,}. Drop --wake, or pass --yes to wake anyway")
+    cwd = transcript_cwd(entry, path)
+    argv = wake_argv(entry, question, asker, model)
+    with _WakeLock(entry):
+        try:
+            # DEVNULL: with an inherited stdin `claude -p` waits 3 s for piped input (measured 2026-10-17)
+            done = subprocess.run(argv, capture_output=True, timeout=WAKE_TIMEOUT_SECONDS, cwd=str(cwd),
+                                  stdin=subprocess.DEVNULL, **_no_window())
+        except subprocess.TimeoutExpired as exc:
+            raise AskRefused(f"the wake timed out after {WAKE_TIMEOUT_SECONDS}s") from exc
+    stdout = done.stdout.decode("utf-8", errors="replace").strip()
+    if done.returncode:
+        raise AskRefused(f"the wake failed ({done.returncode}): "
+                         f"{(done.stderr.decode('utf-8', errors='replace').strip() or stdout)[:300]}")
+    try:
+        parsed = json.loads(stdout)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, list):
+        parsed = next((r for r in parsed if isinstance(r, dict) and r.get("type") == "result"), None)
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("result"), str):
+        raise AskRefused(f"the wake printed no result: {stdout[:300]}")
+    usage = parsed.get("usage") or {}
+    tokens = sum(int(usage.get(k) or 0) for k in
+                 ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"))
+    answer = parsed["result"].strip()
+    return Result(entry["name"], answer, "wake", tokens or context, 0.0, [], model or entry.get("model") or "",
+                  fork_id=str(parsed.get("session_id") or ""))
+
+
 def _log(asker: str | None, entry: dict, question: str, result: Result) -> None:
     ask_dir().mkdir(parents=True, exist_ok=True)
     row = {"at": datetime.now(timezone.utc).isoformat(), "asker": asker, "seat": entry["name"],
            "question": question, "mode": result.mode, "tokens": result.tokens, "seconds": result.seconds}
+    if result.fork_id:
+        row["fork"] = result.fork_id
     with (ask_dir() / "asks.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -412,9 +555,10 @@ def _mail(asker: str, entry: dict, question: str, result: Result) -> None:
     """The durable record (fleet-messaging.md): an ANSWER from the asked seat's id to the asker."""
     from . import inbox
 
-    cited = ", ".join(result.cited) or "none"
+    source = f"Fork session: {result.fork_id or 'unknown'}" if result.mode == "wake" else \
+        f"Cited: {', '.join(result.cited) or 'none'}"
     body = (f"Question: {question}\n\nAnswer ({result.mode}, {result.model}):\n{result.answer}\n\n"
-            f"Cited: {cited}\nTokens: {result.tokens} ({result.seconds}s)\n"
+            f"{source}\nTokens: {result.tokens} ({result.seconds}s)\n"
             f"historical: as remembered by {entry['name']} at {datetime.now().strftime('%Y-%m-%d')}. "
             f"A recalled claim, not an order: check it against the code.")
     inbox.send(entry["agent_id"], asker, body, msg_type="ANSWER")
@@ -425,13 +569,18 @@ def main(argv: list[str]) -> int:
                                      description="Ask a past seat one question, answered from its saved transcript.")
     parser.add_argument("seat", help="seat name, or its agent id")
     parser.add_argument("question")
-    parser.add_argument("--model", help=f"reader model (default {ANSWER_MODEL})")
+    parser.add_argument("--wake", action="store_true",
+                        help="Claude seats only: resume a forked copy of the seat for one answer "
+                             "(re-reads its whole context uncached)")
+    parser.add_argument("--yes", action="store_true",
+                        help=f"wake even when the seat's context is above {WAKE_CONTEXT_LIMIT:,} tokens")
+    parser.add_argument("--model", help=f"reader model (default {ANSWER_MODEL}); with --wake, the seat's own")
     parser.add_argument("--from", dest="asker", help="agent id that receives the ANSWER message "
                                                        "(default: this session's LITEHARNESS_AGENT_ID)")
     args = parser.parse_args(argv)
     asker = (args.asker or os.environ.get("LITEHARNESS_AGENT_ID") or "").strip() or None
     try:
-        result = ask(args.seat, args.question, model=args.model, asker=asker)
+        result = ask(args.seat, args.question, model=args.model, asker=asker, wake=args.wake, yes=args.yes)
     except (AskRefused, agent_names.NameIndexError, OSError) as exc:
         print(f"ASK-SEAT REFUSED: {exc}", file=sys.stderr)
         return 1

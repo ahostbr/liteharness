@@ -1,8 +1,10 @@
 """T0583-A: `liteharness ask-seat`, the read path and its guards. No usage is spent: the reader
 subprocess is faked, and the real ~/.liteharness and ~/.claude are never touched."""
 import json
+import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -29,7 +31,7 @@ def env(tmp_path, monkeypatch):
 
 
 def _claude_seat(root, projects, name="Mason", agent_id=SEAT_ID, retired=False,
-                 registered_at="2026-10-01T10:00:00+00:00", messages=None, **fields):
+                 registered_at="2026-10-01T10:00:00+00:00", messages=None, cwd=CWD, context=0, **fields):
     """A Claude seat as the registry holds it: a presence row, and a transcript named by its agent id."""
     _presence(root, agent_id, retired=retired, cli="claude-code", name=name, registered_at=registered_at,
               model="claude-opus-5-5", **fields)
@@ -37,8 +39,12 @@ def _claude_seat(root, projects, name="Mason", agent_id=SEAT_ID, retired=False,
     folder.mkdir(parents=True, exist_ok=True)
     lines = []
     for i, (role, text) in enumerate(messages or [("user", "hello"), ("assistant", "hi")]):
-        lines.append(json.dumps({"type": role, "timestamp": f"2026-10-01T10:00:{i:02d}Z", "cwd": CWD,
-                                 "message": {"role": role, "content": text}}))
+        message = {"role": role, "content": text}
+        if role == "assistant" and context:
+            message["usage"] = {"input_tokens": 10, "cache_read_input_tokens": context - 15,
+                                "cache_creation_input_tokens": 5, "output_tokens": 99}
+        lines.append(json.dumps({"type": role, "timestamp": f"2026-10-01T10:00:{i:02d}Z", "cwd": str(cwd),
+                                 "message": message}))
     (folder / f"{agent_id}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -266,7 +272,7 @@ def test_reader_failure_is_a_refusal_not_a_traceback(env, monkeypatch, capsys):
 
 
 def test_unknown_flag_and_missing_question_are_usage_errors(env):
-    for argv in (["Mason", "q", "--wake"], ["Mason"]):
+    for argv in (["Mason", "q", "--sleep"], ["Mason"]):
         with pytest.raises(SystemExit) as exc:
             ask_seat.main(argv)
         assert exc.value.code == 2
@@ -279,3 +285,136 @@ def test_cli_dispatches_ask_seat(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == 0 and seen == [["Mason", "why?"]]
+
+
+# ---- T0583-B: --wake ----------------------------------------------------------------------
+
+def _wake_payload(result="I remember: X.", fork="77777777-7777-4777-8777-777777777777"):
+    return {"type": "result", "result": result, "session_id": fork,
+            "usage": {"input_tokens": 5, "cache_read_input_tokens": 100_000, "cache_creation_input_tokens": 20,
+                      "output_tokens": 30}}
+
+
+def _wake_run(payload=None):
+    body = json.dumps(payload or _wake_payload()).encode()
+    return lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout=body, stderr=b"")
+
+
+def test_wake_command_is_the_design_command(env):
+    root, projects = env
+    _claude_seat(root, projects)
+    entry = ask_seat.resolve_seat("Mason")
+    argv = ask_seat.wake_argv(entry, "why X?", ASKER, None)
+    assert argv[1] == "-p" and argv[2].endswith("why X?") and "Do not act." in argv[2]
+    assert argv[3:6] == ["--resume", SEAT_ID, "--fork-session"]
+    assert argv[argv.index("--model") + 1] == "claude-opus-5-5"          # the seat's own model
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--strict-mcp-config" in argv
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": True}
+    assert argv[argv.index("--output-format") + 1] == "json"
+    override = ask_seat.wake_argv(entry, "q", None, "claude-haiku-4-5")
+    assert override[override.index("--model") + 1] == "claude-haiku-4-5"
+
+
+def test_last_context_is_the_final_assistant_turns_input_plus_both_caches(tmp_path, monkeypatch):
+    path = tmp_path / "t.jsonl"
+
+    def turn(context):
+        return json.dumps({"type": "assistant", "message": {"usage": {
+            "input_tokens": 1, "cache_read_input_tokens": context, "cache_creation_input_tokens": 2,
+            "output_tokens": 500}}})
+    user = json.dumps({"type": "user", "message": {}})
+    path.write_text("\n".join([turn(1000), user, turn(222_000), user]) + "\n", encoding="utf-8")
+    assert ask_seat.last_context_tokens(path) == 222_003            # output tokens are not context
+    monkeypatch.setattr(ask_seat, "TAIL_BYTES", 40)                 # last turn is outside the tail: scan forward
+    assert ask_seat.last_context_tokens(path) == 222_003
+    path.write_text("{}\n", encoding="utf-8")
+    assert ask_seat.last_context_tokens(path) == 0
+
+
+def test_wake_runs_in_the_seats_cwd_prints_context_and_mails_the_fork(env, tmp_path, monkeypatch, capsys):
+    root, projects = env
+    _claude_seat(root, projects, cwd=tmp_path, context=90_000)
+    calls = []
+    run = _wake_run()
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda argv, **k: calls.append((argv, k)) or run(argv))
+    sent = []
+    monkeypatch.setattr(inbox, "send", lambda *a, **k: sent.append((a, k)) or "m")
+
+    result = ask_seat.ask("Mason", "why X?", asker=ASKER, wake=True)
+
+    argv, kwargs = calls[0]
+    assert "--fork-session" in argv and "--resume" in argv and kwargs["cwd"] == str(tmp_path)
+    assert result.mode == "wake" and result.fork_id.startswith("77777777") and result.tokens == 100_055
+    assert "last-turn context 90,000 tokens" in capsys.readouterr().err
+    (_, _, body), mail = sent[0][0], sent[0][1]
+    assert mail["msg_type"] == "ANSWER" and "Fork session: 77777777" in body and "wake" in body
+    row = json.loads((root / "ask-seat" / "asks.jsonl").read_text().splitlines()[0])
+    assert (row["mode"], row["fork"]) == ("wake", result.fork_id)
+    assert not (root / "ask-seat" / f"{SEAT_ID}.lock").exists()      # released
+
+
+def test_wake_above_150k_refuses_without_yes_and_names_the_read_cost(env, tmp_path, monkeypatch):
+    root, projects = env
+    _claude_seat(root, projects, cwd=tmp_path, context=200_000,
+                 messages=[("user", "why X?"), ("assistant", "because X")])
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **k: pytest.fail("a refused wake must not run"))
+    with pytest.raises(ask_seat.AskRefused, match=r"re-reads 200,000 tokens uncached.*read path costs about \d") as r:
+        ask_seat.ask("Mason", "why X?", asker=ASKER, wake=True)
+    assert "--yes" in str(r.value)
+
+    monkeypatch.setattr(ask_seat.subprocess, "run", _wake_run())
+    monkeypatch.setattr(inbox, "send", lambda *a, **k: "m")
+    assert ask_seat.ask("Mason", "why X?", asker=ASKER, wake=True, yes=True).mode == "wake"
+
+
+def test_the_limit_itself_is_allowed(env, tmp_path, monkeypatch):
+    root, projects = env
+    _claude_seat(root, projects, cwd=tmp_path, context=ask_seat.WAKE_CONTEXT_LIMIT)
+    monkeypatch.setattr(ask_seat.subprocess, "run", _wake_run())
+    assert ask_seat.ask("Mason", "q", wake=True).mode == "wake"
+
+
+def test_only_one_wake_at_a_time_per_seat(env, tmp_path, monkeypatch):
+    root, projects = env
+    _claude_seat(root, projects, cwd=tmp_path, context=1000)
+    lock = root / "ask-seat" / f"{SEAT_ID}.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("")
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **k: pytest.fail("a locked seat must not wake"))
+    with pytest.raises(ask_seat.AskRefused, match="Mason is already being woken"):
+        ask_seat.ask("Mason", "q", wake=True)
+    assert lock.exists()                                             # the other asker's lock is not ours to remove
+
+    old = time.time() - ask_seat.WAKE_TIMEOUT_SECONDS - 120          # a crashed asker's lock is reclaimed
+    os.utime(lock, (old, old))
+    monkeypatch.setattr(ask_seat.subprocess, "run", _wake_run())
+    assert ask_seat.ask("Mason", "q", wake=True).mode == "wake" and not lock.exists()
+
+
+def test_a_failed_wake_still_releases_its_lock(env, tmp_path, monkeypatch):
+    root, projects = env
+    _claude_seat(root, projects, cwd=tmp_path, context=1000)
+    monkeypatch.setattr(ask_seat.subprocess, "run",
+                        lambda argv, **k: subprocess.CompletedProcess(argv, 1, stdout=b"", stderr=b"boom"))
+    with pytest.raises(ask_seat.AskRefused, match="the wake failed"):
+        ask_seat.ask("Mason", "q", wake=True)
+    assert not (root / "ask-seat" / f"{SEAT_ID}.lock").exists()
+
+
+def test_wake_needs_the_original_cwd(env, monkeypatch):
+    root, projects = env
+    _claude_seat(root, projects, cwd="C:\\gone\\forever", context=1000)
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **k: pytest.fail("no cwd, no wake"))
+    with pytest.raises(ask_seat.AskRefused, match="original cwd is unknown or gone"):
+        ask_seat.ask("Mason", "q", wake=True)
+
+
+def test_wake_on_a_litetui_seat_is_refused_and_reading_is_still_offered(env, monkeypatch, capsys):
+    agent_names.record_name("Lite", SEAT_ID, CONVO, None, backend="codex", model="gpt")
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **k: pytest.fail("refused before any process"))
+    with pytest.raises(ask_seat.AskRefused, match="wake is Claude-only in v1; reading works"):
+        ask_seat.ask("Lite", "q", wake=True)
+    assert ask_seat.main(["Lite", "q", "--wake"]) == 1
+    assert "reading works" in capsys.readouterr().err
