@@ -243,7 +243,18 @@ def _refuse_owned_live(entry: dict) -> None:
 
     root = litetui_root(entry["agent_id"])
     try:
-        agent = read_agent(AgentStore(root).agent_directory(entry["name"]))
+        store = AgentStore(root)
+        directory = store.agent_directory(entry["name"])
+        try:
+            directory.lstat()
+        except FileNotFoundError:
+            # Only confirmed absence permits archive classification. Corrupt,
+            # linked or uninspectable owned homes must retain their refusal.
+            convo = entry.get("convo_id")
+            if convo and store.legacy_conversation(convo).exists():
+                raise AskRefused(f"ask-seat supports .agents-layout LiteTUI agents only; "
+                                 f"{entry['name']} is a .convos-era seat")
+        agent = read_agent(directory)
         if agent.agent_id != entry["agent_id"]:
             raise StoreError("Agent folder identity disagrees with the selected seat")
         path = _unlinked(agent.directory / AGENT_LEASE_NAME)

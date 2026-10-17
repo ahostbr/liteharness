@@ -210,16 +210,92 @@ def test_transcript_is_found_by_session_id_and_ambiguity_is_refused_with_the_pat
         ask_seat.claude_transcript(entry)
 
 
-def test_convos_era_litetui_seat_is_refused_with_one_clear_line(env, tmp_path, monkeypatch):
+@pytest.mark.parametrize("entrypoint", ["transcript", "ask", "main"])
+def test_convos_era_litetui_seat_is_refused_with_one_clear_line(
+        env, tmp_path, monkeypatch, capsys, entrypoint):
     from liteharness import owned_launch
     data_root = tmp_path / "litetui"
     (data_root / ".convos" / CONVO).mkdir(parents=True)
     (data_root / ".convos" / CONVO / "convo.jsonl").write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(owned_launch, "data_root", lambda resolution=None: data_root)
     agent_names.record_name("Old", SEAT_ID, CONVO, None, backend="codex", model="gpt")
-    with pytest.raises(ask_seat.AskRefused,
-                       match=r"ask-seat supports \.agents-layout LiteTUI agents only; Old is a \.convos-era seat"):
-        ask_seat.litetui_transcript(agent_names.resolve_name("Old"))
+    def forbidden(*a, **kw):
+        pytest.fail("an archived-only refusal must not call model, exporter or PTY boundaries")
+    monkeypatch.setattr(ask_seat.subprocess, "run", forbidden)
+    monkeypatch.setattr(ask_seat, "_export_conversation", forbidden)
+    monkeypatch.setattr(cli, "_bridge_request", forbidden)
+    expected = "ask-seat supports .agents-layout LiteTUI agents only; Old is a .convos-era seat"
+    if entrypoint == "main":
+        assert ask_seat.main(["Old", "which decision?"]) == 1
+        assert capsys.readouterr().err.strip() == f"ASK-SEAT REFUSED: {expected}"
+    else:
+        with pytest.raises(ask_seat.AskRefused) as refused:
+            if entrypoint == "ask":
+                ask_seat.ask("Old", "which decision?")
+            else:
+                ask_seat.litetui_transcript(agent_names.resolve_name("Old"))
+        assert str(refused.value) == expected
+
+
+@pytest.mark.parametrize("state", ["live", "corrupt", "unknown-pty"])
+def test_archive_does_not_mask_existing_owned_live_or_unknown_state(env, tmp_path, monkeypatch, state):
+    from contextlib import ExitStack
+    from liteharness.agent_ownership import AgentSession
+    from liteharness.agent_store import AgentStore
+    data_root, home = _agents_store(tmp_path, monkeypatch, name="Old")
+    (data_root / ".convos" / CONVO).mkdir(parents=True)
+    agent_names.record_name("Old", SEAT_ID, CONVO, None, backend="codex", model="fixture")
+    monkeypatch.setattr(ask_seat.subprocess, "run", lambda *a, **kw: pytest.fail("no model"))
+    monkeypatch.setattr(ask_seat, "_export_conversation", lambda *a, **kw: pytest.fail("no export"))
+    with ExitStack() as stack:
+        if state == "live":
+            stack.enter_context(AgentSession.acquire_existing(AgentStore(data_root), agent_id=SEAT_ID))
+            expected = "live: message Old by inbox instead"
+        elif state == "corrupt":
+            (home / "settings.json").write_text("{}", encoding="utf-8")
+            expected = "Cannot inspect owned session"
+        else:
+            monkeypatch.setattr(cli, "_bridge_request", lambda *a, **kw: {})
+            expected = "Cannot inspect current PTYs"
+        with pytest.raises(ask_seat.AskRefused, match=expected) as refused:
+            ask_seat.ask("Old", "which decision?")
+        assert ".convos-era" not in str(refused.value)
+
+
+@pytest.mark.parametrize("state", ["non-directory", "uninspectable", "reparse"])
+def test_archive_cannot_bypass_an_unusable_owned_home(env, tmp_path, monkeypatch, state):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from liteharness import owned_launch
+    data_root = tmp_path / "litetui"
+    home = data_root / ".agents" / "Old"
+    home.parent.mkdir(parents=True)
+    if state == "non-directory":
+        home.write_text("not a home", encoding="utf-8")
+    else:
+        home.mkdir()
+    (data_root / ".convos" / CONVO).mkdir(parents=True)
+    monkeypatch.setattr(owned_launch, "data_root", lambda: data_root)
+    agent_names.record_name("Old", SEAT_ID, CONVO, None, backend="codex", model="fixture")
+    original = Path.lstat
+
+    def inspected(path, *a, **kw):
+        if path == home and state == "uninspectable":
+            raise PermissionError("fixture inaccessible home")
+        info = original(path, *a, **kw)
+        if path == home and state == "reparse":
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400)
+        return info
+    monkeypatch.setattr(Path, "lstat", inspected)
+
+    def forbidden(*a, **kw):
+        pytest.fail("unusable-home refusal must precede model, exporter and PTY boundaries")
+    monkeypatch.setattr(ask_seat.subprocess, "run", forbidden)
+    monkeypatch.setattr(ask_seat, "_export_conversation", forbidden)
+    monkeypatch.setattr(cli, "_bridge_request", forbidden)
+    with pytest.raises(ask_seat.AskRefused, match="Cannot inspect owned session") as refused:
+        ask_seat.ask("Old", "which decision?")
+    assert ".convos-era" not in str(refused.value)
 
 
 @pytest.fixture
