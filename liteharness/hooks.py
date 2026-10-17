@@ -1635,6 +1635,42 @@ def _adopt_pid_owner(agent_id: str) -> str:
     return agent_id
 
 
+def _first_to_print(key: str, window: float = 20.0) -> bool:
+    """True for exactly one of the concurrent SessionStart hooks that share this event.
+
+    Both SessionStart entries (settings.json and the plugin's hooks.json) run
+    `register` at the same moment, so a marker written AFTER printing (the
+    `.cog_printed` guard) loses the race: each hook printed the whole 68 KB block
+    on 2026-10-17. The marker is created exclusively BEFORE printing; one that is
+    older than `window` seconds belongs to an earlier event and is replaced.
+    """
+    marker = config.get_root() / ".printed_once" / key
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(2):
+            try:
+                os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return True
+            except FileExistsError:
+                if time.time() - marker.stat().st_mtime < window:
+                    return False
+                marker.unlink()
+    except OSError:
+        return True  # when the guard itself fails, show the lore rather than lose it
+    return False
+
+
+def _print_lore(agent_id: str) -> None:
+    """The lore file, once per SessionStart event. Never kills SessionStart."""
+    try:
+        from . import lore as _lore
+        text = _lore.lore_block()
+        if text and _first_to_print(f"lore.{agent_id}.{os.environ.get('LITEHARNESS_HOOK_SOURCE') or 'startup'}"):
+            print(text)
+    except Exception as _lore_exc:  # noqa: BLE001
+        print(f"[LITEHARNESS] lore unavailable ({_lore_exc!r})")
+
+
 def register_presence() -> None:
     """
     Write a presence file and output agent identity block.
@@ -1757,6 +1793,9 @@ def register_presence() -> None:
             print(_index_text)
     except Exception as _idx_exc:  # noqa: BLE001
         print(f"[LITEHARNESS] project index unavailable ({_idx_exc!r})")
+
+    if not compacting:
+        _print_lore(agent_id)
 
     # Cognitive architecture — mechanical injection (RULING, the user 2026-08-07:
     # polymaths were not being instructed to read their prompts; discipline-
@@ -2194,6 +2233,9 @@ def register_presence() -> None:
     except Exception as exc:  # noqa: BLE001 — delivery must never kill SessionStart
         print(f"[LITEHARNESS] ⚠ TIER PREAMBLE DELIVERY FAILED ({exc!r}) — "
               f"you are operating without tier doctrine; report this upward.")
+
+    if compacting:
+        _print_lore(agent_id)
 
     # Spawn Brief: printed at the TOP of this hook's output (see the block above
     # the [LITEHARNESS] banner). It lived here at the bottom until 2026-08-07 —
