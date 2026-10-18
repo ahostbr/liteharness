@@ -143,19 +143,6 @@ def test_actual_owned_guards_refuse_before_resolution_and_never_close(world, mon
 
 
 
-@pytest.mark.parametrize('brief', ['ordinary user brief', '--system-prompt', '--system-prompt-file', '--prompt'])
-def test_custom_source_binding_keeps_user_brief_literal(world, brief):
-    data, _, _ = world
-    source = str(data / 'caller.md')
-    resolution = {'liteTuiDataRoot': str(data), 'request': {
-        'args': ['--system-prompt-file', source, '--prompt', brief], 'env': {}, 'harnessAgentId': AID}}
-    launch = owned_launch.request(resolution, root=data, name='QuietHelm', agent_id=AID,
-                                  backend='codex', model='fixture', thinking_level='high',
-                                  system_prompt_file=source)
-    assert launch['args'][:4] == ['--system-prompt-file', source, '--prompt', brief]
-    assert launch['harnessAgentId'] == AID
-
-
 def test_unchosen_named_resume_refuses_before_policy_bridge_or_lease(world, monkeypatch, capsys):
     data, project, calls = world
     with AgentSession.create_fresh(AgentStore(data), name='QuietHelm', agent_id=AID,

@@ -58,8 +58,7 @@ def data_root(resolution: dict | None = None) -> Path:
 def request(resolution: dict, *, root: Path, name: str, agent_id: str,
             backend: str, model: str, thinking_level: str,
             fresh: bool = False, conversation_id: str | None = None,
-            owner_title: str | None = None, memory_dir: str | None = None,
-            system_prompt_file: str | None = None) -> dict:
+            owner_title: str | None = None, memory_dir: str | None = None) -> dict:
     """Bind exact argv/env to one home; no writable legacy fallback."""
     valid_name(name)
     valid_id(agent_id)
@@ -82,21 +81,7 @@ def request(resolution: dict, *, root: Path, name: str, agent_id: str,
                for a in store.list_agents()) or store.agent_directory(name).exists():
             raise StoreError('Fresh agent home or identity already exists; resume it')
     args = launch['args']
-    if system_prompt_file is not None:
-        # A user brief is one value, even when its entire text looks like an option.
-        sources = []
-        i = 0
-        while i < len(args):
-            flag, equals, value = args[i].partition('=')
-            if flag == '--system-prompt':
-                raise StoreError('Resolver returned conflicting inline custom text with caller --system-prompt-file')
-            if flag == '--system-prompt-file':
-                sources.append(value if equals else (args[i + 1] if i + 1 < len(args) else None))
-            i += 2 if not equals and flag in ('--prompt', '--system-prompt-file') else 1
-        if sources != [system_prompt_file]:
-            raise StoreError('Resolver did not preserve exactly one matching caller --system-prompt-file')
-    if (not fresh and args and args[-1] in ('--system-prompt-file', '--system-prompt')
-            and not (len(args) > 1 and args[-2] == '--prompt')):
+    if not fresh and args and args[-1] in ('--system-prompt-file', '--system-prompt'):
         raise StoreError('Resolver returned bare system prompt flag')
     # Resolver may select execution flags, but never a different owned context.
     if any(a == flag or a.startswith(flag + '=') for a in args
@@ -138,9 +123,10 @@ def request(resolution: dict, *, root: Path, name: str, agent_id: str,
             args.extend(['--agent', name])
         if conversation_id is not None:
             args.extend(['--convo', valid_id(conversation_id)])
-        # Keep role and method sources for child composition. A caller custom body
-        # is published/audited by the child before compose, never written by this parent.
-        # An ordinary --prompt remains a user brief, not a role-body replacement.
+        # LiteTUI validates the complete launch text against the saved transcript
+        # before submitting --prompt. Keep role AND cognitive text: stripping the
+        # role guarantees a mismatch and silently leaves the resumed seat idle.
+        # The child refuses changed text; this does not replace its saved prompt.
     launch['env']['LITETUI_DATA_ROOT'] = str(root)
     launch['env']['LITEHARNESS_AGENT_ID'] = agent_id
     launch['env']['LITEHARNESS_NAME'] = name
