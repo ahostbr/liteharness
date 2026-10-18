@@ -166,10 +166,18 @@ embedding refresh is running; it does not change the selected search mode.
 
 Semantic search uses all-MiniLM-L6-v2 (384 dimensions). By default the installed
 LiteHarness ONNX backend runs locally on CPU, avoiding the global torch/transformers
-dependency chain. Install liteharness[embed] if its optional dependencies are
-missing. Model artifacts are installed only through the explicit Memory Install
-action (`python -m liteharness.memory_lookup install-semantic`, JSON `{}` on stdin).
-Absent artifacts fail visibly; ordinary lookup never auto-downloads. Conversation text stays local.
+dependency chain. The explicit Memory Install action
+(`python -m liteharness.memory_lookup install-semantic`, JSON `{}` on stdin)
+creates `semantic-python` under conversation home using copies (no links), installs
+optional extras only there, downloads model artifacts and smoke-validates them.
+It never pip-installs into the base/user-global interpreter. An atomic successful
+marker records the adopted interpreter and installed harness distribution identity;
+partial/cancelled/mismatched installs are not ready. If the adopted distribution
+is not exposed by system-site-packages, installation fails visibly: repair the
+app's recorded LiteHarness setup, rather than fetching a different harness.
+Only semantic work uses that interpreter; keyword/config/discovery/status/ordinary
+index operations do not launch it. Machine semantic requests fall back honestly
+to keyword while not installed. Conversation text stays local.
 Alternatively set LITEHARNESS_CONVO_EMBED_BACKEND=sentence-transformers in an
 environment with a compatible sentence-transformers installation.
 

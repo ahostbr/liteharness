@@ -702,14 +702,16 @@ def _chunk_conversation(file_path):
             "line_start": group[0]["line_number"],
             "line_end": group[-1]["line_number"],
             "byte_offset": group[0]["byte_offset"],
-            "byte_length": group[-1]["byte_offset"] + group[-1]["byte_length"] - group[0]["byte_offset"],
+            "byte_length": (group[-1]["byte_offset"] + group[-1]["byte_length"] - group[0]["byte_offset"]) if all(m.get("byte_offset") is not None and m.get("byte_length") is not None for m in group) else None,
             "source_signature": group[0]["source_signature"],
         })
     import hashlib
     with open(file_path, 'rb') as stream:
         for chunk in chunks:
-            stream.seek(chunk['byte_offset'])
-            chunk['record_hash'] = hashlib.sha256(stream.read(chunk['byte_length'])).hexdigest()
+            chunk['record_hash'] = None
+            if chunk['byte_offset'] is not None and chunk['byte_length'] is not None:
+                stream.seek(chunk['byte_offset'])
+                chunk['record_hash'] = hashlib.sha256(stream.read(chunk['byte_length'])).hexdigest()
     return chunks
 
 
@@ -793,7 +795,8 @@ def cmd_search_semantic(query, top_n=10, project_filter=None, hours=None, date=N
     query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-8)
 
     # Load all embeddings (brute-force cosine — fast enough for ~100K chunks)
-    sql = "SELECT id, conversation_id, project, chunk_index, chunk_text, timestamp_start, embedding FROM embeddings"
+    path_column = 'file_path' if 'file_path' in {r[1] for r in conn.execute('PRAGMA table_info(embeddings)')} else 'NULL'
+    sql = f"SELECT id, conversation_id, project, chunk_index, chunk_text, timestamp_start, embedding, {path_column} FROM embeddings"
     clauses = []
     params = []
     if project_filter:
@@ -836,11 +839,13 @@ def cmd_search_semantic(query, top_n=10, project_filter=None, hours=None, date=N
     # Best per conversation
     seen = {}
     results = []
+    from lookup_events import add_hit
     for idx in ranked:
         cid = conv_ids[idx]
         if cid not in seen:
             seen[cid] = True
             results.append((cid, projects[idx], timestamps[idx], texts[idx], float(scores[idx])))
+            add_hit(rows[idx][7], cid, texts[idx])
         if len(results) >= top_n:
             break
 
@@ -868,7 +873,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
     bm25_sql = """
         SELECT m.conversation_id, m.project, m.timestamp,
                snippet(messages_fts, 0, '>>>', '<<<', '...', 64) as snippet,
-               bm25(messages_fts) as rank
+               bm25(messages_fts) as rank, m.file_path
         FROM messages_fts
         JOIN messages m ON m.id = messages_fts.rowid
         WHERE messages_fts MATCH ?
@@ -896,11 +901,13 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
     # Aggregate BM25: best score per conversation (bm25 returns negative, lower=better)
     bm25_scores = {}
     bm25_snippets = {}
-    for cid, proj, ts, snippet, rank in bm25_rows:
+    hit_paths = {}
+    for cid, proj, ts, snippet, rank, path in bm25_rows:
         score = abs(rank)
         if cid not in bm25_scores or score > bm25_scores[cid]:
             bm25_scores[cid] = score
             bm25_snippets[cid] = (proj, ts, snippet)
+            hit_paths[cid] = path
 
     # ── Vector pass ──
     emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
@@ -914,7 +921,8 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
         query_vec = model.encode(query, convert_to_numpy=True)
         query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-8)
 
-        emb_sql = "SELECT conversation_id, project, timestamp_start, chunk_text, embedding FROM embeddings"
+        path_column = 'file_path' if 'file_path' in {r[1] for r in conn.execute('PRAGMA table_info(embeddings)')} else 'NULL'
+        emb_sql = f"SELECT conversation_id, project, timestamp_start, chunk_text, embedding, {path_column} FROM embeddings"
         emb_clauses = []
         emb_params = []
         if project_filter:
@@ -930,7 +938,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
             emb_sql += " WHERE " + " AND ".join(emb_clauses)
 
         emb_rows = conn.execute(emb_sql, emb_params).fetchall()
-        for cid, proj, ts, text, emb_blob in emb_rows:
+        for cid, proj, ts, text, emb_blob, path in emb_rows:
             vec = np.array(_blob_to_vec(emb_blob), dtype=np.float32)
             vec_norm = vec / (np.linalg.norm(vec) + 1e-8)
             sim = float(np.dot(query_norm, vec_norm))
@@ -938,6 +946,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
                 vec_scores[cid] = sim
                 if cid not in bm25_snippets:
                     bm25_snippets[cid] = (proj, ts, text[:300])
+                    hit_paths[cid] = path
 
     # ── Merge scores ──
     all_cids = set(bm25_scores.keys()) | set(vec_scores.keys())
@@ -959,6 +968,9 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
         merged.append((cid, proj, ts, snippet, combined))
 
     merged.sort(key=lambda x: (-x[4], x[0]))
+    from lookup_events import add_hit
+    for cid, proj, ts, snippet, score in merged[:top_n]:
+        add_hit(hit_paths.get(cid), cid, snippet)
     _print_search_results(merged[:top_n], query, "hybrid")
     conn.close()
 
@@ -1192,11 +1204,6 @@ def _print_memory_stats(conn):
 
 
 def _print_search_results(results, query, mode):
-    from lookup_events import add_hit
-    with __import__("contextlib").closing(get_db(read=True)) as event_db:
-        for cid, project, timestamp, text, score in results[:10]:
-            row = event_db.execute("SELECT file_path FROM messages WHERE conversation_id=? LIMIT 1", (cid,)).fetchone()
-            add_hit(row[0] if row else None, cid, text)
     """Print formatted search results."""
     print(f"Found {len(results)} conversations ({mode} search)\n")
     for i, (conv_id, project, timestamp, snippet, score) in enumerate(results):
@@ -1429,6 +1436,18 @@ def _main():
 
 def main():
     args = sys.argv[1:]
+    semantic_requested = '--index-embeddings' in args or ('--mode' in args and args.index('--mode') + 1 < len(args) and args[args.index('--mode') + 1] in ('semantic', 'hybrid'))
+    if semantic_requested:
+        from liteharness.memory_semantic import paths, readiness, base_identity, validate_environment
+        directory, owned_python, marker = paths()
+        if Path(sys.executable).resolve() != owned_python.resolve() and readiness()[0]:
+            import subprocess
+            python = validate_environment(base_identity())
+            # Delegate before creating telemetry; only the real child execution emits.
+            result = subprocess.run([str(python), '-I', str(Path(__file__).resolve()), *args], timeout=900)
+            if result.returncode:
+                raise SystemExit(result.returncode)
+            return
     query = None
     mode = 'keyword'
     if '--search' in args and args.index('--search') + 1 < len(args):

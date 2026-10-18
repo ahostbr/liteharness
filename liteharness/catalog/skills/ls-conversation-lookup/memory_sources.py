@@ -8,6 +8,17 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 _selected = ContextVar('memory_index_source_ids', default=None)
+_query = ContextVar('memory_query_source_snapshot', default=None)
+
+
+@contextmanager
+def query_snapshot():
+    """One coherent source policy per query; never cache across queries/saves."""
+    token = _query.set({'checked': set(), 'config': None})
+    try:
+        yield
+    finally:
+        _query.reset(token)
 
 
 @contextmanager
@@ -33,20 +44,25 @@ def home():
 
 def unlinked(path):
     path = Path(path)
+    checked = _query.get()['checked'] if _query.get() is not None else set()
     for part in (path, *path.parents):
+        if part in checked:
+            continue
         try:
             info = part.lstat()
         except FileNotFoundError:
+            checked.add(part)
             continue
         if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
             raise ValueError('Linked/reparse source paths are not supported')
+        checked.add(part)
     if any(p.casefold() == '.convos' for p in path.parts):
         raise ValueError('.convos archives are not a supported memory source')
     return path
 
 
 def validate(config):
-    if not isinstance(config, dict) or config.get('version') != 1 or type(config.get('revision')) is not int or config['revision'] < 0:
+    if not isinstance(config, dict) or type(config.get('version')) is not int or config['version'] != 1 or type(config.get('revision')) is not int or config['revision'] < 0:
         raise ValueError('Expected source config version 1 and nonnegative revision')
     sources = config.get('sources')
     if not isinstance(sources, list) or len(sources) > 100:
@@ -88,10 +104,14 @@ def defaults():
 
 
 def load_config():
+    snapshot = _query.get()
+    if snapshot is not None and snapshot['config'] is not None:
+        return snapshot['config']
     path = home() / 'sources.json'
-    if not path.exists():
-        return validate(defaults())
-    return validate(json.loads(path.read_text(encoding='utf-8')))
+    result = validate(json.loads(path.read_text(encoding='utf-8'))) if path.exists() else validate(defaults())
+    if snapshot is not None:
+        snapshot['config'] = result
+    return result
 
 
 def save_config(config):
@@ -160,6 +180,7 @@ def _safe(path):
 
 
 def documents():
+    seen = set()
     for source in index_sources():
         if not source['enabled']:
             continue
@@ -167,10 +188,16 @@ def documents():
         if kind == 'claude-memory':
             for path in walk_files(root, {'.md'}) or []:
                 if path.parent.name == 'memory' and path.name != 'MEMORY.md':
-                    yield path, path.parent.parent.name
+                    key = str(path).casefold() if os.name == "nt" else str(path)
+                    if key not in seen:
+                        seen.add(key)
+                        yield path, path.parent.parent.name
         elif kind in ('obsidian', 'folder'):
             for path in walk_files(root, {'.md', '.txt'}) or []:
-                yield path, source['id']
+                key = str(path).casefold() if os.name == "nt" else str(path)
+                if key not in seen:
+                    seen.add(key)
+                    yield path, source['id']
 
 
 def classify(path, document=False, config=None):

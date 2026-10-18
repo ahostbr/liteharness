@@ -156,8 +156,22 @@ def test_optional_install_error_progress_no_global_pip(corpus):
     root, _ = corpus
     updates = []
     with patch.object(memory_lookup.importlib.util, 'find_spec', return_value=None), patch.object(sys, 'prefix', sys.base_prefix), patch('subprocess.run') as run:
-        with pytest.raises(RuntimeError, match='app-owned'):
+        with pytest.raises(RuntimeError, match='adopted installed'):
             memory_lookup.dispatch('install-semantic', {}, updates.append)
     run.assert_not_called()
     assert [p['state'] for p in updates] == ['running', 'error']
     assert not (sources.home() / 'models').exists()
+
+
+def test_query_snapshot_does_not_hide_next_config_disable_or_invalid_edit(corpus):
+    root, _ = corpus
+    write(root / 'claude/projects/demo/fixture.jsonl', [{'type': 'user', 'message': {'content': 'snapshotcanary'}}])
+    memory_lookup.dispatch('index', {})
+    assert memory_lookup.dispatch('search', {'query': 'snapshotcanary'})['results']
+    config = sources.load_config()
+    config['sources'][0]['enabled'] = False
+    sources.save_config(config)
+    assert not memory_lookup.dispatch('search', {'query': 'snapshotcanary'})['results']
+    (sources.home() / 'sources.json').write_text('{invalid json')
+    with pytest.raises(ValueError):
+        memory_lookup.dispatch('search', {'query': 'snapshotcanary'})

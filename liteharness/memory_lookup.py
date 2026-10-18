@@ -51,6 +51,12 @@ def validate_request(action, request):
 
 def source_statuses(api):
     import memory_sources as sources
+    with sources.query_snapshot():
+        return _source_statuses(api)
+
+
+def _source_statuses(api):
+    import memory_sources as sources
     rows = []
     config = sources.load_config()
     counts = []
@@ -88,15 +94,15 @@ def source_statuses(api):
 def semantic_status(api):
     import memory_sources as sources
     directory = sources.home() / 'models/all-MiniLM-L6-v2'
-    installed = all((directory / path).is_file() for path in ('tokenizer.json', 'onnx/model.onnx'))
-    extras = all(importlib.util.find_spec(name) is not None for name in ('onnxruntime', 'numpy', 'tokenizers'))
+    from liteharness.memory_semantic import readiness
+    ready, error = readiness()
     count = 0
     if api.DB_PATH.exists():
         with contextlib.closing(api.get_db(read=True)) as db:
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='embeddings'").fetchone():
                 count = db.execute('SELECT count(*) FROM embeddings').fetchone()[0]
-    return {'state': 'ready' if installed and extras else 'not-installed',
-            'backend': 'cpu' if installed and extras else None, 'vectorCount': count}
+    return {'state': 'ready' if ready else 'not-installed',
+            'backend': 'cpu' if ready else None, 'vectorCount': count}
 
 
 def status(api):
@@ -106,7 +112,7 @@ def status(api):
             'recommendation': {'recommended': 'cpu', 'reason': 'CPU MiniLM ONNX is the shared lightweight optional path; GPU proxy requires an additional server and GGUF. Runtime measurements are unmeasured.', 'ramBytes': 0}}
 
 
-def dispatch(action, request, emit=lambda data: None):
+def dispatch(action, request, emit=lambda data: None, *, semantic_child=False):
     validate_request(action, request)  # No I/O before structural validation.
     api = engine()
     import memory_sources as sources
@@ -143,6 +149,9 @@ def dispatch(action, request, emit=lambda data: None):
         from lookup_evidence import search_evidence
         mode = request.get('mode', 'keyword')
         actual = {'keyword': 'bm25', 'exact': 'bm25'}.get(mode, mode)
+        if mode in ('semantic', 'hybrid') and not semantic_child and semantic_status(api)['state'] == 'ready':
+            from liteharness.memory_semantic import run_owned, base_identity
+            return run_owned('search', request, base_identity())
         with lookup_events.capture(request['query'], mode, request.get('seat')):
             if mode in ('semantic', 'hybrid') and semantic_status(api)['state'] != 'ready':
                 actual = 'bm25'
@@ -156,20 +165,8 @@ def install_semantic(api, emit):
     operation = 'install-semantic'
     emit({'operation': operation, 'state': 'running', 'percent': None, 'message': 'Checking optional CPU semantic dependencies'})
     try:
-        missing = [name for name in ('onnxruntime', 'numpy', 'tokenizers', 'huggingface_hub') if importlib.util.find_spec(name) is None]
-        if missing:
-            # Never pip-install into a user-global interpreter. App-owned venv only.
-            if sys.prefix == sys.base_prefix:
-                raise RuntimeError('Optional embed dependencies are missing; repair the app-owned Python environment before installation: ' + ', '.join(missing))
-            import subprocess
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 'onnxruntime>=1.18.0', 'numpy>=1.26.0', 'huggingface_hub>=0.23.0', 'tokenizers>=0.19.0'], check=True, stdout=sys.stderr, stderr=sys.stderr, timeout=600)
-        import memory_sources as sources
-        from liteharness.embed_service import download_model
-        directory = sources.home() / 'models/all-MiniLM-L6-v2'
-        emit({'operation': operation, 'state': 'running', 'percent': None, 'message': 'Downloading optional MiniLM model artifacts'})
-        with contextlib.redirect_stdout(sys.stderr):
-            download_model(directory)
-            api.cmd_index_embeddings()
+        from liteharness.memory_semantic import install
+        install(emit)
         emit({'operation': operation, 'state': 'complete', 'percent': 100, 'message': 'Optional semantic index ready'})
         return status(api)
     except Exception as error:

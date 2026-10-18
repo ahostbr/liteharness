@@ -33,7 +33,8 @@ def main():
     cpu = {'candidate': 'all-MiniLM-L6-v2 / ONNX CPU', 'implementation': 'liteharness.embed_service.EmbedModel',
            'sharedBy': ['canonical conversation lookup', 'legacy desktop CPU service'],
            'artifacts': artifact(options.cpu_artifacts), 'rssBytes': None, 'firstQueryMs': None,
-           'measurement': 'unmeasured', 'versions': versions}
+           'measurement': 'unmeasured', 'installedDistributionMetadata': versions,
+           'sourceImplementation': str(Path(__file__).resolve().parents[1] / 'liteharness/embed_service.py')}
     if options.measure_existing:
         if not options.cpu_artifacts or not (options.cpu_artifacts / 'onnx/model.onnx').is_file() or not (options.cpu_artifacts / 'tokenizer.json').is_file():
             parser.error('Measurement requires existing CPU model artifacts; this command never downloads')

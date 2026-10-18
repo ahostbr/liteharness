@@ -80,7 +80,7 @@ def test_owned_logical_replay_archive_tool_raw_and_hidden_exclusion(corpus):
         {'type': 'truncate', 'keep_from': 2, 'keep_system': True, 'prepend': [{'role': 'user', 'content': 'survivingprepend'}]},
     ])
     write(transcript.with_name('tool-raw.jsonl'), [{'type': 'msg', 'message': {'role': 'user', 'content': 'rawsecret'}}])
-    write(root / 'tui/.convos' / transcript.parent.name / 'convo.jsonl', [{'type': 'msg', 'message': {'role': 'user', 'content': 'archivesecret'}}])
+    write(root / 'tui/.convos' / transcript.parent.name / 'convo.jsonl', [{'type': 'msg', 'message': {'role': 'user', 'content': 'survivingprepend'}}])
     with contextlib.redirect_stdout(io.StringIO()):
         engine.cmd_index()
     with contextlib.closing(engine.get_db(read=True)) as db:
@@ -141,3 +141,24 @@ def test_archive_retained_rows_are_hidden_without_deletion(corpus):
         assert db.execute('SELECT count(*) FROM messages').fetchone()[0] == 0
     with contextlib.closing(engine.get_db()) as db:
         assert db.execute('SELECT count(*) FROM messages').fetchone()[0] == 1
+
+
+def test_obsidian_and_overlapping_folders_use_one_document_representation(corpus):
+    root, engine = corpus
+    vault = root / 'vault'
+    vault.mkdir()
+    (vault / 'note.md').write_text('vaultcanary')
+    (vault / 'note.txt').write_text('textcanary')
+    (vault / 'not-supported.pdf').write_text('forbidden extension')
+    config = sources.defaults()
+    config['sources'] += [
+        {'id': 'vault', 'kind': 'obsidian', 'enabled': True, 'path': str(vault)},
+        {'id': 'folder-overlap', 'kind': 'folder', 'enabled': True, 'path': str(vault)},
+    ]
+    sources.save_config(config)
+    with contextlib.redirect_stdout(io.StringIO()):
+        engine.cmd_index_memory()
+        engine.cmd_index_memory()
+    with contextlib.closing(engine.get_db(read=True)) as db:
+        assert db.execute('SELECT count(*) FROM memory_content').fetchone()[0] == 2
+        assert db.execute("SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'vaultcanary'").fetchone()[0] == 1

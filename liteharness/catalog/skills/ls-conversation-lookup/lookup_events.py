@@ -49,6 +49,16 @@ def capture(query, mode='keyword', seat=None):
     if _active.get() is not None:
         yield
         return
+    from memory_sources import query_snapshot
+    with query_snapshot(), _capture(query, mode, seat):
+        yield
+
+
+@contextmanager
+def _capture(query, mode='keyword', seat=None):
+    if _active.get() is not None:
+        yield
+        return
     start = time.monotonic()
     event = {'version': 1, 'id': str(uuid.uuid4()), 'ts': datetime.now(timezone.utc).isoformat(),
              'seat': (seat or os.environ.get('LITEHARNESS_AGENT_ID') or None),
@@ -113,6 +123,40 @@ def append(event):
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def valid_event(row):
+    from memory_sources import KINDS
+    def text(value, limit):
+        return isinstance(value, str) and len(value) <= limit
+    if not isinstance(row, dict) or type(row.get('version')) is not int or row['version'] != 1:
+        return False
+    if not text(row.get('id'), 256) or not row['id'] or not text(row.get('ts'), 64) or not text(row.get('query'), 2048):
+        return False
+    if 'seat' not in row or not (row['seat'] is None or text(row['seat'], 120)) or row.get('mode') not in ('keyword', 'semantic', 'hybrid', 'all', 'exact'):
+        return False
+    if 'fallback' not in row or row['fallback'] not in (None, 'keyword') or row.get('status') not in ('complete', 'empty', 'error'):
+        return False
+    duration = row.get('durationMs')
+    import math
+    if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+        return False
+    if 'error' in row and not text(row['error'], 2048):
+        return False
+    hits = row.get('hits')
+    if not isinstance(hits, list) or len(hits) > 10 or (row['status'] != 'complete' and hits):
+        return False
+    for rank, hit in enumerate(hits, 1):
+        if not isinstance(hit, dict) or hit.get('source') not in KINDS or not text(hit.get('id'), 8192) or type(hit.get('rank')) is not int or hit['rank'] != rank:
+            return False
+        tokens = hit.get('tokens')
+        if not isinstance(tokens, list) or len(tokens) > 24 or not all(text(token, 32) for token in tokens):
+            return False
+    try:
+        timestamp = datetime.fromisoformat(row['ts'].replace('Z', '+00:00'))
+        return timestamp.tzinfo is not None and timestamp.utcoffset() == timedelta(0)
+    except ValueError:
+        return False
+
+
 def recent():
     from memory_sources import home
     path = home() / 'lookup-events.jsonl'
@@ -133,10 +177,10 @@ def recent():
             continue
         try:
             row = json.loads(line)
-            timestamp = datetime.fromisoformat(row['ts'].replace('Z', '+00:00'))
-            if row.get('version') != 1 or timestamp < cutoff or row['id'] in seen:
+            if not valid_event(row):
                 continue
-            if row.get('status') not in ('complete', 'empty', 'error') or not isinstance(row.get('hits'), list):
+            timestamp = datetime.fromisoformat(row['ts'].replace('Z', '+00:00'))
+            if timestamp < cutoff or row['id'] in seen:
                 continue
             seen.add(row['id'])
             events.append(row)

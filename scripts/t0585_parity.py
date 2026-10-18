@@ -34,6 +34,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline-ref', default='c769c6045')
     parser.add_argument('--negative-control', action='store_true')
+    parser.add_argument('--timing-samples', type=int, default=0, help='Alternating no-listener CLI timing samples; no models loaded')
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='t0585-parity-') as temporary:
         root = Path(temporary)
@@ -67,7 +68,25 @@ def main():
         if mismatches and not options.negative_control:
             for index in mismatches:
                 print(json.dumps({'query': QUERIES[index], 'before': before[index], 'after': after[index]}))
-        return int(bool(mismatches))
+        timing_failed = False
+        if options.timing_samples:
+            import statistics
+            import time
+            if not 5 <= options.timing_samples <= 100:
+                parser.error('--timing-samples must be 5..100')
+            timings = {'baseline': [], 'candidate': []}
+            for sample in range(options.timing_samples):
+                order = [('baseline', baseline / 'find_conversation.py'), ('candidate', ROOT / REL / 'find_conversation.py')]
+                for name, script in (order if sample % 2 else reversed(order)):
+                    start = time.perf_counter()
+                    result = run(script, ['--search', 'amber', '-n', '5', '--no-refresh'], env)
+                    assert result['exit'] == 0
+                    timings[name].append((time.perf_counter() - start) * 1000)
+            medians = {key: statistics.median(values) for key, values in timings.items()}
+            ratio = medians['candidate'] / medians['baseline']
+            timing_failed = not .9 <= ratio <= 1.1
+            print(json.dumps({'noListenerTiming': 'measured', 'samples': options.timing_samples, 'allSamplesMs': timings, 'medianMs': medians, 'rangeMs': {key: [min(values), max(values)] for key, values in timings.items()}, 'ratio': ratio, 'within10Percent': not timing_failed, 'order': 'paired, alternating candidate/baseline then baseline/candidate', 'warmup': '10 parity queries per variant before timing; no additional warmup', 'conditions': 'same fixture/corpus/DB/options; new interpreter each sample; active-machine load uncontrolled', 'scope': 'isolated tiny keyword fixture including process startup; not a large live-corpus benchmark'}))
+        return int(bool(mismatches) or timing_failed)
 
 
 if __name__ == '__main__':
