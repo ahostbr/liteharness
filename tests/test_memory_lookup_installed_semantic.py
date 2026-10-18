@@ -201,3 +201,96 @@ def test_real_adopted_wheel_rejects_same_version_modified_artifact(installed, tm
     terminal = json.loads(answer.stdout.splitlines()[-1])
     assert terminal['type'] == 'error' and 'wheel hash differs' in terminal['message']
     assert not (tmp_path / 'index/semantic-python').exists()
+
+
+@pytest.mark.parametrize('already_cached', [False, True])
+def test_real_adopted_wheel_snapshot_survives_replacement_before_cache(installed, tmp_path, already_cached):
+    import io
+    import zipfile
+    _, python, wheel, base_env = installed
+    candidate = (tmp_path / 'index/semantic-wheel' if already_cached else tmp_path) / wheel.name
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    original = wheel.read_bytes()
+    candidate.write_bytes(original)
+    changed = io.BytesIO(original)
+    with zipfile.ZipFile(changed, 'a') as archive:
+        archive.comment = b'benign same-version replacement; never installed or executed'
+    replacement = tmp_path / 'replacement.bytes'
+    replacement.write_bytes(changed.getvalue())
+    driver = r'''import hashlib,json,os
+from pathlib import Path
+from liteharness import memory_semantic as semantic
+expected = semantic.base_identity()
+original_digest = semantic.code_digest
+candidate = Path(os.environ['LITEHARNESS_MEMORY_WHEEL'])
+replacement = Path(os.environ['T0585_REPLACEMENT']).read_bytes()
+replaced = []
+def replace_after_validation(read):
+    digest = original_digest(read)
+    candidate.write_bytes(replacement)
+    replaced.append(hashlib.sha256(candidate.read_bytes()).hexdigest())
+    return digest
+semantic.code_digest = replace_after_validation
+def forbidden(*args, **kwargs): raise AssertionError('No pip/child execution allowed for replacement fixture')
+semantic.pip_install = semantic.run_owned = forbidden
+approved = semantic.approved_wheel(expected)
+cached = Path(approved['path']).read_bytes()
+assert len(replaced) == 1
+print(json.dumps({'approved':approved['sha256'], 'cached':hashlib.sha256(cached).hexdigest(),
+                  'replaced':replaced[0], 'candidate':hashlib.sha256(candidate.read_bytes()).hexdigest()}))'''
+    env = {**base_env, 'LITEHARNESS_CONVO_HOME': str(tmp_path / 'index'),
+           'LITEHARNESS_MEMORY_WHEEL': str(candidate), 'T0585_REPLACEMENT': str(replacement)}
+    answer = run([python, '-I', '-c', driver], env=env)
+    proof = json.loads(answer.stdout)
+    assert proof['replaced'] != proof['approved'], 'Replacement hook must actually change the external file'
+    assert proof['approved'] == hashlib.sha256(original).hexdigest()
+    assert proof['cached'] == proof['approved'], proof
+    assert (proof['candidate'] == proof['approved']) is already_cached
+    assert not (tmp_path / 'index/semantic-python').exists()
+    print('WHEEL_SNAPSHOT_PROOF=' + json.dumps(proof))
+
+
+def test_real_adopted_wheel_enforces_size_bound_during_read(installed, tmp_path):
+    _, python, wheel, base_env = installed
+    candidate = tmp_path / wheel.name
+    candidate.write_bytes(wheel.read_bytes())
+    driver = r'''import json,os
+from pathlib import Path
+from liteharness import memory_semantic as semantic
+expected = semantic.base_identity()
+candidate = Path(os.environ['LITEHARNESS_MEMORY_WHEEL'])
+real_open = Path.open
+limit = 32 * 1024 * 1024
+reads = []
+class BoundedReader:
+    def __init__(self, stream): self.stream = stream
+    def __enter__(self): return self
+    def __exit__(self, *args): self.stream.close()
+    def read(self, size=-1):
+        reads.append(size)
+        assert 0 < size <= limit + 1, f'Wheel read must enforce bound, not trust earlier stat (requested {size})'
+        return self.stream.read(size)
+def grow_on_open(path, *args, **kwargs):
+    if path == candidate and (args[0] if args else kwargs.get('mode', 'r')) == 'rb':
+        # Real growth after stat. Oversized bytes are data only, never installed.
+        with real_open(path, 'wb') as stream: stream.truncate(limit + 1)
+        assert path.stat().st_size == limit + 1, 'Growth injection must actually happen'
+        return BoundedReader(real_open(path, *args, **kwargs))
+    return real_open(path, *args, **kwargs)
+Path.open = grow_on_open
+def forbidden(*args, **kwargs): raise AssertionError('No pip/child execution allowed for oversized fixture')
+semantic.pip_install = semantic.run_owned = forbidden
+try:
+    semantic.approved_wheel(expected)
+except RuntimeError as error:
+    assert 'oversized' in str(error), str(error)
+else:
+    raise AssertionError('Grown wheel must be refused before validation/cache/install')
+assert reads == [limit + 1], reads
+print(json.dumps({'readSizes':reads, 'oversized':True}))'''
+    env = {**base_env, 'LITEHARNESS_CONVO_HOME': str(tmp_path / 'index'),
+           'LITEHARNESS_MEMORY_WHEEL': str(candidate)}
+    answer = run([python, '-I', '-c', driver], env=env)
+    assert json.loads(answer.stdout) == {'readSizes': [32 * 1024 * 1024 + 1], 'oversized': True}
+    assert not (tmp_path / 'index/semantic-wheel').exists()
+    assert not (tmp_path / 'index/semantic-python').exists()

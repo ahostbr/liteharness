@@ -7,6 +7,7 @@ system-site/PYTHONPATH lookup or a newly selected harness release.
 import contextlib
 import hashlib
 import importlib.metadata
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -163,12 +164,19 @@ def approved_wheel(expected):
     if not candidate.is_absolute() or candidate.suffix.lower() != '.whl' or '..' in candidate.parts:
         raise RuntimeError('Approved harness wheel must be an existing absolute local .whl')
     candidate = sources.unlinked(candidate)
-    if not candidate.is_file() or candidate.stat().st_size > 32 * 1024 * 1024:
+    limit = 32 * 1024 * 1024
+    if not candidate.is_file() or candidate.stat().st_size > limit:
         raise RuntimeError('Exact local LiteHarness wheel unavailable or oversized; repair setup')
-    digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    # One immutable, bounded snapshot binds hash, archive validation and cache.
+    # The external file may grow or be replaced after stat/validation.
+    with candidate.open('rb') as stream:
+        snapshot = stream.read(limit + 1)
+    if len(snapshot) > limit:
+        raise RuntimeError('Exact local LiteHarness wheel oversized; repair setup')
+    digest = hashlib.sha256(snapshot).hexdigest()
     if expected.get('wheelHash') and expected['wheelHash'] != digest:
         raise RuntimeError('Local wheel hash differs from adopted installed artifact')
-    with zipfile.ZipFile(candidate) as archive:
+    with zipfile.ZipFile(BytesIO(snapshot)) as archive:
         metadata = [n for n in archive.namelist() if n.startswith('liteharness-') and n.endswith('.dist-info/METADATA')]
         if len(metadata) != 1 or f"Version: {expected['harnessVersion']}" not in archive.read(metadata[0]).decode().splitlines():
             raise RuntimeError('Local harness wheel version differs from adopted distribution')
@@ -177,8 +185,8 @@ def approved_wheel(expected):
     target_dir = sources.unlinked(sources.home() / 'semantic-wheel')
     target_dir.mkdir(parents=True, exist_ok=True)
     target = sources.unlinked(target_dir / candidate.name)
-    if target != candidate:
-        atomic_bytes(target, candidate.read_bytes())
+    # Also restore the verified snapshot when the source is already the cache.
+    atomic_bytes(target, snapshot)
     return {'path': str(target), 'sha256': digest}
 
 
