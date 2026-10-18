@@ -73,12 +73,14 @@ def test_restart_never_blindly_resubmits(tmp_path, phase):
     assert (queue.pending / "message-1.json").exists()
 
 
-def test_preflight_failure_retains_mail_then_retries(tmp_path):
+def test_preflight_failure_retains_mail_then_retries(tmp_path, capsys):
     client = Client("preflight")
     queue = delivery.DeliveryQueue(tmp_path, "recipient", client)
     envelope(tmp_path)
     queue.step()
     assert client.sent == []
+    # The watcher log names why the transport refused, not just that it did.
+    assert "offline" in capsys.readouterr().out
     assert (queue.pending / "message-1.json").exists()
     assert delivery.read_json(queue.state_path("message-1"))["state"] == "pending"
     client.fail = None
@@ -178,10 +180,14 @@ const [pipe,proof,ready]=process.argv.slice(1);
 const server=net.createServer(s=>{
  let b=Buffer.alloc(0);
  s.on('data',d=>{b=Buffer.concat([b,d]);if(b.length<4||b.length<4+b.readUInt32LE(0))return;
-  const q=JSON.parse(b.subarray(4,4+b.readUInt32LE(0)));let result;
+  const q=JSON.parse(b.subarray(4,4+b.readUInt32LE(0)));let result,error;
   if(q.method==='tools/list') {
    if(q.params.threadStartKind!=='default') throw Error('invalid discovery schema');
    result={tools:['read_thread','send_message_to_thread'].map(name=>({namespace:'codex_app',name}))};
+  }
+  else if(q.params.callerSource!=='codex') {
+   // Codex Desktop 26.1013 rejects a tools/call envelope without callerSource.
+   error={code:-32602,message:'Invalid app tool request'};
   }
   else {
    if(q.params.threadId!=='recipient'||q.params.arguments.threadId!=='recipient') throw Error('wrong target');
@@ -189,7 +195,7 @@ const server=net.createServer(s=>{
    if(q.params.tool==='send_message_to_thread')fs.appendFileSync(proof,JSON.stringify(q)+'\n');
    result={success:true,contentItems:[{type:'inputText',text:JSON.stringify(payload)}]};
   }
-  const body=Buffer.from(JSON.stringify({jsonrpc:'2.0',id:q.id,result})),h=Buffer.alloc(4);h.writeUInt32LE(body.length);
+  const body=Buffer.from(JSON.stringify(error?{jsonrpc:'2.0',id:q.id,error}:{jsonrpc:'2.0',id:q.id,result})),h=Buffer.alloc(4);h.writeUInt32LE(body.length);
   const frame=Buffer.concat([h,body]); s.write(frame.subarray(0,2));setTimeout(()=>s.end(frame.subarray(2)),5);
  });s.on('error',()=>{});
 });server.listen(pipe,()=>fs.writeFileSync(ready,'ready'));
@@ -244,6 +250,7 @@ def test_attached_watcher_native_pipe_ack_and_hook_exclusion(tmp_path):
         submitted = [json.loads(line) for line in proof.read_text().splitlines()]
         assert len(submitted) == 1
         assert submitted[0]["params"]["turnId"] == "real-current-turn"
+        assert submitted[0]["params"]["callerSource"] == "codex"
         assert "receipt-test-body" in submitted[0]["params"]["arguments"]["prompt"]
         # Real hook invocation must leave wake-owned mail alone.
         unread = envelope(tmp_path, "hook-race")

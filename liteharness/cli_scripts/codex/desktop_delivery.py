@@ -121,14 +121,18 @@ class DesktopClient:
             raise DeliveryError("transport-result-unknown")
         reply = result["reply"]
         if "error" in reply or not isinstance(reply.get("result"), dict):
-            raise DeliveryError("app-request-rejected-or-unknown")
+            raise DeliveryError(f"app-request-rejected-or-unknown: {reply.get('error')}")
         return reply["result"]
 
     def call(self, tool: str, arguments: dict) -> dict:
+        # callerSource is required since Codex Desktop 26.1013 (its own client,
+        # plugins/codex-app-tools/server.mjs, sends it); without it every call is
+        # -32602 "Invalid app tool request" and no mail is ever delivered.
         return unwrap(self.rpc("tools/call", {
             "namespace": "codex_app", "tool": tool, "arguments": arguments,
             "threadId": self.agent_id, "turnId": self.turn_id,
             "callId": "liteharness-" + str(uuid.uuid4()),
+            "callerSource": "codex",
         }))
 
     def preflight(self) -> None:
@@ -239,9 +243,9 @@ class DeliveryQueue:
                     continue
                 try:
                     self.client.preflight()
-                except Exception:
+                except Exception as exc:
                     self.save_state(ident, "pending", retry_at=time.time() + 15)
-                    self.emit(ident, "transport-unavailable; retained")
+                    self.emit(ident, f"transport-unavailable ({exc}); retained")
                     continue
                 self.save_state(ident, "submitting")
                 try:
