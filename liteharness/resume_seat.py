@@ -170,6 +170,12 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
         raise ValueError('Claude registry backend contradicts its CLI identity')
     from .claude_identity import transcript_identity
     transcript_identity(registry, native_id=session_id, cwd=original_cwd)
+    from . import recovered_destination
+    if recovered_destination.active_scope() is not None:
+        recovered_destination.launch_native_claude(entry, roles.row_role(registry))
+        return
+    if recovered_destination.recover_if_reserved(entry['agent_id'], spawned_by or os.environ.get('LITEHARNESS_AGENT_ID')):
+        return
     # Delegate to the existing Claude launcher (trust, placement, env and registration).
     # Clearing the native resume fields avoids recursing back into this dispatcher.
     cli.cmd_spawn(spawn_cli="claude", split_mode=True, split_pane=pane,

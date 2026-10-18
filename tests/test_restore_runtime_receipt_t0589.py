@@ -53,6 +53,8 @@ def world(tmp_path, monkeypatch):
 
     def bridge(method, path, body=None, **kwargs):
         state['calls'].append((method, path, body))
+        if path.startswith('/harness/recovered-agent/locate?'):
+            return {'ok': True, 'found': False}
         if path == '/harness/spawn/resolve':
             return {'ok': True, 'agentId': AID, 'liteTuiDataRoot': str(data), 'request': {
                 'shell': 'litetui.exe', 'args': ['--backend', 'local', '--model', MODEL,

@@ -69,8 +69,10 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     tier = roles.normalize_role(tier)
     if tier not in roles.ROLES:
         raise StoreError('Owned resume requires explicit valid --tier')
-    caller = spawned_by or os.environ.get('LITEHARNESS_AGENT_ID')
-    if not caller:
+    from . import recovered_destination
+    recovery_scope = recovered_destination.active_scope()
+    caller = recovery_scope.get('launchParent') if recovery_scope else (spawned_by or os.environ.get('LITEHARNESS_AGENT_ID'))
+    if not caller and recovery_scope is None:
         raise StoreError('Owned resume requires explicit parent identity')
     refusal = fleet_policy.gate(saved['backend'], saved['model'], saved['thinking_level'])
     if refusal:
@@ -115,7 +117,14 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     if current != agent:
         raise StoreError('Agent authority changed during launch resolution')
     launched_at = datetime.now(timezone.utc)
-    result = cli._place_split(pane, caller, direction, cwd=cwd, launch=launch)
+    if recovery_scope is None:
+        try:
+            if recovered_destination.recover_if_reserved(agent.agent_id, caller):
+                return
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
+    result = (recovered_destination.place(launch) if recovery_scope is not None
+              else cli._place_split(pane, caller, direction, cwd=cwd, launch=launch))
     if not isinstance(result, dict) or not result.get('newSessionId') or result.get('error') or result.get('ok') is False:
         raise StoreError('Owned seat creation refused or uncertain; inspect sessions')
     # Preserve the existing fleet verification/cleanup contract on owned resumes.
@@ -132,6 +141,8 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     except Exception as exc:
         why = f'Owned fleet verification failed: {exc}'
     if why:
+        if recovery_scope is not None:
+            raise StoreError(f'Exact recovery session {session_id}: {why}; inspect, no automatic kill/relaunch')
         try:
             cleanup = cli._bridge_request('DELETE', f'/pty/{session_id}')
         except Exception as exc:
