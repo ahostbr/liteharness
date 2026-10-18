@@ -1442,7 +1442,7 @@ def main():
             import subprocess
             python = validate_environment(base_identity())
             # Delegate before creating telemetry; only the real child execution emits.
-            result = subprocess.run([str(python), '-I', str(Path(__file__).resolve()), *args], timeout=900)
+            result = subprocess.run([str(python), '-I', '-m', 'liteharness.memory_legacy', *args], timeout=900)
             if result.returncode:
                 raise SystemExit(result.returncode)
             return

@@ -137,8 +137,13 @@ def valid_event(row):
         return False
     duration = row.get('durationMs')
     import math
-    if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+    if type(duration) not in (int, float) or duration < 0:
         return False
+    try:
+        if not math.isfinite(duration):
+            return False
+    except OverflowError:
+        return False  # JSON integers are unbounded; float conversion is not.
     if 'error' in row and not text(row['error'], 2048):
         return False
     hits = row.get('hits')

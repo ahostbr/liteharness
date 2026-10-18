@@ -91,3 +91,17 @@ def test_recent_machine_api_skips_invalid_v1_and_preserves_valid_neighbors(corpu
             stream.write(json.dumps(row) + '\n')
         stream.write(json.dumps({**valid, 'id': 'neighbor'}) + '\n')
     assert [row['id'] for row in memory_lookup.dispatch('recent', {})] == ['neighbor', valid['id']]
+
+
+def test_recent_huge_integer_and_finite_boundaries_preserve_neighbor(corpus):
+    root, _ = corpus
+    with events.capture('finite neighbor'):
+        events.add_hit(None, 'neighbor', 'canary')
+    neighbor = events.recent()[0]
+    durations = [10 ** 400, -(10 ** 400), float('inf'), float('-inf'), float('nan'), True, [], {}, '0']
+    with (sources.home() / 'lookup-events.jsonl').open('a', encoding='utf-8') as stream:
+        for index, duration in enumerate(durations):
+            stream.write(json.dumps({**neighbor, 'id': f'invalid-{index}', 'durationMs': duration}) + '\n')
+        stream.write(json.dumps({**neighbor, 'id': 'finite-maximum', 'durationMs': sys.float_info.max}) + '\n')
+    rows = memory_lookup.dispatch('recent', {})
+    assert [row['id'] for row in rows] == ['finite-maximum', neighbor['id']]

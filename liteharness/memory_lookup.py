@@ -149,11 +149,16 @@ def dispatch(action, request, emit=lambda data: None, *, semantic_child=False):
         from lookup_evidence import search_evidence
         mode = request.get('mode', 'keyword')
         actual = {'keyword': 'bm25', 'exact': 'bm25'}.get(mode, mode)
-        if mode in ('semantic', 'hybrid') and not semantic_child and semantic_status(api)['state'] == 'ready':
+        if semantic_child is not False:
+            if not isinstance(semantic_child, dict):
+                raise ValueError('Semantic child requires the validated adopted identity')
+            from liteharness.memory_semantic import validate_child
+            validate_child(semantic_child)
+        if mode in ('semantic', 'hybrid') and semantic_child is False and semantic_status(api)['state'] == 'ready':
             from liteharness.memory_semantic import run_owned, base_identity
             return run_owned('search', request, base_identity())
         with lookup_events.capture(request['query'], mode, request.get('seat')):
-            if mode in ('semantic', 'hybrid') and semantic_status(api)['state'] != 'ready':
+            if mode in ('semantic', 'hybrid') and semantic_child is False and semantic_status(api)['state'] != 'ready':
                 actual = 'bm25'
                 lookup_events.fallback_keyword()
             with contextlib.redirect_stdout(io.StringIO()):

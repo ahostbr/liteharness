@@ -168,16 +168,27 @@ Semantic search uses all-MiniLM-L6-v2 (384 dimensions). By default the installed
 LiteHarness ONNX backend runs locally on CPU, avoiding the global torch/transformers
 dependency chain. The explicit Memory Install action
 (`python -m liteharness.memory_lookup install-semantic`, JSON `{}` on stdin)
-creates `semantic-python` under conversation home using copies (no links), installs
-optional extras only there, downloads model artifacts and smoke-validates them.
-It never pip-installs into the base/user-global interpreter. An atomic successful
-marker records the adopted interpreter and installed harness distribution identity;
-partial/cancelled/mismatched installs are not ready. If the adopted distribution
-is not exposed by system-site-packages, installation fails visibly: repair the
-app's recorded LiteHarness setup, rather than fetching a different harness.
+creates `semantic-python` under conversation home using copies (no links). It
+provisions the EXACT adopted local/bundled LiteHarness wheel offline (`--no-index
+--no-deps`), validating its installed code/version/archive hash; it does not trust
+whatever system-site-packages happens to expose. The wheel is located from the
+adopted installation's local `direct_url.json`, or explicitly through
+`LITEHARNESS_MEMORY_WHEEL` (an absolute existing local wheel, subject to the same
+identity checks). An absent/different wheel fails visibly; never fetch another
+or latest harness as a repair shortcut.
+
+Only then are optional extras installed in that owned prefix, model artifacts
+downloaded and smoke-validated. Pip destination-changing environment/config is
+neutralized and the owned prefix/non-user destination is explicit. It never
+pip-installs into the adopted/base/user-global interpreter. An atomic successful
+marker records separate adopted/creator/base/child identities and child-owned
+wheel/code provenance; partial/cancelled/mismatched installs are not ready.
 Only semantic work uses that interpreter; keyword/config/discovery/status/ordinary
 index operations do not launch it. Machine semantic requests fall back honestly
-to keyword while not installed. Conversation text stays local.
+to keyword while not installed; a validated child keeps the adopted identity and
+does not silently reclassify itself as uninstalled. Isolated human CLI routing
+uses `python -I -m liteharness.memory_legacy`, which resolves shipped adapters
+without a plugin-cache/PYTHONPATH search. Conversation text stays local.
 Alternatively set LITEHARNESS_CONVO_EMBED_BACKEND=sentence-transformers in an
 environment with a compatible sentence-transformers installation.
 
