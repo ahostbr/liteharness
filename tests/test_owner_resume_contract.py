@@ -34,6 +34,8 @@ def launched(tmp_path, monkeypatch, runtime_observer):
     monkeypatch.setattr(fleet_policy, 'verify_seat', lambda *a, **kw: None)
     monkeypatch.setattr(cli, '_rename_canvas_seat', lambda *a: None)
     def resolve(method, path, body=None):
+        if path.startswith('/harness/recovered-agent/locate?'):
+            return {'ok': True, 'found': False}
         if path == '/pty/list':
             return {'sessions': list(runtime_observer.sessions)}
         assert path == '/harness/spawn/resolve'

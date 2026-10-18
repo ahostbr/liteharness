@@ -4560,7 +4560,7 @@ def cmd_spawn(
                          **({"system_prompt_file": system_prompt_file} if system_prompt_file is not None else {}),
                          **({"owner_title": owner_title, "memory_dir": memory_dir} if owner_title else {}))
         except ValueError as exc:
-            print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
+            print(f"SPAWN REFUSED (resume did not report success): {exc}. Inspect any named recovery request/session before retrying.")
             sys.exit(2)
         return
     if takeover:

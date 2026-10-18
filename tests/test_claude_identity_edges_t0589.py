@@ -12,6 +12,10 @@ from test_claude_registration_resume_t0589 import AID, CID, NAME, registered  # 
 def resume(target, monkeypatch):
     entrypoint = cli.cmd_spawn
     launches = []
+    original_bridge = cli._bridge_request
+    monkeypatch.setattr(cli, '_bridge_request', lambda method, path, body=None, **kw:
+        {'ok': True, 'found': False} if path.startswith('/harness/recovered-agent/locate?')
+        else original_bridge(method, path, body, **kw))
     monkeypatch.setattr(cli, 'cmd_spawn', lambda **kwargs: launches.append(kwargs))
     try:
         entrypoint(split_mode=True, resume_agent_id=target, tier='worker', spawned_by='parent-589')

@@ -77,12 +77,13 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     refusal = fleet_policy.gate(saved['backend'], saved['model'], saved['thinking_level'])
     if refusal:
         raise StoreError(refusal)
-    if recovery_scope is None:
+    recovery_overrides = {'--system-prompt-file': system_prompt_file, '--prompt': prompt, '--cognitive': cognitive,
+                          '--owner': owner_title, '--memory': memory_dir}
+    has_overrides = any(value is not None for value in recovery_overrides.values())
+    if recovery_scope is None and not has_overrides:
         try:
             if recovered_destination.recover_if_reserved(agent.agent_id, caller, conversation_id=conversation_id,
-                    requested_cwd=cwd, requested_role=tier, overrides={
-                        '--system-prompt-file': system_prompt_file, '--prompt': prompt, '--cognitive': cognitive,
-                        '--owner': owner_title, '--memory': memory_dir}):
+                    requested_cwd=cwd, requested_role=tier):
                 return
         except ValueError as exc:
             raise StoreError(str(exc)) from exc
@@ -107,6 +108,13 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
             raise StoreError('Live owned seat exists; --system-prompt-file was not applied: '
                              'live prompt publication actor capability is unavailable; no seat was closed or duplicated')
         raise StoreError('Live owned seat exists; message it instead')
+    if recovery_scope is None and has_overrides:
+        try:
+            if recovered_destination.recover_if_reserved(agent.agent_id, caller, conversation_id=conversation_id,
+                    requested_cwd=cwd, requested_role=tier, overrides=recovery_overrides):
+                return
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
     resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {
         'cli': 'litetui', 'name': agent.name, 'tier': roles.wire_tier(tier), 'model': saved['model'],
         'backend': saved['backend'], 'thinkingLevel': saved['thinking_level'],
