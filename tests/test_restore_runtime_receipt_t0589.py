@@ -8,10 +8,12 @@ existing readiness defect independently of the later placement coordinator.
 """
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+import psutil
 import pytest
 
-from liteharness import cli, config, fleet_policy, hooks
+from liteharness import cli, config, fleet_policy
 from liteharness.agent_ownership import AgentSession
 from liteharness.agent_store import AgentStore
 
@@ -35,9 +37,16 @@ def world(tmp_path, monkeypatch):
     # Rename is an external renderer effect, not readiness/policy/placement.
     monkeypatch.setattr(cli, '_rename_canvas_seat_retrying', lambda *a: None)
     state = {'fault': 'live', 'created': False, 'child': None, 'calls': []}
-    monkeypatch.setattr(hooks, '_pid_alive', lambda pid: pid == PID and state['fault'] != 'dead')
-    monkeypatch.setattr(hooks, '_record_belongs_to_process',
-                        lambda aid, pid: aid == AID and pid == PID and state['fault'] != 'reused-pid')
+    # Substitute OS inspection, NOT the liveness/reuse decisions in hooks/CLI.
+    monkeypatch.setattr(psutil, 'pid_exists', lambda pid: pid == PID and state['fault'] != 'dead')
+
+    def process(pid):
+        assert pid == PID, 'test must not inspect an unrelated real process'
+        # A reused PID started AFTER this row registered; an exact owner predates it.
+        started = datetime.now(timezone.utc).timestamp() + 60 if state['fault'] == 'reused-pid' else 1
+        return SimpleNamespace(create_time=lambda: started)
+
+    monkeypatch.setattr(psutil, 'Process', process)
 
     def bridge(method, path, body=None, **kwargs):
         state['calls'].append((method, path, body))
