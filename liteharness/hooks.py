@@ -2104,6 +2104,11 @@ def register_presence() -> None:
     else:
         from .seat_lifecycle import registration
         registration(presence, "liteharness-session-register")
+        try:
+            from .claude_identity import record_registered_name
+            record_registered_name(presence)
+        except (ValueError, OSError) as exc:
+            print(f"[LITEHARNESS] Registered, but Claude resume index unavailable: {exc}", file=sys.stderr)
         # A FIRST registration is pushed to every live orchestrator (the user
         # 2026-09-12); resume/compaction re-registrations of a known id are not.
         if not existing:

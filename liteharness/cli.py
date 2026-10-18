@@ -1617,8 +1617,20 @@ def cmd_register(
     from .seat_lifecycle import capture_registration_identity, registration
     capture_registration_identity(presence)
     presence.pop("lifecycle_registry_record_id", None)
+    if presence.get('cli') in ('claude', 'claude-code'):
+        presence.setdefault('cwd', os.getcwd())
+        native_id = os.environ.get('CLAUDE_CODE_SESSION_ID') or os.environ.get('CLAUDE_SESSION_ID')
+        if native_id:
+            presence.setdefault('native_session_id', native_id)
+        if os.environ.get('LITEHARNESS_TRANSCRIPT_PATH'):
+            presence.setdefault('transcript_path', os.environ['LITEHARNESS_TRANSCRIPT_PATH'])
     _write_json_atomic(path, presence)
     registration(presence, "liteharness-cli-register")
+    try:
+        from .claude_identity import record_registered_name
+        record_registered_name(presence)
+    except (ValueError, OSError) as exc:
+        print(f"Warning: registered but Claude resume index unavailable: {exc}", file=sys.stderr)
     if presence.get("canvas_session_id"):
         rename_error = _rename_canvas_seat(str(presence["canvas_session_id"]), resolved_name)
         if rename_error:
@@ -3415,6 +3427,73 @@ def _registered_since(agent_id: str, since: datetime) -> bool:
         return False
 
 
+OWNED_RUNTIME_WAIT_SECONDS = 90.0
+
+
+def _owned_runtime_owner_live(agent_id: str, row: dict) -> bool:
+    # Legacy name-holding liveness is permissive when process birth is unknown.
+    # An executable launch receipt must fail closed on that same uncertainty.
+    try:
+        import psutil
+        pid, recorded = row.get('session_pid'), row.get('session_process_started_at')
+        if type(pid) is not int or pid <= 0 or type(recorded) not in (int, float) or recorded <= 0:
+            return False
+        return (psutil.Process(pid).create_time() * 1000 == recorded
+                and _agent_record_live(agent_id))
+    except Exception:
+        return False
+
+
+def _owned_runtime_receipt(agent_id: str, session_id: str, since: datetime) -> str | None:
+    """Read back one exact new runtime; policy agreement is a separate proof."""
+    try:
+        records = []
+        for path in (config.get_root() / 'agents').glob('*.json'):
+            row = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(row, dict):
+                return 'Malformed presence while inspecting exact runtime'
+            if row.get('canvas_session_id') == session_id:
+                records.append((path.stem, row))
+        if len(records) != 1 or records[0][0] != agent_id or records[0][1].get('agent_id') != agent_id:
+            return 'Exact session registration is absent, foreign or ambiguous'
+        if not _registered_since(agent_id, since) or not _owned_runtime_owner_live(agent_id, records[0][1]):
+            return 'Exact runtime owner is stale, exited or PID-reused'
+        response = _bridge_request('GET', '/pty/list')
+        if (not isinstance(response, dict) or response.get('error') or response.get('ok') is False
+                or not isinstance(response.get('sessions'), list)
+                or any(not isinstance(row, dict) for row in response['sessions'])):
+            return 'Current native sessions are unreadable'
+        matches = [row for row in response['sessions'] if row.get('id') == session_id]
+        if len(matches) != 1 or matches[0].get('harnessAgentId') != agent_id:
+            return 'Exact new native session is absent, foreign or ambiguous'
+        # Both transport and OS inspection can yield. Re-read registration and
+        # liveness after the native read so an exit during inspection is not success.
+        current = json.loads((config.get_root() / 'agents' / f'{agent_id}.json').read_text(encoding='utf-8'))
+        identity = ('agent_id', 'canvas_session_id', 'session_pid', 'registered_at',
+                    'session_process_started_at', 'model', 'backend', 'thinking_level')
+        if (any(current.get(key) != records[0][1].get(key) for key in identity)
+                or not _owned_runtime_owner_live(agent_id, current)):
+            return 'Runtime registration changed or owner exited during inspection'
+        holders = [json.loads(path.read_text(encoding='utf-8'))
+                   for path in (config.get_root() / 'agents').glob('*.json')]
+        if sum(row.get('canvas_session_id') == session_id for row in holders) != 1:
+            return 'Exact runtime became ambiguous during inspection'
+        return None
+    except Exception as exc:
+        return f'Runtime evidence unavailable: {type(exc).__name__}'
+
+
+def _wait_owned_runtime(agent_id: str, session_id: str, since: datetime) -> str | None:
+    deadline = time.monotonic() + OWNED_RUNTIME_WAIT_SECONDS
+    while True:
+        why = _owned_runtime_receipt(agent_id, session_id, since)
+        if why is None:
+            return None
+        if time.monotonic() >= deadline:
+            return f'Owned runtime unverified for exact session {session_id}: {why}; inspect, do not relaunch'
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+
+
 def _deliver_prompt(write_fn, turn_seen, brief_path, nudge: str, fallback: str, boot_timeout: float) -> str:
     """Wake a freshly spawned session and confirm its first turn actually started.
 
@@ -4098,6 +4177,7 @@ def _spawn_litetui_agent(
     except (StoreError, OSError, TypeError) as exc:
         print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
         sys.exit(2)
+    launched_at = datetime.now(timezone.utc)
     try:
         if pty_mode:
             created = _bridge_request("POST", "/pty/create", {
@@ -4129,6 +4209,10 @@ def _spawn_litetui_agent(
         print("SPAWN REFUSED: bridge returned no session id; launch may have created a session; "
               "check GET /pty/orphans. No session was guessed or deleted.")
         sys.exit(2)
+    receipt_error = _wait_owned_runtime(resolved["agentId"], session, launched_at)
+    if receipt_error:
+        print(f"SPAWN REFUSED: {receipt_error}")
+        sys.exit(2)
     try:
         why = fleet_policy.verify_seat(
             resolved["agentId"], config.get_root(), wait=90,
@@ -4153,6 +4237,19 @@ def _spawn_litetui_agent(
         if rename_error:
             print(f"Warning: canvas title not updated after retries: {rename_error}; a LiteTUI seat "
                   "does not re-assert it at registration", file=sys.stderr)
+    try:
+        final_policy_error = fleet_policy.verify_seat(
+            resolved["agentId"], config.get_root(), wait=0, backend=backend,
+            allow_silent=not governed, expect_model=floor_model, expect_thinking=thinking_level)
+    except Exception as exc:
+        final_policy_error = f"Final policy evidence unavailable: {exc}"
+    if final_policy_error:
+        print(f"SPAWN REFUSED: exact session {session}: {final_policy_error}; inspect, do not relaunch")
+        sys.exit(2)
+    receipt_error = _owned_runtime_receipt(resolved["agentId"], session, launched_at)
+    if receipt_error:
+        print(f"SPAWN REFUSED: exact session {session}: {receipt_error}; inspect, do not relaunch")
+        sys.exit(2)
     # Folder is authoritative. No legacy .convos scan/index write on fresh birth.
     print(json.dumps({"agent_id": resolved["agentId"], "agent_home": str(root / '.agents' / name),
                       **created}, ensure_ascii=False))
@@ -4312,6 +4409,7 @@ def cmd_spawn(
     thinking_level: str | None = None,
     spawned_by: str | None = None,
     spawn_cli: str = "claude",
+    resume_harness_id: str | None = None,
     takeover: bool = False,
     owner_title: str | None = None,
     memory_dir: str | None = None,
@@ -4607,7 +4705,14 @@ def cmd_spawn(
     # absent (config.py:175 `if explicit:`, extension.ts `|| ""`), so the child's
     # SessionStart hook mints the id from its own session — which is the one
     # identity that cannot belong to somebody else.
-    context_env["LITEHARNESS_AGENT_ID"] = ""
+    if resume_harness_id:
+        from .resume_seat import _registry
+        from .claude_identity import transcript_identity
+        native_id = _resumed_id(additional_args)
+        if spawn_cli != "claude" or not native_id:
+            raise ValueError("Harness resume identity requires an exact Claude native session")
+        transcript_identity(_registry(resume_harness_id), native_id=native_id)
+    context_env["LITEHARNESS_AGENT_ID"] = resume_harness_id or ""
 
     # `--name` used to reach the agent only as an instruction inside the typed
     # bootstrap ("register with --name X") — which vanished whenever the
@@ -4739,7 +4844,7 @@ def cmd_spawn(
 
         # "Launched", not "Spawned": until the seat registers nothing proves it
         # booted (T916-E: pty-4 died silently under a "Spawned … visible").
-        print(f"Launched claude in a {mode_label}; waiting for it to register:")
+        print(f"Launching claude in a {mode_label}; registration/resume identity unverified:")
         print(f"  Canvas session: {new_session}")
         print(f"  Directory: {target_dir}")
 
@@ -4757,7 +4862,7 @@ def cmd_spawn(
         # canvas_session_id at this new pane. `--continue` and a bare
         # `--resume` name no id: they fall to the canvas match and, if the seat
         # kept an old pane, end in SPAWN FAILED. Loud, not wrong.
-        resume_id = _resumed_id(additional_args)
+        resume_id = resume_harness_id or _resumed_id(additional_args)
         new_uuid = None
         deadline = time.time() + 90
         while new_session and time.time() < deadline:
@@ -4778,8 +4883,7 @@ def cmd_spawn(
             )
             sys.exit(1)
 
-        print(f"Spawned: registered as {new_uuid}")
-        print(f"  Agent ID: {new_uuid}")
+        # Report resumable success only after persisting the actual native identity.
         from . import naming
         name_refused = False
         if name and not naming.get_override(new_uuid):
@@ -4814,8 +4918,19 @@ def cmd_spawn(
             if spawned_leaf_id and not pdata.get("leaf_id"):
                 pdata["leaf_id"] = str(spawned_leaf_id)
             config.atomic_write_json(ppath, pdata)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"SPAWN INCOMPLETE: session {new_session} registered as {new_uuid}, but identity update failed: {exc}")
+            sys.exit(1)
+        try:
+            from .claude_identity import record_registered_name
+            if pdata.get('cli') not in ('claude-code', 'claude'):
+                raise ValueError('Registered native CLI is not Claude')
+            record_registered_name(pdata)
+        except (ValueError, OSError) as exc:
+            print(f"SPAWN INCOMPLETE: session {new_session} registered as {new_uuid}, but saved-name/native identity is unavailable: {exc}; inspect, do not relaunch")
+            sys.exit(1)
+        print(f"Spawned: registered and resumable as {new_uuid}")
+        print(f"  Agent ID: {new_uuid}")
 
         if brief_via_env:
             # Brief rode LITEHARNESS_SPAWN_BRIEF (file + env in the typed launch).

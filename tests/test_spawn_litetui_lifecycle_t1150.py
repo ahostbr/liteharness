@@ -10,7 +10,7 @@ from liteharness import cli, fleet_policy
 
 
 @pytest.fixture
-def world(monkeypatch, tmp_path):
+def world(monkeypatch, tmp_path, runtime_observer):
     calls = []
     state = {"pre": None, "verify": None, "create": None, "delete": {"success": True}}
     monkeypatch.setenv("LITEHARNESS_AGENT_ID", "caller-1")
@@ -35,9 +35,13 @@ def world(monkeypatch, tmp_path):
             args = ["--system-prompt-file", body["systemPromptFile"]] if "systemPromptFile" in body else []
             return {"ok": True, "agentId": "11111111-1111-4111-8111-111111111111", "request": {
                 "shell": "litetui.exe", "args": args, "env": {}, "harnessAgentId": "11111111-1111-4111-8111-111111111111"}}
+        if path == "/pty/list":
+            return {"sessions": list(runtime_observer.sessions)}
         if path in ("/pty/create", "/canvas/split"):
             if isinstance(state["create"], Exception):
                 raise state["create"]
+            if state["create"] is None:
+                runtime_observer.publish("11111111-1111-4111-8111-111111111111", "pty-7" if path == "/pty/create" else "pty-9")
             return state["create"] if state["create"] is not None else ({"session_id": "pty-7", "pid": 1} if path == "/pty/create"
                                         else {"ok": True, "newLeafId": "leaf-9", "newSessionId": "pty-9"})
         if path == "/canvas/rename-terminal":
@@ -100,7 +104,8 @@ def test_verified_seat_kept_and_reported(world, capsys, split, session):
     assert spawn(split=split, split_mode=split) == 0
     assert ops(calls, "DELETE") == []
     assert json.loads(capsys.readouterr().out)["agent_id"] == "11111111-1111-4111-8111-111111111111"
-    assert len(ops(calls, "verify")) == 1
+    assert len(ops(calls, "verify")) == 2
+    assert ops(calls, "verify")[-1][3]["wait"] == 0
 
 
 def test_ungoverned_request_allows_silent_but_checks_model(world):

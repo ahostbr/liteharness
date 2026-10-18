@@ -99,7 +99,8 @@ def preserve_before_delete(path: Path, expected: dict, reason: str) -> bool:
         # Resume/identity allowlist: never archive arbitrary RPC/auth payloads or recaps.
         fields = ("agent_id", "name", "tier", "model", "backend", "thinking_level", "cli",
                   "spawned_by", "session_pid", "session_process_started_at", "session_run_id",
-                  "started_at", "registered_at", "canvas_session_id", "provisional_id", "spawn_mode")
+                  "started_at", "registered_at", "canvas_session_id", "provisional_id", "spawn_mode",
+                  "cwd", "transcript_path", "native_session_id")
         saved = {key: current[key] for key in fields if key in current}
         saved.update(retired_at=datetime.now(timezone.utc).isoformat(), retirement_reason=reason)
         config.atomic_write_json(archive, saved)

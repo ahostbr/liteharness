@@ -36,4 +36,35 @@ def _no_live_name_index(monkeypatch, tmp_path):
 
     monkeypatch.setattr(agent_names, "index_path", guarded)
     monkeypatch.setattr(cli, "FRESH_NAME_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(cli, "OWNED_RUNTIME_WAIT_SECONDS", 0.0)
     monkeypatch.setenv("LITETUI_DATA_ROOT", str(tmp_path / "litetui-data"))
+
+
+@pytest.fixture
+def runtime_observer(tmp_path):
+    """Opt-in native/registration boundary for existing launch-construction tests.
+
+    Publish synthetic child observations, never mock receipt/policy decisions.
+    PID inspection observes this test interpreter; no native child is launched.
+    """
+    import json
+    import os
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from liteharness import config
+
+    sessions = []
+
+    def publish(agent_id, session_id):
+        root = config.get_root()
+        assert root.is_relative_to(tmp_path), 'runtime fixture must not write live presence'
+        directory = root / 'agents'
+        directory.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).isoformat()
+        row = dict(agent_id=agent_id, canvas_session_id=session_id, session_pid=os.getpid(),
+                   registered_at=now, last_seen=now, model='fixture', thinking_level='high',
+                   session_process_started_at=__import__('psutil').Process(os.getpid()).create_time() * 1000)
+        (directory / f'{agent_id}.json').write_text(json.dumps(row), encoding='utf-8')
+        sessions[:] = [dict(id=session_id, pid=os.getpid(), harnessAgentId=agent_id)]
+
+    return SimpleNamespace(publish=publish, sessions=sessions)

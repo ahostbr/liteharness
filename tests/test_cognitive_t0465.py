@@ -7,6 +7,7 @@ Two gaps the leader measured at dbbfd21:
 Fixtures (`lib`, `split`) come from the T0463-B tests: a private prompt library in tmp.
 """
 import os
+import json
 
 import pytest
 
@@ -80,7 +81,15 @@ def claude_seat(split, monkeypatch, tmp_path):
     entry = {"agent_id": AID, "convo_id": CID, "name": "ClaudeSeat", "backend": "claude",
              "cwd": str(tmp_path)}
     monkeypatch.setattr(agent_names, "resolve_name", lambda _n: entry)
-    monkeypatch.setattr(resume_seat, "_registry", lambda _i: {})
+    home = tmp_path / 'home'
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('USERPROFILE', str(home))
+    transcript = home / '.claude' / 'projects' / 'fixture' / f'{CID}.jsonl'
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({'sessionId': CID, 'cwd': str(tmp_path)}) + '\n', encoding='utf-8')
+    registry = dict(agent_id=AID, name='ClaudeSeat', cli='claude-code', cwd=str(tmp_path),
+                    transcript_path=str(transcript))
+    monkeypatch.setattr(resume_seat, "_registry", lambda _i: registry)
     monkeypatch.setattr(cli, "_live_owner_pid", lambda _r: None)
     return split[0]
 
@@ -102,7 +111,7 @@ def test_control_a_claude_resume_without_cognitive_keeps_name_resolution(claude_
 
 
 @pytest.fixture
-def owned_seat(lib, monkeypatch, tmp_path):
+def owned_seat(lib, monkeypatch, tmp_path, runtime_observer):
     """An owned LiteTUI home (as in test_owned_launch); records the bridge resolve body."""
     from liteharness import fleet_policy
     data = tmp_path / "data"
@@ -111,10 +120,11 @@ def owned_seat(lib, monkeypatch, tmp_path):
     project.mkdir()
     monkeypatch.setenv("LITETUI_DATA_ROOT", str(data))
     monkeypatch.setenv("LITEHARNESS_AGENT_ID", BID)
+    monkeypatch.setattr(cli.config, "get_root", lambda: tmp_path / "registry")
     monkeypatch.setattr(fleet_policy, "gate", lambda *a: None)
     monkeypatch.setattr(fleet_policy, "verify_seat", lambda *a, **kw: None)
     monkeypatch.setattr(cli, "_rename_canvas_seat", lambda *a: None)
-    monkeypatch.setattr(cli, "_place_split", lambda *a, **kw: {"newSessionId": "fixture"})
+    monkeypatch.setattr(cli, "_place_split", lambda *a, **kw: runtime_observer.publish(AID, "fixture") or {"newSessionId": "fixture"})
     with AgentSession.create_fresh(AgentStore(data), name="QuietHelm", agent_id=AID,
                                    backend="codex", model="fixture", thinking_level="high") as session:
         target = session.conversation_directory(CID) / "convo.jsonl"
@@ -124,7 +134,7 @@ def owned_seat(lib, monkeypatch, tmp_path):
 
     def bridge(method, path, body=None):
         if path == "/pty/list":
-            return {"sessions": []}
+            return {"sessions": list(runtime_observer.sessions)}
         if path == "/harness/spawn/resolve":
             resolved.append(body)
             return {"ok": True, "agentId": AID, "liteTuiDataRoot": str(data), "request": {

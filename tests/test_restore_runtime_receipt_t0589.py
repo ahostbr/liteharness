@@ -34,6 +34,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setenv('LITEHARNESS_AGENT_ID', PARENT)
     monkeypatch.setenv('LITESUITE_FLEET_POLICY', str(tmp_path / 'absent-policy.json'))
     monkeypatch.setattr(config, 'get_root', lambda: registry)
+    monkeypatch.setattr(cli, 'OWNED_RUNTIME_WAIT_SECONDS', 0)
     # Rename is an external renderer effect, not readiness/policy/placement.
     monkeypatch.setattr(cli, '_rename_canvas_seat_retrying', lambda *a: None)
     state = {'fault': 'live', 'created': False, 'child': None, 'calls': []}
@@ -42,6 +43,8 @@ def world(tmp_path, monkeypatch):
 
     def process(pid):
         assert pid == PID, 'test must not inspect an unrelated real process'
+        if state['fault'] == 'inaccessible':
+            raise psutil.AccessDenied(pid)
         # A reused PID started AFTER this row registered; an exact owner predates it.
         started = datetime.now(timezone.utc).timestamp() + 60 if state['fault'] == 'reused-pid' else 1
         return SimpleNamespace(create_time=lambda: started)
@@ -75,6 +78,7 @@ def world(tmp_path, monkeypatch):
             now = datetime.now(timezone.utc).isoformat()
             row = {'agent_id': AID, 'name': 'ReceiptSeat', 'backend': 'local',
                    'model': MODEL, 'thinking_level': 'high', 'session_pid': PID,
+                   'session_process_started_at': 1000,
                    'started_at': now, 'registered_at': now, 'last_seen': now,
                    'canvas_session_id': 'pty-t0589-old' if state['fault'] == 'wrong-session' else SESSION}
             (registry / 'agents' / f'{AID}.json').write_text(json.dumps(row), encoding='utf-8')
@@ -104,7 +108,8 @@ def launch(world, entry):
         kwargs = dict(split_mode=True, resume_agent_id='ReceiptSeat', resume_convo_id=CID,
                       split_pane='pane-parent')
     else:
-        kwargs = dict(spawn_cli='litetui', pty_mode=True, name='ReceiptSeat',
+        kwargs = dict(spawn_cli='litetui', pty_mode=entry != 'fresh-split',
+                      split_mode=entry == 'fresh-split', split_pane='pane-parent', name='ReceiptSeat',
                       backend='local', model=MODEL, thinking_level='high')
     try:
         cli.cmd_spawn(cwd=str(project), tier='worker', spawned_by=PARENT, **kwargs)
@@ -114,7 +119,7 @@ def launch(world, entry):
 
 
 @pytest.mark.parametrize('entry', ['fresh', 'owned-resume'])
-@pytest.mark.parametrize('fault', ['dead', 'reused-pid', 'wrong-session'])
+@pytest.mark.parametrize('fault', ['dead', 'reused-pid', 'wrong-session', 'inaccessible'])
 def test_matching_policy_row_is_not_an_exact_live_runtime_receipt(world, capsys, entry, fault):
     _, _, registry, state = world
     state['fault'] = fault
@@ -125,7 +130,7 @@ def test_matching_policy_row_is_not_an_exact_live_runtime_receipt(world, capsys,
         expect_model=MODEL, expect_thinking='high') is None
     if fault in ('dead', 'reused-pid'):
         assert not cli._agent_record_live(AID), 'real reuse-checked liveness rejects this owner'
-    else:
+    elif fault == 'wrong-session':
         row = json.loads((registry / 'agents' / f'{AID}.json').read_text(encoding='utf-8'))
         assert row['canvas_session_id'] != SESSION
     assert state['created']
