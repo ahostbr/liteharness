@@ -274,15 +274,15 @@ def test_emitted_owner_resume_argv_passes_real_consumer(launched, tmp_path, monk
     The harness imports from this checkout; the child imports that consumer,
     using the same interpreter and isolated HOME/data/lore, with no model call.
     """
+    from contextlib import redirect_stdout
+    from io import StringIO
+
     consumer = os.environ.get('LITETUI_CONSUMER_SRC')
     if not consumer:
         pytest.skip('explicit LITETUI_CONSUMER_SRC required for cross-repo receiver contract')
     consumer = Path(consumer).resolve()
     assert (consumer / 'litetui' / 'cli.py').is_file()
     kwargs, bridge, place, data, _ = launched
-    # Replace only the fixture's meta-only placeholder with a real consumer-made
-    # conversation; keeping both would correctly make bare named resume ambiguous.
-    (AgentStore(data).agent_directory('Alpha') / 'conversations' / CID).rename(tmp_path / 'unused-placeholder')
     workspace = tmp_path / 'receiver-workspace'
     workspace.mkdir()
     role = tmp_path / 'role.md'
@@ -311,7 +311,7 @@ def test_emitted_owner_resume_argv_passes_real_consumer(launched, tmp_path, monk
     def receive(phase, args, launch_env):
         completed = subprocess.run([sys.executable, str(helper), phase, str(state_file), str(output), *args],
                                    env={**env, **launch_env}, cwd=workspace, capture_output=True,
-                                   text=True, encoding='utf-8', timeout=45)
+                                   text=True, encoding='utf-8', timeout=45, check=False)
         # Exception output is sanitized: never dump complete SYSTEM or home/lore.
         assert completed.returncode == 0, ('consumer receiver failed', phase, completed.returncode,
                                           completed.stderr[-3000:])
@@ -321,6 +321,16 @@ def test_emitted_owner_resume_argv_passes_real_consumer(launched, tmp_path, monk
     receive('seed', [*selection, '--role-prompt-file', str(role), '--cognitive-file', str(method)], envelope)
     state = json.loads(state_file.read_text(encoding='utf-8'))
     old_cid = state['cid']
+    # BOTH catalog entries really exist: bare named resume must refuse rather
+    # than guess. Only after proving that boundary move the meta-only fixture
+    # placeholder (not genuine user history) outside this synthetic catalog.
+    refusal = StringIO()
+    with redirect_stdout(refusal), pytest.raises(SystemExit) as ambiguous:
+        cli.cmd_spawn(**kwargs, resume_agent_id='Alpha', system_prompt_file=str(custom), cognitive='linus')
+    assert ambiguous.value.code == 2 and 'Multiple owned conversations' in refusal.getvalue()
+    bridge.assert_not_called()
+    place.assert_not_called()
+    (AgentStore(data).agent_directory('Alpha') / 'conversations' / CID).rename(tmp_path / 'unused-placeholder')
     original = bridge.side_effect
 
     def resolve(request_method, path, body=None):
