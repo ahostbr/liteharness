@@ -22,8 +22,12 @@ def active_scope():
     return value[0] if value is not None else None
 
 
-def recover_if_reserved(agent_id, caller):
-    """Called AFTER ordinary resume authority checks, BEFORE ordinary placement."""
+def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd=None, requested_role=None, overrides=None):
+    """Read-only authority checks precede this; NEW-CREATE liveness checks follow.
+
+    A live runtime belonging to an independently authorized durable operation
+    must be reconcilable, not rejected as an unrelated new launch.
+    """
     if _active.get() is not None:
         return False
     from . import cli
@@ -32,14 +36,21 @@ def recover_if_reserved(agent_id, caller):
         raise ValueError('Recovery destination inspection unavailable; no ordinary split attempted')
     if not result['found']:
         return False
+    unsupported = [key for key, value in (overrides or {}).items() if value is not None]
+    if unsupported:
+        raise ValueError('Reserved-slot recovery does not support explicit ' + ', '.join(unsupported) + '; nothing launched or applied')
     response = cli._bridge_request('POST', '/harness/recovered-agent/restore', {
         **{key: result[key] for key in ('paneId', 'slotId', 'agentId', 'requestId') if key in result},
         'kind': 'agent-slot-recovery', 'actorId': caller,
-    })
+        **({'conversationId': conversation_id} if conversation_id else {}),
+        **({'requestedCwd': requested_cwd} if requested_cwd else {}),
+        **({'requestedRole': requested_role} if requested_role else {}),
+    }, timeout=210)
+    identity = f"request {result.get('requestId', '<host did not return request identity>')}; session {(response or {}).get('sessionId', '<allocation outcome unknown>')}"
     if not isinstance(response, dict) or response.get('status') != 'bound' or response.get('ok') is not True:
-        raise ValueError('Reserved-slot recovery refused or UNKNOWN; inspect exact request/session; no split fallback')
+        raise ValueError(f'Reserved-slot recovery refused or UNKNOWN: {identity}; no split fallback; reconcile this same operation')
     if response.get('agentId') != agent_id or not response.get('sessionId') or not response.get('leafId'):
-        raise ValueError('Reserved-slot receipt does not identify exact target; no split fallback')
+        raise ValueError(f'Reserved-slot receipt does not join target: {identity}; no split fallback')
     print(f"Restored {agent_id} into original leaf {response['leafId']}; session {response['sessionId']}")
     return True
 
@@ -229,10 +240,16 @@ def main():
 
 
 if __name__ == '__main__':
+    # -m executes as __main__; owned/native collaborators must share this exact
+    # ContextVar instance, not import a second ungoverned module instance.
+    sys.modules['liteharness.recovered_destination'] = sys.modules[__name__]
     try:
         result = main()
         print(json.dumps({'ok': True, **result}))
-    except (Exception, SystemExit):
-        # Never echo an opaque capability, launch argv, or request payload.
-        print(json.dumps({'ok': False, 'error': 'Governed recovery adapter refused or runtime uncertain'}))
+    except (Exception, SystemExit) as exc:
+        # Preserve safe diagnosis without echoing argv, capability or payload.
+        import traceback
+        frame = traceback.extract_tb(exc.__traceback__)[-1]
+        print(json.dumps({'ok': False, 'error': 'Governed recovery adapter refused or runtime uncertain',
+                          'errorType': type(exc).__name__, 'location': f'{Path(frame.filename).name}:{frame.name}:{frame.lineno}'}))
         sys.exit(1)

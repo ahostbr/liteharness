@@ -229,7 +229,7 @@ def _bridge_token_file() -> str:
 
 
 def _bridge_request(method: str, path: str, body: dict | None = None,
-                    *, lifecycle_origin: str | None = None) -> dict:
+                    *, lifecycle_origin: str | None = None, timeout: float = 15) -> dict:
     """Send an authenticated request to the LiteSuite Agent Bridge HTTP server."""
     import urllib.request
     import urllib.error
@@ -250,7 +250,7 @@ def _bridge_request(method: str, path: str, body: dict | None = None,
             method=method,
         )
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return None, json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             try:

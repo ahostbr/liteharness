@@ -77,6 +77,15 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     refusal = fleet_policy.gate(saved['backend'], saved['model'], saved['thinking_level'])
     if refusal:
         raise StoreError(refusal)
+    if recovery_scope is None:
+        try:
+            if recovered_destination.recover_if_reserved(agent.agent_id, caller, conversation_id=conversation_id,
+                    requested_cwd=cwd, requested_role=tier, overrides={
+                        '--system-prompt-file': system_prompt_file, '--prompt': prompt, '--cognitive': cognitive,
+                        '--owner': owner_title, '--memory': memory_dir}):
+                return
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
     # Readonly preflight. This lock is released before creation; the launched
     # child independently reacquires it before registration. No transfer/gap claim.
     from .agent_ownership import AgentSession, OwnershipError
@@ -117,12 +126,6 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     if current != agent:
         raise StoreError('Agent authority changed during launch resolution')
     launched_at = datetime.now(timezone.utc)
-    if recovery_scope is None:
-        try:
-            if recovered_destination.recover_if_reserved(agent.agent_id, caller):
-                return
-        except ValueError as exc:
-            raise StoreError(str(exc)) from exc
     result = (recovered_destination.place(launch) if recovery_scope is not None
               else cli._place_split(pane, caller, direction, cwd=cwd, launch=launch))
     if not isinstance(result, dict) or not result.get('newSessionId') or result.get('error') or result.get('ok') is False:

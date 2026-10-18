@@ -140,12 +140,6 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
     """Claude resolves sessions by project cwd; never substitute the caller's cwd."""
     from . import cli
     registry = _registry(entry["agent_id"])
-    if cli._live_owner_pid(registry):
-        raise ValueError(f"live: message {entry['name']} by inbox instead")
-    if registry.get("session_pid") and not registry.get("registered_at"):
-        from .hooks import _pid_alive
-        if _pid_alive(registry["session_pid"]):
-            raise ValueError("old seat pid is alive but its registration time is unknown")
     original_cwd = entry.get("cwd")
     if not isinstance(original_cwd, str) or not original_cwd.strip():
         raise ValueError(f"Claude seat {entry['name']} has no original cwd in the name index")
@@ -171,10 +165,19 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
     from .claude_identity import transcript_identity
     transcript_identity(registry, native_id=session_id, cwd=original_cwd)
     from . import recovered_destination
+    if recovered_destination.active_scope() is None and recovered_destination.recover_if_reserved(
+            entry['agent_id'], spawned_by or os.environ.get('LITEHARNESS_AGENT_ID'), conversation_id=session_id,
+            requested_cwd=str(working_dir), requested_role=tier,
+            overrides={'--prompt': prompt, '--cognitive': cognitive, '--model': model}):
+        return
+    if cli._live_owner_pid(registry):
+        raise ValueError(f"live: message {entry['name']} by inbox instead")
+    if registry.get("session_pid") and not registry.get("registered_at"):
+        from .hooks import _pid_alive
+        if _pid_alive(registry["session_pid"]):
+            raise ValueError("old seat pid is alive but its registration time is unknown")
     if recovered_destination.active_scope() is not None:
         recovered_destination.launch_native_claude(entry, roles.row_role(registry))
-        return
-    if recovered_destination.recover_if_reserved(entry['agent_id'], spawned_by or os.environ.get('LITEHARNESS_AGENT_ID')):
         return
     # Delegate to the existing Claude launcher (trust, placement, env and registration).
     # Clearing the native resume fields avoids recursing back into this dispatcher.
