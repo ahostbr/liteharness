@@ -25,6 +25,31 @@ versioned plugin caches.
 - Memory search indexes Claude project memory files separately. --mode all
   combines conversation keyword search and memory search; it is not vector search.
 
+### Canonical app/source interface
+
+`python -m liteharness.memory_lookup <action>` reads one JSON request on stdin and
+writes bounded NDJSON progress plus exactly one result/error terminal. Actions:
+`get-config`, `save-config`, `detect`, `status`, `index`, `install-semantic`,
+`recent`, `search`. Human CLI output above remains separate and unchanged.
+
+`sources.json` in conversation home is the only source configuration. Saves use
+version 1 and compare-and-increment `revision`; stale saves reject. With no file,
+Claude/Codex defaults above remain. Supported additional kinds are `claude-memory`,
+`litetui`, `obsidian`, `folder` (md/txt). Each configured folder remains separate,
+including disabled entries. Disabled-source rows are retained but hidden from
+retrieval. Invalid configuration fails closed, never broadens discovery.
+
+LiteTUI requires an explicit data root and validated `.agents/<Name>/settings.json`
+ownership. Only `conversations/<uuid>/convo.jsonl` is indexed, replaying snapshot,
+edit and truncate records. `.convos`, linked/reparse storage and sibling tool-raw
+files are excluded. Replayed logical messages have unknown physical provenance.
+No LiteTUI runtime package is required; the installed harness owns its validator.
+
+Lookups emit one best-effort bounded cinematic terminal event to
+`lookup-events.jsonl` (4 MiB cap). Recent history is at most 50 events / 7 days;
+corrupt/torn records are ignored. Spool/UI failure cannot fail retrieval. Tokens
+are theatrical, not citations or instructions. Replay never runs a new search.
+
 ## Commands
 
 Run with Python and the absolute path to this skill's script:
@@ -142,7 +167,9 @@ embedding refresh is running; it does not change the selected search mode.
 Semantic search uses all-MiniLM-L6-v2 (384 dimensions). By default the installed
 LiteHarness ONNX backend runs locally on CPU, avoiding the global torch/transformers
 dependency chain. Install liteharness[embed] if its optional dependencies are
-missing. Model artifacts are downloaded on first use; conversation text stays local.
+missing. Model artifacts are installed only through the explicit Memory Install
+action (`python -m liteharness.memory_lookup install-semantic`, JSON `{}` on stdin).
+Absent artifacts fail visibly; ordinary lookup never auto-downloads. Conversation text stays local.
 Alternatively set LITEHARNESS_CONVO_EMBED_BACKEND=sentence-transformers in an
 environment with a compatible sentence-transformers installation.
 

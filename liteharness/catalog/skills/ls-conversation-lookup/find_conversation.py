@@ -268,7 +268,7 @@ def summarize_with_llm(transcript: str, project: str) -> str:
 
 # ── FTS5 Search Index ───────────────────────────────────────────────────────
 
-def get_db(create=False):
+def get_db(create=False, read=False):
     """Get database connection, optionally creating schema."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=120)
@@ -340,6 +340,18 @@ def get_db(create=False):
         """)
         conn.commit()
         _ensure_provenance_columns(conn)
+    elif read:
+        # Connection-local read projections enforce source policy across legacy,
+        # packet, exact and vector readers without rewriting retained rows.
+        from memory_sources import policy
+        conn.create_function('memory_source_allowed', 2, policy())
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table, document in [('messages', 0), ('memory_content', 1), ('embeddings', 0)]:
+            if table not in tables:
+                continue
+            columns = {r[1] for r in conn.execute(f'PRAGMA main.table_info({table})')}
+            path = 'file_path' if 'file_path' in columns else 'NULL'
+            conn.execute(f'CREATE TEMP VIEW {table} AS SELECT rowid AS rowid, * FROM main.{table} WHERE memory_source_allowed({path}, {document})')
     return conn
 
 
@@ -541,7 +553,7 @@ def cmd_search(query, top_n=10, project_filter=None, msg_type=None, hours=None, 
         print("No index found. Run with --index first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     t_after, t_before = _time_cutoff(hours, date)
 
     # Build FTS5 query
@@ -604,7 +616,9 @@ def cmd_search(query, top_n=10, project_filter=None, msg_type=None, hours=None, 
     print(f"Found {len(results)} matches across {len(seen)} conversations")
     print(f"Top {len(deduped)} (best per conversation):\n")
 
+    from lookup_events import add_hit
     for i, (_, conv_id, project, timestamp, mtype, file_path, snippet, rank) in enumerate(deduped):
+        add_hit(file_path, conv_id, snippet)
         ts = ""
         if timestamp:
             try:
@@ -763,7 +777,7 @@ def cmd_search_semantic(query, top_n=10, project_filter=None, hours=None, date=N
         print("No index found. Run with --index-embeddings first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     _ensure_embedding_tables(conn)
 
     emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
@@ -840,7 +854,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
         print("No index found. Run with --index and --index-embeddings first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     _ensure_embedding_tables(conn)
 
     import numpy as np
@@ -892,6 +906,8 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
     emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     vec_scores = {}
     if emb_count == 0:
+        from lookup_events import fallback_keyword
+        fallback_keyword()
         print("[hybrid] No vectors indexed; returning keyword-only results. Run --index-embeddings.", file=sys.stderr)
     if emb_count > 0:
         model = _load_embedder()
@@ -1026,17 +1042,8 @@ def cmd_index_memory(force=False):
         indexed = dict(conn.execute("SELECT file_path, mtime FROM memory_files"))
 
         # Find all memory .md files across all projects
-        all_memory = []
-        for project_dir in (PROJECTS_DIR.iterdir() if PROJECTS_DIR.exists() else []):
-            if not project_dir.is_dir():
-                continue
-            memory_dir = project_dir / "memory"
-            if not memory_dir.is_dir():
-                continue
-            for md_file in memory_dir.glob("*.md"):
-                if md_file.name == "MEMORY.md":
-                    continue
-                all_memory.append((md_file, project_dir.name))
+        from memory_sources import documents
+        all_memory = list(documents())
 
         print(f"Found {len(all_memory)} memory files")
 
@@ -1101,7 +1108,7 @@ def cmd_search_memory(query, top_n=10, mem_type=None):
         print("No index found. Run with --index-memory first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     _ensure_memory_tables(conn)
 
     count = conn.execute("SELECT COUNT(*) FROM memory_content").fetchone()[0]
@@ -1143,7 +1150,9 @@ def cmd_search_memory(query, top_n=10, mem_type=None):
         return
 
     print(f"Found {len(results)} memory files matching '{query}'\n")
+    from lookup_events import add_hit
     for i, (fp, name, desc, mtype, snippet, rank) in enumerate(results):
+        add_hit(fp, fp, snippet, document=True)
         snip = snippet.replace("\\n", " ").replace("\n", " ").strip()[:300]
         proj = Path(fp).parent.parent.name.replace("C--", "").replace("E--", "").replace("-", "/")
         print(f"{'─'*70}")
@@ -1183,6 +1192,11 @@ def _print_memory_stats(conn):
 
 
 def _print_search_results(results, query, mode):
+    from lookup_events import add_hit
+    with __import__("contextlib").closing(get_db(read=True)) as event_db:
+        for cid, project, timestamp, text, score in results[:10]:
+            row = event_db.execute("SELECT file_path FROM messages WHERE conversation_id=? LIMIT 1", (cid,)).fetchone()
+            add_hit(row[0] if row else None, cid, text)
     """Print formatted search results."""
     print(f"Found {len(results)} conversations ({mode} search)\n")
     for i, (conv_id, project, timestamp, snippet, score) in enumerate(results):
@@ -1253,7 +1267,7 @@ def _print_stats(conn):
     _print_memory_stats(conn)
 
 
-def main():
+def _main():
     args = sys.argv[1:]
     # Opt-in ruling commands must never trigger the normal auto-index writer.
     if "--index-rulings" in args or "--search-rulings" in args:
@@ -1359,7 +1373,7 @@ def main():
         if not DB_PATH.exists():
             print("No index. Run --index first.")
             return
-        conn = get_db()
+        conn = get_db(read=True)
         _print_stats(conn)
         conn.close()
         return
@@ -1370,6 +1384,9 @@ def main():
     do_extract = "--extract" in args
 
     results = find_conversations(prefix)
+    from lookup_events import add_hit
+    for result in results[:10]:
+        add_hit(result["path"], result["uuid"], result["project"], source=result["provider"])
     if not results:
         print(f"No conversations found matching '{prefix}'")
         sys.exit(0)
@@ -1408,6 +1425,27 @@ def main():
         print("SUMMARY:")
         print(f"{'='*60}\n")
         print(summary)
+
+
+def main():
+    args = sys.argv[1:]
+    query = None
+    mode = 'keyword'
+    if '--search' in args and args.index('--search') + 1 < len(args):
+        query = args[args.index('--search') + 1]
+        if '--mode' in args and args.index('--mode') + 1 < len(args):
+            selected = args[args.index('--mode') + 1]
+            mode = selected if selected in ('semantic', 'hybrid', 'all') else 'keyword'
+        if '--exact-first' in args or '--packet' in args:
+            mode = 'exact'
+    elif args and not args[0].startswith('-'):
+        query = args[0]
+        mode = 'exact'
+    if query is None:
+        return _main()
+    from lookup_events import capture
+    with capture(query, mode):
+        return _main()
 
 
 if __name__ == "__main__":

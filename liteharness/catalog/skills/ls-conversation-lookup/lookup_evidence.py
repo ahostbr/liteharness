@@ -213,7 +213,7 @@ def search_evidence(api, query, top_n, project, role, mode, hours, date, exact_f
     if not api.DB_PATH.exists():
         unknowns.append('Index missing; run --index. Nothing was searched.')
     else:
-        with closing(api.get_db()) as conn:
+        with closing(api.get_db(read=True)) as conn:
             indexed = conn.execute('SELECT file_path,mtime FROM indexed_files').fetchall()
             coverage['indexed_files'] = len(indexed)
             coverage['current_files'] = sum(Path(p).exists() and Path(p).stat().st_mtime == m for p, m in indexed)
@@ -282,6 +282,11 @@ def search_evidence(api, query, top_n, project, role, mode, hours, date, exact_f
                 for key in list(hit):
                     if key.startswith('_'):
                         hit.pop(key)
+    from lookup_events import add_hit, fallback_keyword
+    for hit in results:
+        add_hit(hit['source']['path'], hit['conversation_id'] or hit['source']['path'], hit['snippet'], document=hit['kind'] == 'memory')
+    if mode == 'hybrid' and not coverage['embeddings']:
+        fallback_keyword()
     if coverage['provenance_unknown']:
         unknowns.append('Some returned lines could not be resolved: missing stable id/source, stale index, or scan byte/time cap.')
     envelope = {'schema_version': 1, 'query': query, 'mode': mode,
@@ -298,6 +303,8 @@ def search_evidence(api, query, top_n, project, role, mode, hours, date, exact_f
             if citations:
                 print(f"    Source: {hit['citation']}")
             print(f"    Snippet: {hit['snippet']}")
+
+    return envelope
 
 
 @serialized_index

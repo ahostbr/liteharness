@@ -46,20 +46,22 @@ def serialized_index(function):
 
 
 def source_roots():
-    home = Path.home()
-    claude = Path(os.environ.get('CLAUDE_CONFIG_DIR', home / '.claude'))
-    codex = Path(os.environ.get('CODEX_HOME', home / '.codex'))
-    return [('claude', claude / 'projects'),
-            ('codex', codex / 'sessions'),
-            ('codex', codex / 'archived_sessions')]
+    from memory_sources import conversation_roots
+    return conversation_roots()
 
 
 def conversation_files():
     seen = set()
+    from memory_sources import walk_files
     for provider, root in source_roots():
         if not root.exists():
             continue
-        for file in root.rglob('*.jsonl'):
+        if provider == 'litetui':
+            from litetui_source import owned_files
+            files = owned_files(root)
+        else:
+            files = walk_files(root, {'.jsonl'})
+        for file in files:
             key = str(file.resolve()).casefold()
             if key not in seen:
                 seen.add(key)
@@ -150,6 +152,8 @@ def identity(file):
             break
         match = re.search(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$', file.stem)
         return 'codex', match.group() if match else file.stem, project
+    if provider == 'litetui':
+        return provider, file.parent.name, file.parents[2].name
     return provider, file.stem, project
 
 
@@ -193,6 +197,10 @@ def normalized_records(file, budget=None):
     mid-turn exists only as a queued_command attachment (its queue-operation
     lines are the queue's log, not a delivery), so it becomes a user record here.
     """
+    if identity(file)[0] == 'litetui':
+        from litetui_source import replay
+        yield from replay(file, budget)
+        return
     for number, record in enumerate(records(file, budget=budget)):
         kind = record.get('type')
         if kind in ('user', 'assistant'):
