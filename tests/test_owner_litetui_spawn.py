@@ -32,7 +32,9 @@ def seat(tmp_path, monkeypatch):
     bridge = Mock(side_effect=lambda method, path, body=None: {
         "/harness/spawn/resolve": {
             "ok": True, "agentId": AGENT_ID, "liteTuiDataRoot": str(data),
-            "request": {"shell": "litetui", "args": [], "env": {}, "harnessAgentId": AGENT_ID},
+            "request": {"shell": "litetui", "args": (["--system-prompt-file", body["systemPromptFile"]]
+                                                     if body and "systemPromptFile" in body else []),
+                        "env": {}, "harnessAgentId": AGENT_ID},
         },
         "/pty/create": {"session_id": "fixture-session"},
     }[path])

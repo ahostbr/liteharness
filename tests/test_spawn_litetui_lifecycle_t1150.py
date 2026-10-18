@@ -32,8 +32,9 @@ def world(monkeypatch, tmp_path):
         if path.startswith("/context?"):
             return {"activePanes": [{"id": "canvas-pane-1", "leafCount": 1}]}
         if path == "/harness/spawn/resolve":
+            args = ["--system-prompt-file", body["systemPromptFile"]] if "systemPromptFile" in body else []
             return {"ok": True, "agentId": "11111111-1111-4111-8111-111111111111", "request": {
-                "shell": "litetui.exe", "args": [], "env": {}, "harnessAgentId": "11111111-1111-4111-8111-111111111111"}}
+                "shell": "litetui.exe", "args": args, "env": {}, "harnessAgentId": "11111111-1111-4111-8111-111111111111"}}
         if path in ("/pty/create", "/canvas/split"):
             if isinstance(state["create"], Exception):
                 raise state["create"]
@@ -192,6 +193,33 @@ def test_caller_system_file_is_separate_from_user_brief(world, custom):
     assert source.read_bytes() == before
 
 
+@pytest.mark.parametrize("kind", ["ignored", "wrong-path", "duplicate", "inline"])
+def test_fresh_custom_refuses_unacknowledged_or_conflicting_bridge(world, monkeypatch, capsys, kind):
+    calls, _, root = world
+    source = root / "caller.md"
+    source.write_text("New body", encoding="utf-8")
+    original = cli._bridge_request
+    def bridge(method, path, body=None):
+        result = original(method, path, body)
+        if path == "/harness/spawn/resolve":
+            args = ["--system-prompt-file", str(source)]
+            if kind == "ignored":
+                args = []
+            elif kind == "wrong-path":
+                args[1] = str(root / "wrong.md")
+            elif kind == "duplicate":
+                args += args
+            else:
+                args += ["--system-prompt", "inline body"]
+            result["request"]["args"] = args
+        return result
+    monkeypatch.setattr(cli, "_bridge_request", bridge)
+    assert spawn(system_prompt_file=str(source)) == 2
+    assert [call[1] for call in ops(calls, "POST")] == ["/harness/spawn/resolve"]
+    assert not ops(calls, "verify")
+    assert "--system-prompt-file" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("kind", ["relative", "missing", "directory", "utf8", "nul-path", "nul-body"])
 def test_invalid_caller_file_never_resolves_or_launches(world, capsys, kind):
     calls, _, root = world
@@ -223,4 +251,4 @@ def test_caller_file_is_refused_not_ignored_on_unsupported_routes(world, capsys,
     with pytest.raises(SystemExit) as exc:
         cli.cmd_spawn(**route, system_prompt_file=str(source), split_mode=True)
     assert exc.value.code == 2 and calls == []
-    assert "fresh --cli litetui" in capsys.readouterr().out
+    assert "--system-prompt-file" in capsys.readouterr().out

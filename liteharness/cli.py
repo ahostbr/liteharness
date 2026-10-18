@@ -3469,7 +3469,7 @@ SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
     ("--worktree", "worktree", False, "create a git worktree for the seat"),
     ("--permission-mode", "permission_mode", True, "claude --permission-mode"),
     ("--prompt", "prompt", True, "the brief"),
-    ("--system-prompt-file", "system_prompt_file", True, "fresh LiteTUI only: absolute UTF-8 file replacing the generic role body; actual tier remains authoritative"),
+    ("--system-prompt-file", "system_prompt_file", True, "fresh or offline owned LiteTUI --resume: absolute UTF-8 file replacing the role body; actual tier remains authoritative; live and legacy targets refuse"),
     ("--name", "name", True, "the seat's name"),
     ("--tier", "tier", True, "role: orchestrator | owner | builder | scout | critic (old tier words are accepted, deprecated)"),
     ("--cognitive", "cognitive", True, "cognitive architecture (default: tried from --name)"),
@@ -3983,6 +3983,18 @@ def cmd_fleet_check(argv: list[str]) -> None:
     print(ok)
 
 
+def _validate_system_prompt_file(value: str) -> None:
+    """Validate the complete caller source without rewriting it or publishing anything."""
+    try:
+        source = Path(value)
+        if not source.is_absolute() or not source.is_file():
+            raise ValueError("must be an absolute existing regular UTF-8 file")
+        if "\0" in source.read_text(encoding="utf-8"):
+            raise ValueError("body must not contain NUL")
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"--system-prompt-file: {exc}") from exc
+
+
 def _spawn_litetui_agent(
     *, model: str | None, cwd: str | None, prompt: str | None,
     name: str | None, tier: str | None, pty_mode: bool, split_mode: bool,
@@ -4050,13 +4062,9 @@ def _spawn_litetui_agent(
         sys.exit(2)
     if system_prompt_file is not None:
         try:
-            source = Path(system_prompt_file)
-            if not source.is_absolute() or not source.is_file():
-                raise ValueError("--system-prompt-file must be an absolute existing regular UTF-8 file")
-            if "\0" in source.read_text(encoding="utf-8"):
-                raise ValueError("body must not contain NUL")
-        except (OSError, ValueError) as exc:
-            print(f"SPAWN REFUSED: --system-prompt-file: {exc}. Nothing was spawned.")
+            _validate_system_prompt_file(system_prompt_file)
+        except ValueError as exc:
+            print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
             sys.exit(2)
     resolved = _bridge_request("POST", "/harness/spawn/resolve", {
         "cli": "litetui", "name": name, "tier": _roles.wire_tier(tier),
@@ -4078,7 +4086,8 @@ def _spawn_litetui_agent(
         root = owned_launch.data_root(resolved)
         launch = owned_launch.request(resolved, root=root, name=name,
                                       agent_id=resolved.get('agentId'), backend=backend,
-                                      model=model, thinking_level=thinking_level, fresh=True)
+                                      model=model, thinking_level=thinking_level, fresh=True,
+                                      system_prompt_file=system_prompt_file)
         if owner_title:
             # LiteTUI owner mode creates its own identity from the memory folder.
             # Keep the resolver's agent id in env, not the mutually exclusive argv.
@@ -4320,9 +4329,10 @@ def cmd_spawn(
     if spawn_cli not in ("claude", "litetui", "codex"):
         print("SPAWN REFUSED: --cli must be claude, litetui or codex. Nothing was spawned.")
         sys.exit(2)
-    if system_prompt_file is not None and (spawn_cli != "litetui" or resume_agent_id or resume_convo_id):
-        print("SPAWN REFUSED: --system-prompt-file is supported only for a fresh --cli litetui spawn. "
-              "Nothing was spawned.")
+    if system_prompt_file is not None and (spawn_cli == "codex" or
+            (not resume_agent_id and (spawn_cli != "litetui" or resume_convo_id))):
+        print("SPAWN REFUSED: --system-prompt-file requires a fresh --cli litetui spawn or "
+              "an owned LiteTUI --resume target. Nothing was spawned.")
         sys.exit(2)
     if owner_title or memory_dir:
         from . import owner as _owner
@@ -4330,7 +4340,8 @@ def cmd_spawn(
             print(f"SPAWN REFUSED: {'--memory' if owner_title else '--owner'} is also required: "
                   "--owner <Title> --memory <dir> go together. Nothing was spawned.")
             sys.exit(2)
-        if (spawn_cli not in ("claude", "litetui") or prompt or (cognitive and spawn_cli != "litetui")
+        if (spawn_cli not in ("claude", "litetui") or prompt
+                or (cognitive and spawn_cli != "litetui" and not (resume_agent_id and system_prompt_file is not None))
                 or (tier and _roles.normalize_role(tier) != "owner")
                 or (name and name != owner_title)):
             print("SPAWN REFUSED: --owner takes its prompt from SOUL.md and its name from the title, so it "
@@ -4448,6 +4459,7 @@ def cmd_spawn(
                          name=name, tier=tier, model=model, backend=backend,
                          thinking_level=thinking_level, spawned_by=spawned_by,
                          kill_old=kill_old, prompt=prompt, cognitive=cognitive,
+                         **({"system_prompt_file": system_prompt_file} if system_prompt_file is not None else {}),
                          **({"owner_title": owner_title, "memory_dir": memory_dir} if owner_title else {}))
         except ValueError as exc:
             print(f"SPAWN REFUSED: {exc}. Nothing was spawned.")
