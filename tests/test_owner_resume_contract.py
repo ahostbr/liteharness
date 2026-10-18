@@ -69,6 +69,9 @@ def test_owner_resume_keeps_conversation_and_memory(launched, selector, explicit
     for flag, value in (('--convo', CID), ('--owner', 'Alpha'), ('--memory', kwargs['memory_dir'])):
         assert args.count(flag) == 1
         assert args[args.index(flag) + 1] == value
+    # LiteTUI refuses --owner with --agent/--create-agent (cli.py: "--owner opens the agent
+    # home by its own name") and exits 2 a second after launch; --owner + --convo is its resume.
+    assert not {'--agent', '--create-agent', '--agent-id'} & set(args)
     assert settings == {p: p.read_bytes() for p in data.rglob('settings.json')}
 
 
@@ -88,6 +91,22 @@ def test_bare_owner_resume_refuses_without_downgrading(launched, capsys, retired
     assert '--owner' in output and '--memory' in output
     bridge.assert_not_called()
     place.assert_not_called()
+
+
+def test_owner_saved_without_owner_memory_resumes_as_owner_without_it(launched):
+    # A seat spawned with a plain `--tier owner` saved its conversation in its agent home.
+    # LiteTUI refuses to reopen that conversation under --owner/--memory ("Store mismatch:
+    # ... resume without --owner and --memory"), so the bare resume keeps the owner role
+    # and leaves the store to the folder: --agent + --convo, no owner flags.
+    kwargs, _, place, _, _ = launched
+    kwargs.pop('owner_title')
+    kwargs.pop('memory_dir')
+    cli.cmd_spawn(**kwargs, resume_agent_id='Alpha')
+    launch = place.call_args.kwargs['launch']
+    args = launch['args']
+    assert not {'--owner', '--memory'} & set(args)
+    assert args[args.index('--agent') + 1] == 'Alpha'
+    assert args[args.index('--convo') + 1] == CID
 
 
 def test_resume_validates_memory_like_first_launch(launched, tmp_path, capsys):

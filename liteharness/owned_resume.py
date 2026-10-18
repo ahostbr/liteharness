@@ -30,12 +30,18 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
         raise StoreError('Select an owned agent first')
     from .resume_seat import _registry
     # Presence supplies only a downgrade guard, never folder/execution authority.
-    if (roles.row_role(_registry(agent.agent_id)) == 'owner' or roles.normalize_role(tier) == 'owner'
-            or owner_title or memory_dir):
+    if owner_title or memory_dir:
         if not (owner_title and memory_dir):
             raise StoreError('Owner resume requires --owner <Title> --memory <dir>')
         if owner_title != agent.name:
             raise StoreError('--owner must match the resumed agent name')
+        tier = 'owner'
+    elif roles.row_role(_registry(agent.agent_id)) == 'owner' or roles.normalize_role(tier) == 'owner':
+        # An owner spawned with a plain --tier owner saved its conversation in its agent home,
+        # and LiteTUI refuses to reopen that under --owner/--memory ("Store mismatch").
+        # Keep the owner role and let the folder decide the store; never resume it lower.
+        if tier is not None and roles.normalize_role(tier) != 'owner':
+            raise StoreError('Owner resume requires --owner <Title> --memory <dir>')
         tier = 'owner'
     saved = agent.settings['execution']
     if saved['model'] is None:

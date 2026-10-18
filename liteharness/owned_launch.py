@@ -117,7 +117,10 @@ def request(resolution: dict, *, root: Path, name: str, agent_id: str,
     if fresh:
         args.extend(['--create-agent', name, '--agent-id', agent_id])
     else:
-        args.extend(['--agent', name])
+        # LiteTUI's --owner opens the home by its own name and refuses --agent beside it
+        # (exit 2 a second after launch); --owner + --convo is its owner resume.
+        if not owner_title:
+            args.extend(['--agent', name])
         if conversation_id is not None:
             args.extend(['--convo', valid_id(conversation_id)])
         # LiteTUI validates the complete launch text against the saved transcript
