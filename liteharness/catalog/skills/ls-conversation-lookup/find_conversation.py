@@ -47,7 +47,7 @@ DB_PATH = DATA_DIR / "convo_index.db"
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
 
 # Embedding config — all-MiniLM-L6-v2 (384 dims)
-# Stored in LiteSuite's model directory so end users auto-download on first use
+# Installed explicitly in conversation home; keyword-only profiles need no weights.
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 EMBEDDING_BATCH_SIZE = 64
@@ -268,7 +268,7 @@ def summarize_with_llm(transcript: str, project: str) -> str:
 
 # ── FTS5 Search Index ───────────────────────────────────────────────────────
 
-def get_db(create=False):
+def get_db(create=False, read=False):
     """Get database connection, optionally creating schema."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=120)
@@ -340,6 +340,18 @@ def get_db(create=False):
         """)
         conn.commit()
         _ensure_provenance_columns(conn)
+    elif read:
+        # Connection-local read projections enforce source policy across legacy,
+        # packet, exact and vector readers without rewriting retained rows.
+        from memory_sources import policy
+        conn.create_function('memory_source_allowed', 2, policy())
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for table, document in [('messages', 0), ('memory_content', 1), ('embeddings', 0)]:
+            if table not in tables:
+                continue
+            columns = {r[1] for r in conn.execute(f'PRAGMA main.table_info({table})')}
+            path = 'file_path' if 'file_path' in columns else 'NULL'
+            conn.execute(f'CREATE TEMP VIEW {table} AS SELECT rowid AS rowid, * FROM main.{table} WHERE memory_source_allowed({path}, {document})')
     return conn
 
 
@@ -541,7 +553,7 @@ def cmd_search(query, top_n=10, project_filter=None, msg_type=None, hours=None, 
         print("No index found. Run with --index first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     t_after, t_before = _time_cutoff(hours, date)
 
     # Build FTS5 query
@@ -604,7 +616,9 @@ def cmd_search(query, top_n=10, project_filter=None, msg_type=None, hours=None, 
     print(f"Found {len(results)} matches across {len(seen)} conversations")
     print(f"Top {len(deduped)} (best per conversation):\n")
 
+    from lookup_events import add_hit
     for i, (_, conv_id, project, timestamp, mtype, file_path, snippet, rank) in enumerate(deduped):
+        add_hit(file_path, conv_id, snippet)
         ts = ""
         if timestamp:
             try:
@@ -637,13 +651,11 @@ def _blob_to_vec(blob):
 
 
 def _load_embedder():
-    """Load sentence-transformers model (singleton, lazy).
+    """Lazily load the explicitly installed optional CPU ONNX model.
 
-    Uses the sentence-transformers default cache directory.
-    Set SENTENCE_TRANSFORMERS_HOME to override the cache location.
-    Auto-downloads on first use — no separate setup needed.
-
-    Prerequisites: pip install sentence-transformers
+    The default path never downloads: use the explicit Memory Install action.
+    The historical sentence-transformers override remains an opt-in legacy CLI
+    compatibility path; the app-owned semantic runner always selects ONNX.
     """
     if not hasattr(_load_embedder, "_model"):
         backend = os.environ.get("LITEHARNESS_CONVO_EMBED_BACKEND", "onnx")
@@ -688,14 +700,16 @@ def _chunk_conversation(file_path):
             "line_start": group[0]["line_number"],
             "line_end": group[-1]["line_number"],
             "byte_offset": group[0]["byte_offset"],
-            "byte_length": group[-1]["byte_offset"] + group[-1]["byte_length"] - group[0]["byte_offset"],
+            "byte_length": (group[-1]["byte_offset"] + group[-1]["byte_length"] - group[0]["byte_offset"]) if all(m.get("byte_offset") is not None and m.get("byte_length") is not None for m in group) else None,
             "source_signature": group[0]["source_signature"],
         })
     import hashlib
     with open(file_path, 'rb') as stream:
         for chunk in chunks:
-            stream.seek(chunk['byte_offset'])
-            chunk['record_hash'] = hashlib.sha256(stream.read(chunk['byte_length'])).hexdigest()
+            chunk['record_hash'] = None
+            if chunk['byte_offset'] is not None and chunk['byte_length'] is not None:
+                stream.seek(chunk['byte_offset'])
+                chunk['record_hash'] = hashlib.sha256(stream.read(chunk['byte_length'])).hexdigest()
     return chunks
 
 
@@ -763,7 +777,7 @@ def cmd_search_semantic(query, top_n=10, project_filter=None, hours=None, date=N
         print("No index found. Run with --index-embeddings first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     _ensure_embedding_tables(conn)
 
     emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
@@ -779,7 +793,8 @@ def cmd_search_semantic(query, top_n=10, project_filter=None, hours=None, date=N
     query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-8)
 
     # Load all embeddings (brute-force cosine — fast enough for ~100K chunks)
-    sql = "SELECT id, conversation_id, project, chunk_index, chunk_text, timestamp_start, embedding FROM embeddings"
+    path_column = 'file_path' if 'file_path' in {r[1] for r in conn.execute('PRAGMA table_info(embeddings)')} else 'NULL'
+    sql = f"SELECT id, conversation_id, project, chunk_index, chunk_text, timestamp_start, embedding, {path_column} FROM embeddings"
     clauses = []
     params = []
     if project_filter:
@@ -822,11 +837,13 @@ def cmd_search_semantic(query, top_n=10, project_filter=None, hours=None, date=N
     # Best per conversation
     seen = {}
     results = []
+    from lookup_events import add_hit
     for idx in ranked:
         cid = conv_ids[idx]
         if cid not in seen:
             seen[cid] = True
             results.append((cid, projects[idx], timestamps[idx], texts[idx], float(scores[idx])))
+            add_hit(rows[idx][7], cid, texts[idx])
         if len(results) >= top_n:
             break
 
@@ -840,7 +857,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
         print("No index found. Run with --index and --index-embeddings first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     _ensure_embedding_tables(conn)
 
     import numpy as np
@@ -854,7 +871,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
     bm25_sql = """
         SELECT m.conversation_id, m.project, m.timestamp,
                snippet(messages_fts, 0, '>>>', '<<<', '...', 64) as snippet,
-               bm25(messages_fts) as rank
+               bm25(messages_fts) as rank, m.file_path
         FROM messages_fts
         JOIN messages m ON m.id = messages_fts.rowid
         WHERE messages_fts MATCH ?
@@ -882,23 +899,28 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
     # Aggregate BM25: best score per conversation (bm25 returns negative, lower=better)
     bm25_scores = {}
     bm25_snippets = {}
-    for cid, proj, ts, snippet, rank in bm25_rows:
+    hit_paths = {}
+    for cid, proj, ts, snippet, rank, path in bm25_rows:
         score = abs(rank)
         if cid not in bm25_scores or score > bm25_scores[cid]:
             bm25_scores[cid] = score
             bm25_snippets[cid] = (proj, ts, snippet)
+            hit_paths[cid] = path
 
     # ── Vector pass ──
     emb_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
     vec_scores = {}
     if emb_count == 0:
+        from lookup_events import fallback_keyword
+        fallback_keyword()
         print("[hybrid] No vectors indexed; returning keyword-only results. Run --index-embeddings.", file=sys.stderr)
     if emb_count > 0:
         model = _load_embedder()
         query_vec = model.encode(query, convert_to_numpy=True)
         query_norm = query_vec / (np.linalg.norm(query_vec) + 1e-8)
 
-        emb_sql = "SELECT conversation_id, project, timestamp_start, chunk_text, embedding FROM embeddings"
+        path_column = 'file_path' if 'file_path' in {r[1] for r in conn.execute('PRAGMA table_info(embeddings)')} else 'NULL'
+        emb_sql = f"SELECT conversation_id, project, timestamp_start, chunk_text, embedding, {path_column} FROM embeddings"
         emb_clauses = []
         emb_params = []
         if project_filter:
@@ -914,7 +936,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
             emb_sql += " WHERE " + " AND ".join(emb_clauses)
 
         emb_rows = conn.execute(emb_sql, emb_params).fetchall()
-        for cid, proj, ts, text, emb_blob in emb_rows:
+        for cid, proj, ts, text, emb_blob, path in emb_rows:
             vec = np.array(_blob_to_vec(emb_blob), dtype=np.float32)
             vec_norm = vec / (np.linalg.norm(vec) + 1e-8)
             sim = float(np.dot(query_norm, vec_norm))
@@ -922,6 +944,7 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
                 vec_scores[cid] = sim
                 if cid not in bm25_snippets:
                     bm25_snippets[cid] = (proj, ts, text[:300])
+                    hit_paths[cid] = path
 
     # ── Merge scores ──
     all_cids = set(bm25_scores.keys()) | set(vec_scores.keys())
@@ -943,6 +966,9 @@ def cmd_search_hybrid(query, top_n=10, project_filter=None, msg_type=None, bm25_
         merged.append((cid, proj, ts, snippet, combined))
 
     merged.sort(key=lambda x: (-x[4], x[0]))
+    from lookup_events import add_hit
+    for cid, proj, ts, snippet, score in merged[:top_n]:
+        add_hit(hit_paths.get(cid), cid, snippet)
     _print_search_results(merged[:top_n], query, "hybrid")
     conn.close()
 
@@ -1026,17 +1052,8 @@ def cmd_index_memory(force=False):
         indexed = dict(conn.execute("SELECT file_path, mtime FROM memory_files"))
 
         # Find all memory .md files across all projects
-        all_memory = []
-        for project_dir in (PROJECTS_DIR.iterdir() if PROJECTS_DIR.exists() else []):
-            if not project_dir.is_dir():
-                continue
-            memory_dir = project_dir / "memory"
-            if not memory_dir.is_dir():
-                continue
-            for md_file in memory_dir.glob("*.md"):
-                if md_file.name == "MEMORY.md":
-                    continue
-                all_memory.append((md_file, project_dir.name))
+        from memory_sources import documents
+        all_memory = list(documents())
 
         print(f"Found {len(all_memory)} memory files")
 
@@ -1101,7 +1118,7 @@ def cmd_search_memory(query, top_n=10, mem_type=None):
         print("No index found. Run with --index-memory first.")
         sys.exit(1)
 
-    conn = get_db()
+    conn = get_db(read=True)
     _ensure_memory_tables(conn)
 
     count = conn.execute("SELECT COUNT(*) FROM memory_content").fetchone()[0]
@@ -1143,7 +1160,9 @@ def cmd_search_memory(query, top_n=10, mem_type=None):
         return
 
     print(f"Found {len(results)} memory files matching '{query}'\n")
+    from lookup_events import add_hit
     for i, (fp, name, desc, mtype, snippet, rank) in enumerate(results):
+        add_hit(fp, fp, snippet, document=True)
         snip = snippet.replace("\\n", " ").replace("\n", " ").strip()[:300]
         proj = Path(fp).parent.parent.name.replace("C--", "").replace("E--", "").replace("-", "/")
         print(f"{'─'*70}")
@@ -1253,7 +1272,7 @@ def _print_stats(conn):
     _print_memory_stats(conn)
 
 
-def main():
+def _main():
     args = sys.argv[1:]
     # Opt-in ruling commands must never trigger the normal auto-index writer.
     if "--index-rulings" in args or "--search-rulings" in args:
@@ -1359,7 +1378,7 @@ def main():
         if not DB_PATH.exists():
             print("No index. Run --index first.")
             return
-        conn = get_db()
+        conn = get_db(read=True)
         _print_stats(conn)
         conn.close()
         return
@@ -1370,6 +1389,9 @@ def main():
     do_extract = "--extract" in args
 
     results = find_conversations(prefix)
+    from lookup_events import add_hit
+    for result in results[:10]:
+        add_hit(result["path"], result["uuid"], result["project"], source=result["provider"])
     if not results:
         print(f"No conversations found matching '{prefix}'")
         sys.exit(0)
@@ -1408,6 +1430,39 @@ def main():
         print("SUMMARY:")
         print(f"{'='*60}\n")
         print(summary)
+
+
+def main():
+    args = sys.argv[1:]
+    semantic_requested = '--index-embeddings' in args or ('--mode' in args and args.index('--mode') + 1 < len(args) and args[args.index('--mode') + 1] in ('semantic', 'hybrid'))
+    if semantic_requested:
+        from liteharness.memory_semantic import paths, readiness, base_identity, validate_environment
+        directory, owned_python, marker = paths()
+        if Path(sys.executable).resolve() != owned_python.resolve() and readiness()[0]:
+            import subprocess
+            python = validate_environment(base_identity())
+            # Delegate before creating telemetry; only the real child execution emits.
+            result = subprocess.run([str(python), '-I', '-m', 'liteharness.memory_legacy', *args], timeout=900)
+            if result.returncode:
+                raise SystemExit(result.returncode)
+            return
+    query = None
+    mode = 'keyword'
+    if '--search' in args and args.index('--search') + 1 < len(args):
+        query = args[args.index('--search') + 1]
+        if '--mode' in args and args.index('--mode') + 1 < len(args):
+            selected = args[args.index('--mode') + 1]
+            mode = selected if selected in ('semantic', 'hybrid', 'all') else 'keyword'
+        if '--exact-first' in args or '--packet' in args:
+            mode = 'exact'
+    elif args and not args[0].startswith('-'):
+        query = args[0]
+        mode = 'exact'
+    if query is None:
+        return _main()
+    from lookup_events import capture
+    with capture(query, mode):
+        return _main()
 
 
 if __name__ == "__main__":

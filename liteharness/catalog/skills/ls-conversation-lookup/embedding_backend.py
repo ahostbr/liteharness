@@ -8,7 +8,7 @@ class OnnxEmbedder:
         from liteharness.embed_service import EmbedModel, download_model
         directory = Path(os.environ.get('LITEHARNESS_CONVO_HOME', Path.home() / '.liteharness' / 'conversations')) / 'models' / 'all-MiniLM-L6-v2'
         if not (directory / 'tokenizer.json').exists() or not (directory / 'onnx/model.onnx').exists():
-            download_model(directory)  # Downloads model artifacts only, never conversation text.
+            raise RuntimeError('Semantic model is not installed. Use the explicit Memory Install action first.')
         self.model = EmbedModel(directory)
 
     def get_sentence_embedding_dimension(self):
