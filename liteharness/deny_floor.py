@@ -117,7 +117,57 @@ import fnmatch
 import os
 import re
 import unicodedata
+from functools import wraps
 from pathlib import Path
+
+
+class UnresolvablePath(ValueError):
+    """A literal path cannot be checked; callers must refuse, not skip it."""
+
+    def __init__(self, path, error):
+        self.reason = _say("unresolvable-path",
+                           f"cannot resolve path {str(path)!r}: {str(error)!r}",
+                           "Supply a valid, resolvable literal path instead.")
+        super().__init__(self.reason)
+
+
+def _path_refusal(check):
+    """Translate only path-check failures at the sentence-returning floor doors."""
+    @wraps(check)
+    def guarded(*args, **kwargs):
+        try:
+            return check(*args, **kwargs)
+        except UnresolvablePath as error:
+            return error.reason
+    return guarded
+
+
+def _check_path_text(text: str, *, allow_globs: bool = False) -> None:
+    if "\x00" in text:
+        raise UnresolvablePath(text, "embedded null character in path")
+    # The '?' in Windows' extended-length namespace is not a filename glob.
+    checked = text[4:] if text.replace("/", "\\").startswith("\\\\?\\") else text
+    forbidden = '<>"|' + ("" if allow_globs else "?*")
+    if os.name == "nt" and any(ch in forbidden or ord(ch) < 32 for ch in checked):
+        raise UnresolvablePath(text, "invalid Windows path character")
+
+
+def resolve_path(path: Path, *, expanduser: bool = False) -> Path:
+    """Resolve a literal or raise UnresolvablePath (never a lexical safe fallback).
+
+    Missing paths remain valid with pathlib's non-strict resolution. Malformed
+    literals and filesystem failures cannot establish a safe target. Shared by
+    the seat guard, which also translates this exception into a refusal.
+    """
+    try:
+        expanded = path.expanduser() if expanduser else path
+        _check_path_text(str(expanded))
+        return expanded.resolve()
+    except UnresolvablePath:
+        raise
+    except (OSError, ValueError, RuntimeError) as error:
+        raise UnresolvablePath(path, error) from error
+
 
 HOME_VARIABLES = frozenset({
     "~", "$home", "${home}", "$env:home", "${env:home}",
@@ -316,9 +366,11 @@ def canonical_name(name: str) -> str:
     return last.split(":", 1)[0].rstrip(" .").lower()
 
 
-def dealias(path: str) -> str:
+def dealias(path: str, *, allow_globs: bool = True) -> str:
     """`path` with its last segment reduced to the file Windows opens (case kept),
-    so a stream suffix never reaches path resolution (a `$DATA` reads as a variable)."""
+    so a stream suffix never reaches path resolution (a `$DATA` reads as a variable).
+    Validate before reduction; direct tool paths pass allow_globs=False."""
+    _check_path_text(path, allow_globs=allow_globs)
     head, sep, last = path.replace("/", "\\").rpartition("\\")
     drive = ""
     if not sep and re.match(r"[A-Za-z]:", last):
@@ -351,10 +403,7 @@ def _is_data_root(folder: Path) -> bool:
     root = os.environ.get("LITETUI_DATA_ROOT")
     if not root:
         return False
-    try:
-        root_path = Path(root).expanduser().resolve()
-    except OSError:
-        return False
+    root_path = resolve_path(Path(root), expanduser=True)
     return os.path.normcase(str(root_path)) == os.path.normcase(str(folder))
 
 
@@ -366,13 +415,14 @@ def _jobs_say(target: Path) -> str:
                 "Schedule with /cron or LiteTUI's schedule tools instead.")
 
 
+@_path_refusal
 def write_refusal(path, workspace, home=None, *, name: str = _JOBS_NAME,
                   under: str | None = None) -> str | None:
     """The jobs-file refusal for a Write/Edit tool's `file_path`, or None. This
     rule ALONE: a tool write never meets the delete or launcher rules."""
     if not isinstance(path, str) or not path:
         return None
-    target = _resolve(dealias(path), Path(workspace),
+    target = _resolve(dealias(path, allow_globs=False), Path(workspace),
                       Path(home) if home is not None else Path.home())
     return _jobs_say(target) if is_jobs_file(target, name, under) else None
 
@@ -753,23 +803,18 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None,
 
     Relocated writes retain the conservative guard. This is literal syntax
     classification, not proof about aliases, variables or a script's effects.
+    Like jobs_write_target, raises UnresolvablePath when a literal cannot be checked.
     """
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
+    if "\x00" in command:
+        raise UnresolvablePath("<shell command>", "embedded null character in command")
     home = Path(home) if home is not None else Path.home()
     base = Path(workspace)
     parts = shell_commands(command, shell)
     env_assignment = any(re.match(
         r'(?i)^(?:(?:set|export)\s+)?(?:\$env:)?(?:GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE)\s*=',
         " ".join(w[0] for w in part["words"])) for part in parts)
-    inherited_relocation = False
-    for variable in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
-        value = os.environ.get(variable)
-        target = _resolve(value, base, home) if value else None
-        if target is not None and any(is_jobs_file(folder / name, name)
-                                      for folder in (target, *target.parents)):
-            inherited_relocation = True
-            break
     for part in parts:
         words = [w[0] for w in part["words"]]
         while words and re.match(r"(?i)^(?:GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE)=", words[0]):
@@ -779,6 +824,16 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None,
         args = words[1:]
         if part["complete"] and _git_read_words(args, part["redirects"]):
             continue
+        # Only a Git writer uses inherited relocation paths. A malformed Git
+        # environment must not refuse unrelated commands or literal readers.
+        inherited_relocation = False
+        for variable in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+            value = os.environ.get(variable)
+            target = _resolve(value, base, home) if value else None
+            if target is not None and any(is_jobs_file(folder / name, name)
+                                          for folder in (target, *target.parents)):
+                inherited_relocation = True
+                break
         relocating = (env_assignment or inherited_relocation
                       or any(word.startswith(("-C", "--git-dir", "--work-tree"))
                              for word in args)
@@ -797,8 +852,9 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None,
                             "Read schedules with a file-read tool instead.")
             if ":" in path and not re.match(r"^[A-Za-z]:", path):
                 path = path.partition(":")[2]
-            if reason := write_refusal(path, base, home, name=name, under=under):
-                return reason
+            target = _resolve(dealias(path), base, home)
+            if target is not None and is_jobs_file(target, name, under):
+                return _jobs_say(target)
         if relocating:
             return _say("jobs-file", "a repo-relocating Git write may change a LiteTUI "
                         "schedule outside the shell cwd; its target is not proven safe",
@@ -808,9 +864,15 @@ def jobs_git_refusal(command, workspace, home=None, *, shell=None,
 
 def jobs_write_target(command, workspace, home=None, *, shell=None,
                       name: str = _JOBS_NAME, under: str | None = None) -> Path | None:
-    """Protected schedule write target, using real argv and control boundaries."""
+    """Protected schedule write target, using real argv and control boundaries.
+
+    Raises UnresolvablePath for invalid literals; callers must refuse the call.
+    None means no recognized target, NOT a failed path check.
+    """
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
+    if "\x00" in command:
+        raise UnresolvablePath("<shell command>", "embedded null character in command")
     home = Path(home) if home is not None else Path.home()
     # Unknown shells are independent interpretations, not three consecutive cwd changes.
     dialects = (shell,) if shell in {"bash", "powershell", "cmd"} else ("bash", "powershell", "cmd")
@@ -821,6 +883,8 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
             head = words[0].replace("\\", "/").rsplit("/", 1)[-1].lower() if words else ""
             for op, word in part["redirects"]:
                 if op.startswith(">"):
+                    if dialect == "bash" and word[0].startswith(">(") and word[0].endswith(")"):
+                        continue  # computed fd, not a path; its inner commands are scanned below
                     target = _resolve(dealias(word[0]), base, home)
                     if is_jobs_file(target, name, under):
                         return target
@@ -874,6 +938,7 @@ def jobs_write_target(command, workspace, home=None, *, shell=None,
     return None
 
 
+@_path_refusal
 def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = None) -> str | None:
     """Refusal sentence, or None. Only a trusted runtime may prove `shell`.
 
@@ -882,6 +947,8 @@ def refusal(command, workspace, home=None, *, jobs=True, shell: str | None = Non
     """
     if not isinstance(command, str):
         command = " ".join(map(str, command or ()))
+    if "\x00" in command:
+        raise UnresolvablePath("<shell command>", "embedded null character in command")
     workspace = Path(workspace)
     home = Path(home) if home is not None else Path.home()
     if jobs and (reason := jobs_git_refusal(command, workspace, home, shell=shell)):
@@ -1581,12 +1648,14 @@ def _cd_target(rest: str, base: Path | None, home: Path) -> Path | None:
             return None
         if cut >= 0:
             break
-    return home.resolve()
+    return resolve_path(home)
 
 
 def _resolve(raw: str, base: Path | None, home: Path) -> Path | None:
     """The folder a target names, or None when a variable (or an unknown base
     under a relative target) hides it."""
+    if "\x00" in raw:
+        raise UnresolvablePath(raw, "embedded null character in path")
     if not _unquote(raw):
         return None  # a lone quote is no path; "" used to become "/", a drive root
     parts = re.split(r"[\\/]", _unquote(raw))
@@ -1595,7 +1664,7 @@ def _resolve(raw: str, base: Path | None, home: Path) -> Path | None:
     while parts and _GLOB.search(parts[-1]):
         parts.pop()  # `dir/*` empties dir: judge it as dir
     if not parts:
-        return base.resolve() if base is not None else None
+        return resolve_path(base) if base is not None else None
     text = "/".join(parts) if parts != [""] else "/"
     low = text.lower()
     for name in sorted(HOME_VARIABLES, key=len, reverse=True):
@@ -1614,10 +1683,7 @@ def _resolve(raw: str, base: Path | None, home: Path) -> Path | None:
         if base is None:
             return None
         path = base / path
-    try:
-        return path.resolve()
-    except OSError:
-        return Path(os.path.abspath(path))
+    return resolve_path(path)
 
 
 def _contains(outer: Path, inner: Path) -> bool:
@@ -1627,7 +1693,7 @@ def _contains(outer: Path, inner: Path) -> bool:
 
 
 def _protected(target: Path, workspace: Path, home: Path) -> str | None:
-    home = home.resolve()
+    home = resolve_path(home)
     if target.parent == target:
         return "a drive root"
     if _contains(target, home):
@@ -1637,7 +1703,7 @@ def _protected(target: Path, workspace: Path, home: Path) -> str | None:
     for name in HARNESS_DIRS:
         if _contains(target, home / name):
             return f"~/{name} (or a folder containing it)"
-    workspace = workspace.resolve()
+    workspace = resolve_path(workspace)
     if _contains(target, workspace) and not _contains(workspace, target):
         return "a folder containing the workspace"
     if (target / ".git").is_dir():
