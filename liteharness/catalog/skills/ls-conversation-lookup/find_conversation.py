@@ -47,7 +47,7 @@ DB_PATH = DATA_DIR / "convo_index.db"
 PROJECTS_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
 
 # Embedding config — all-MiniLM-L6-v2 (384 dims)
-# Stored in LiteSuite's model directory so end users auto-download on first use
+# Installed explicitly in conversation home; keyword-only profiles need no weights.
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 EMBEDDING_BATCH_SIZE = 64
@@ -651,13 +651,11 @@ def _blob_to_vec(blob):
 
 
 def _load_embedder():
-    """Load sentence-transformers model (singleton, lazy).
+    """Lazily load the explicitly installed optional CPU ONNX model.
 
-    Uses the sentence-transformers default cache directory.
-    Set SENTENCE_TRANSFORMERS_HOME to override the cache location.
-    Auto-downloads on first use — no separate setup needed.
-
-    Prerequisites: pip install sentence-transformers
+    The default path never downloads: use the explicit Memory Install action.
+    The historical sentence-transformers override remains an opt-in legacy CLI
+    compatibility path; the app-owned semantic runner always selects ONNX.
     """
     if not hasattr(_load_embedder, "_model"):
         backend = os.environ.get("LITEHARNESS_CONVO_EMBED_BACKEND", "onnx")
