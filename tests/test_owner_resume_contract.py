@@ -1,6 +1,9 @@
 """Owner launch/resume retains explicit memory without persisting launch authority."""
 import json
+import os
 import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -260,3 +263,102 @@ def test_resume_validates_memory_like_first_launch(launched, tmp_path, capsys):
     assert 'is missing SOUL.md' in capsys.readouterr().out
     bridge.assert_not_called()
     place.assert_not_called()
+
+
+@pytest.mark.parametrize('memory_backed', [False, True], ids=['agent-home-owner', 'owner-memory'])
+@pytest.mark.parametrize('selector', ['name', 'convo'])
+def test_emitted_owner_resume_argv_passes_real_consumer(launched, tmp_path, monkeypatch, memory_backed, selector):
+    """Receiver proof, not only a green sender/bridge mock.
+
+    Set LITETUI_CONSUMER_SRC to the explicitly pinned immutable consumer src.
+    The harness imports from this checkout; the child imports that consumer,
+    using the same interpreter and isolated HOME/data/lore, with no model call.
+    """
+    consumer = os.environ.get('LITETUI_CONSUMER_SRC')
+    if not consumer:
+        pytest.skip('explicit LITETUI_CONSUMER_SRC required for cross-repo receiver contract')
+    consumer = Path(consumer).resolve()
+    assert (consumer / 'litetui' / 'cli.py').is_file()
+    kwargs, bridge, place, data, _ = launched
+    # Replace only the fixture's meta-only placeholder with a real consumer-made
+    # conversation; keeping both would correctly make bare named resume ambiguous.
+    (AgentStore(data).agent_directory('Alpha') / 'conversations' / CID).rename(tmp_path / 'unused-placeholder')
+    workspace = tmp_path / 'receiver-workspace'
+    workspace.mkdir()
+    role = tmp_path / 'role.md'
+    role.write_text('# OWNER ROLE\nOLD SYNTHETIC DEFAULT BODY', encoding='utf-8')
+    method = tmp_path / 'method.md'
+    method.write_text('# POLYMATHIC LINUS\nSYNTHETIC METHOD', encoding='utf-8')
+    custom = tmp_path / 'caller.md'
+    custom.write_text('\ufeffNEW SYNTHETIC CALLER BODY\nUnicode: \u03bb', encoding='utf-8')
+    lore = tmp_path / 'synthetic-lore.md'
+    lore.write_text('FROZEN SYNTHETIC LORE', encoding='utf-8')
+    state_file = tmp_path / 'receiver-state.json'
+    output = tmp_path / 'receiver-receipt.json'
+    helper = Path(__file__).with_name('_owner_resume_consumer.py').resolve()
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('LITETUI_', 'LITEHARNESS_', 'LITESUITE_'))
+           and key not in ('CLAUDECODE', 'CODEX_SANDBOX', 'CODEX_SANDBOX_NETWORK_DISABLED')}
+    env.update(PYTHONPATH=str(consumer), PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1', PYTHONIOENCODING='utf-8',
+               LITETUI_CONSUMER_SRC=str(consumer), LITETUI_DATA_ROOT=str(data), LITETUI_NO_HARNESS='1',
+               HOME=str(tmp_path / 'profile'), USERPROFILE=str(tmp_path / 'profile'),
+               LITEHARNESS_LORE_FILE=str(lore), CLAUDE_SKILL_DIR=str(tmp_path / 'skills'))
+    envelope = {'LITETUI_SPAWN_IDENTITY': '1', 'LITEHARNESS_AGENT_ID': AID,
+                'LITEHARNESS_AGENT_NAME': 'Alpha', 'LITEHARNESS_TIER': 'leader',
+                'LITEHARNESS_SPAWNED_BY': PARENT}
+    env.update(envelope)
+
+    def receive(phase, args, launch_env):
+        completed = subprocess.run([sys.executable, str(helper), phase, str(state_file), str(output), *args],
+                                   env={**env, **launch_env}, cwd=workspace, capture_output=True,
+                                   text=True, encoding='utf-8', timeout=45)
+        # Exception output is sanitized: never dump complete SYSTEM or home/lore.
+        assert completed.returncode == 0, ('consumer receiver failed', phase, completed.returncode,
+                                          completed.stderr[-3000:])
+        return json.loads(output.read_text(encoding='utf-8'))
+
+    selection = ['--owner', 'Alpha', '--memory', kwargs['memory_dir']] if memory_backed else ['--agent', 'Alpha']
+    receive('seed', [*selection, '--role-prompt-file', str(role), '--cognitive-file', str(method)], envelope)
+    state = json.loads(state_file.read_text(encoding='utf-8'))
+    old_cid = state['cid']
+    original = bridge.side_effect
+
+    def resolve(request_method, path, body=None):
+        result = original(request_method, path, body)
+        if path == '/harness/spawn/resolve':
+            assert body['tier'] == 'leader' and body['spawnedBy'] == PARENT
+            result['request']['args'] = ['--role-prompt-file', str(role), '--cognitive-file', str(method),
+                                         '--system-prompt-file', body['systemPromptFile']]
+            # Exact typed identity envelope emitted by Suite's LiteTUI adapter,
+            # not a repair of malformed owner/agent flags after the producer.
+            result['request']['env'].update(envelope)
+        return result
+
+    bridge.side_effect = resolve
+    if not memory_backed:
+        kwargs.pop('owner_title')
+        kwargs.pop('memory_dir')
+    kwargs['cwd'] = str(workspace)
+    source_bytes = custom.read_bytes()
+    before = {p: p.read_bytes() for p in data.rglob('*') if p.is_file()}
+    target = {'resume_agent_id': 'Alpha'}
+    if selector == 'convo':
+        target['resume_convo_id'] = old_cid  # custom body requires an owned named target
+    cli.cmd_spawn(**kwargs, **target, system_prompt_file=str(custom), cognitive='linus')
+    launch = place.call_args.kwargs['launch']
+    args = launch['args']
+    assert args[args.index('--convo') + 1] == old_cid
+    assert ('--owner' in args) is memory_backed
+    assert ('--agent' in args) is not memory_backed
+    assert before == {p: p.read_bytes() for p in data.rglob('*') if p.is_file()}, 'producer wrote consumer HOME'
+    # Only the receiver may publish. Change disk lore after seeding to prove that
+    # resume retains the original frozen suffix rather than reconstructing it.
+    lore.write_text('CHANGED DISK LORE MUST NOT REPLACE FROZEN SNAPSHOT', encoding='utf-8')
+    receipt = receive('resume', args, launch['env'])
+    assert receipt['argv'] == args  # exact producer argv reached the real consumer
+    assert receipt['same_owned_home'] and receipt['requested_old_cid_active']
+    assert receipt['frozen_suffix_preserved'] and receipt['history_preserved']
+    assert receipt['audit_before_request'] and receipt['system_messages'] == 1
+    assert receipt['actual_owner_headers'] == receipt['selected_method_headers'] == receipt['custom_body_count'] == 1
+    assert custom.read_bytes() == source_bytes
+    print('REAL_CONSUMER_RECEIPT=' + json.dumps({key: value for key, value in receipt.items() if key != 'argv'}, sort_keys=True))
