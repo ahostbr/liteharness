@@ -32,7 +32,9 @@ def seat(tmp_path, monkeypatch):
     bridge = Mock(side_effect=lambda method, path, body=None: {
         "/harness/spawn/resolve": {
             "ok": True, "agentId": AGENT_ID, "liteTuiDataRoot": str(data),
-            "request": {"shell": "litetui", "args": [], "env": {}, "harnessAgentId": AGENT_ID},
+            "request": {"shell": "litetui", "args": (["--system-prompt-file", body["systemPromptFile"]]
+                                                     if body and "systemPromptFile" in body else []),
+                        "env": {}, "harnessAgentId": AGENT_ID},
         },
         "/pty/create": {"session_id": "fixture-session"},
     }[path])
@@ -138,6 +140,21 @@ def test_conflicting_or_unpaired_owner_flags_refuse_before_resolver(seat, capsys
     seat[0].update(override)
     assert_refused(seat, capsys, why)
     agent_names.resolve_name.assert_not_called()
+
+
+@pytest.mark.parametrize("cognitive", [None, "linus"])
+def test_owner_custom_role_body_preserves_memory_and_explicit_method(seat, tmp_path, cognitive):
+    kwargs, bridge, place, _, _ = seat
+    source = tmp_path / "caller body.md"
+    source.write_text("Own the producer domain.\n", encoding="utf-8")
+    cli.cmd_spawn(**kwargs, system_prompt_file=str(source), cognitive=cognitive)
+    body = bridge.call_args.args[2]
+    assert body["systemPromptFile"] == str(source)
+    assert body["tier"] == "leader"
+    assert body.get("cognitive") == cognitive
+    args = place.call_args.kwargs["launch"]["args"]
+    assert args[args.index("--owner") + 1] == "Alpha"
+    assert args[args.index("--memory") + 1] == kwargs["memory_dir"]
 
 
 def test_held_title_refuses_with_successor_advice(seat, capsys):

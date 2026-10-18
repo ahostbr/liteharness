@@ -11,8 +11,11 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
           model: str | None, backend: str | None, thinking_level: str | None,
           spawned_by: str | None, kill_old: bool, prompt: str | None,
           cognitive: str | None = None, owner_title: str | None = None,
-          memory_dir: str | None = None, root: Path | None = None) -> None:
+          memory_dir: str | None = None, root: Path | None = None,
+          system_prompt_file: str | None = None) -> None:
     from . import cli, fleet_policy
+    if system_prompt_file is not None:
+        cli._validate_system_prompt_file(system_prompt_file)
     if kill_old:
         raise StoreError('Owned named resume never closes a seat; wait until offline')
     root = owned_launch.data_root() if root is None else root
@@ -73,28 +76,39 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
         raise StoreError(refusal)
     # Readonly preflight. This lock is released before creation; the launched
     # child independently reacquires it before registration. No transfer/gap claim.
-    from .agent_ownership import AgentSession
-    with AgentSession.acquire_existing(store, agent_id=agent.agent_id) as session:
-        session.authority
+    from .agent_ownership import AgentSession, OwnershipError
+    try:
+        with AgentSession.acquire_existing(store, agent_id=agent.agent_id) as session:
+            session.authority
+    except OwnershipError as exc:
+        if system_prompt_file is not None:
+            raise StoreError('--system-prompt-file was not applied: seat is owned or inaccessible; '
+                             'live prompt publication actor capability is unavailable') from exc
+        raise
     rows = cli._bridge_request('GET', '/pty/list')
     if (not isinstance(rows, dict) or rows.get('error') or rows.get('ok') is False
             or not isinstance(rows.get('sessions'), list)
             or any(not isinstance(row, dict) for row in rows['sessions'])):
         raise StoreError('Cannot inspect current PTYs; owned resume deferred')
     if any(row.get('harnessAgentId') == agent.agent_id for row in rows['sessions']):
+        if system_prompt_file is not None:
+            raise StoreError('Live owned seat exists; --system-prompt-file was not applied: '
+                             'live prompt publication actor capability is unavailable; no seat was closed or duplicated')
         raise StoreError('Live owned seat exists; message it instead')
     resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {
         'cli': 'litetui', 'name': agent.name, 'tier': roles.wire_tier(tier), 'model': saved['model'],
         'backend': saved['backend'], 'thinkingLevel': saved['thinking_level'],
         'cwd': cwd, 'spawnedBy': caller, **({'prompt': prompt} if prompt is not None else {}),
         **({'cognitive': cognitive} if cognitive else {}),
+        **({'systemPromptFile': system_prompt_file} if system_prompt_file is not None else {}),
     })
     if not isinstance(resolution, dict) or resolution.get('ok') is not True:
         raise StoreError('Owned spawn resolution refused')
     launch = owned_launch.request(resolution, root=root, name=agent.name, agent_id=agent.agent_id,
                                   backend=saved['backend'], model=saved['model'],
                                   thinking_level=saved['thinking_level'], conversation_id=conversation_id,
-                                  owner_title=owner_title, memory_dir=memory_dir)
+                                  owner_title=owner_title, memory_dir=memory_dir,
+                                  system_prompt_file=system_prompt_file)
     # Revalidate folder after the external boundary; child repeats ownership check.
     current = store.find_agent(agent_id=agent.agent_id)
     if current != agent:
