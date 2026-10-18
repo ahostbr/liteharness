@@ -83,3 +83,20 @@ def test_real_registration_reports_index_failure_without_eviction_or_repair(regi
     hooks.register_presence()
     assert index.read_bytes() == before
     assert 'Claude resume index unavailable' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('fault', ['contradictory-native-without-pointer', 'contradictory-backend'])
+def test_named_index_cannot_override_contradictory_registry_identity(registered, monkeypatch, capsys, fault):
+    _, _, row_path, row = registered
+    row.update(exited_at=datetime.now(timezone.utc).isoformat(), status='offline')
+    if fault == 'contradictory-native-without-pointer':
+        row['native_session_id'] = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+        row.pop('transcript_path')
+    else:
+        row['backend'] = 'local'
+    row_path.write_text(json.dumps(row), encoding='utf-8')
+    before = agent_names.index_path().read_bytes()
+    code, launches = resume(NAME, monkeypatch)
+    assert code == 2 and launches == []
+    assert 'contradict' in capsys.readouterr().out
+    assert agent_names.index_path().read_bytes() == before

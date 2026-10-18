@@ -15,7 +15,10 @@ def transcript_identity(row: dict, *, native_id: str | None = None,
     root = Path(os.environ.get('CLAUDE_CONFIG_DIR') or (Path.home() / '.claude')) / 'projects'
     _unlinked(root)
     reference = row.get('transcript_path')
-    native_id = native_id or row.get('native_session_id')
+    registered_native = row.get('native_session_id')
+    if native_id and registered_native and native_id != registered_native:
+        raise ValueError('Claude registry native conversation contradicts its saved name')
+    native_id = native_id or registered_native
     if reference:
         path = Path(reference)
         if not path.is_absolute() or '..' in path.parts or not path.is_relative_to(root):
@@ -75,6 +78,8 @@ def record_registered_name(presence: dict) -> None:
     if presence.get('cli') not in ('claude-code', 'claude'):
         return
     from . import agent_names
+    if str(presence.get('backend') or 'claude').split('/', 1)[0].lower() != 'claude':
+        raise ValueError('Claude registration backend contradicts its CLI identity')
     if not presence.get('name') or not presence.get('agent_id'):
         raise ValueError('Claude registration lacks its actual resolved name/agent identity')
     # This also runs in a SPAWNER: its ambient native session is not the child.

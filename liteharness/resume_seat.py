@@ -166,6 +166,8 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
         raise ValueError(f"Claude resume keeps its indexed name: {entry['name']}")
     if registry.get('agent_id') != entry['agent_id'] or registry.get('cli') not in ('claude', 'claude-code'):
         raise ValueError('Claude registry identity is missing or contradicts its saved name')
+    if str(registry.get('backend') or 'claude').split('/', 1)[0].lower() != 'claude':
+        raise ValueError('Claude registry backend contradicts its CLI identity')
     from .claude_identity import transcript_identity
     transcript_identity(registry, native_id=session_id, cwd=original_cwd)
     # Delegate to the existing Claude launcher (trust, placement, env and registration).
