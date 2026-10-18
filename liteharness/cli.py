@@ -3469,6 +3469,7 @@ SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
     ("--worktree", "worktree", False, "create a git worktree for the seat"),
     ("--permission-mode", "permission_mode", True, "claude --permission-mode"),
     ("--prompt", "prompt", True, "the brief"),
+    ("--system-prompt-file", "system_prompt_file", True, "fresh LiteTUI only: absolute UTF-8 file replacing the generic role body; actual tier remains authoritative"),
     ("--name", "name", True, "the seat's name"),
     ("--tier", "tier", True, "role: orchestrator | owner | builder | scout | critic (old tier words are accepted, deprecated)"),
     ("--cognitive", "cognitive", True, "cognitive architecture (default: tried from --name)"),
@@ -3989,6 +3990,7 @@ def _spawn_litetui_agent(
     backend: str | None, thinking_level: str | None, spawned_by: str | None,
     takeover: bool = False,
     owner_title: str | None = None, memory_dir: str | None = None,
+    system_prompt_file: str | None = None,
 ) -> None:
     """One LiteTUI launch owner; the bridge resolves/places but never governs."""
     from . import agent_names, fleet_policy
@@ -4046,8 +4048,19 @@ def _spawn_litetui_agent(
     if pre:
         print(pre)
         sys.exit(2)
+    if system_prompt_file is not None:
+        try:
+            source = Path(system_prompt_file)
+            if not source.is_absolute() or not source.is_file():
+                raise ValueError("--system-prompt-file must be an absolute existing regular UTF-8 file")
+            if "\0" in source.read_text(encoding="utf-8"):
+                raise ValueError("body must not contain NUL")
+        except (OSError, ValueError) as exc:
+            print(f"SPAWN REFUSED: --system-prompt-file: {exc}. Nothing was spawned.")
+            sys.exit(2)
     resolved = _bridge_request("POST", "/harness/spawn/resolve", {
         "cli": "litetui", "name": name, "tier": _roles.wire_tier(tier),
+        **({"systemPromptFile": system_prompt_file} if system_prompt_file is not None else {}),
         **({"model": model} if model else {}),
         **({"backend": backend} if backend else {}),
         **({"thinkingLevel": thinking_level} if thinking_level else {}),
@@ -4293,6 +4306,7 @@ def cmd_spawn(
     takeover: bool = False,
     owner_title: str | None = None,
     memory_dir: str | None = None,
+    system_prompt_file: str | None = None,
 ) -> None:
     """Spawn a new Claude Code session or resume a Claude Code or LiteTUI split.
 
@@ -4306,17 +4320,21 @@ def cmd_spawn(
     if spawn_cli not in ("claude", "litetui", "codex"):
         print("SPAWN REFUSED: --cli must be claude, litetui or codex. Nothing was spawned.")
         sys.exit(2)
+    if system_prompt_file is not None and (spawn_cli != "litetui" or resume_agent_id or resume_convo_id):
+        print("SPAWN REFUSED: --system-prompt-file is supported only for a fresh --cli litetui spawn. "
+              "Nothing was spawned.")
+        sys.exit(2)
     if owner_title or memory_dir:
         from . import owner as _owner
         if not (owner_title and memory_dir):
             print(f"SPAWN REFUSED: {'--memory' if owner_title else '--owner'} is also required: "
                   "--owner <Title> --memory <dir> go together. Nothing was spawned.")
             sys.exit(2)
-        if (spawn_cli not in ("claude", "litetui") or prompt or cognitive
+        if (spawn_cli not in ("claude", "litetui") or prompt or (cognitive and spawn_cli != "litetui")
                 or (tier and _roles.normalize_role(tier) != "owner")
                 or (name and name != owner_title)):
             print("SPAWN REFUSED: --owner takes its prompt from SOUL.md and its name from the title, so it "
-                  "cannot be combined with --prompt, --cognitive, a different --name, a --tier other "
+                  "cannot be combined with --prompt, --cognitive on Claude, a different --name, a --tier other "
                   "than owner, or --cli other than claude or litetui. "
                   "Nothing was spawned.")
             sys.exit(2)
@@ -4380,9 +4398,8 @@ def cmd_spawn(
     # litetui and resume routes pass through it too (codex refuses --cognitive above).
     try:
         from . import prompts as _prompts_mod
-        # An owner's name is its title, not a polymath: the charter in SOUL.md is its identity,
-        # so --owner "Feynman" must not pick up the Feynman architecture by name.
-        _cog = None if owner_title else _prompts_mod.resolve_cognitive_file(
+        # An owner's title is not a polymath; only an explicit --cognitive selects its method.
+        _cog = None if owner_title and not cognitive else _prompts_mod.resolve_cognitive_file(
             cognitive or name or "", tier or _roles.DEFAULT_ROLE, tier_default=not cognitive)
     except Exception as _cog_exc:  # noqa: BLE001 — a name-only miss never kills a spawn
         if cognitive:
@@ -4416,7 +4433,8 @@ def cmd_spawn(
                              direction=split_direction, cognitive=cognitive,
                              backend=backend, thinking_level=thinking_level,
                              spawned_by=spawned_by, takeover=takeover,
-                             owner_title=owner_title, memory_dir=memory_dir)
+                             owner_title=owner_title, memory_dir=memory_dir,
+                             system_prompt_file=system_prompt_file)
         return
 
     if resume_agent_id or resume_convo_id:
