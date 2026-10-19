@@ -445,3 +445,66 @@ def test_child_processes_of_the_worker_are_started_without_a_console_window(monk
     checkpoint_restore._spawn(['x'], {}, 5)
     checkpoint_save._run(['y'], 5)
     assert [k.get('creationflags') for k in seen] == [subprocess.CREATE_NO_WINDOW] * 2
+
+
+# -- critic round 2: N4 lock backoff, N5 worker self-record, N7 remedy ---------------------------------------
+
+def test_journal_append_retries_while_the_store_is_locked_then_succeeds(svc, monkeypatch):
+    first = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    real = svc.store.append
+    attempts = []
+
+    def flaky(operation_id, event, *, expected_sequence):
+        attempts.append(expected_sequence)
+        if len(attempts) < 3:
+            raise ContractError('Checkpoint store locked; reconcile owner before retry')
+        return real(operation_id, event, expected_sequence=expected_sequence)
+    monkeypatch.setattr(svc.store, 'append', flaky)
+    naps = []
+    OperationLog(svc.store, first.operation_id, sleep=naps.append).event('plan', None, None)
+    assert len(attempts) == 3 and len(naps) == 2 and svc.store.operation(first.operation_id).events[0].stage == 'plan'
+
+
+def test_journal_append_gives_up_eventually_and_other_errors_are_not_retried(svc, monkeypatch):
+    first = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    calls = []
+
+    def always_locked(*a, **k):
+        calls.append(1)
+        raise ContractError('Checkpoint store locked; reconcile owner before retry')
+    monkeypatch.setattr(svc.store, 'append', always_locked)
+    with pytest.raises(ContractError, match='locked'):
+        OperationLog(svc.store, first.operation_id, sleep=lambda s: None).event('plan', None, None)
+    assert len(calls) > 3
+    calls.clear()
+    monkeypatch.setattr(svc.store, 'append', lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(ContractError('Journal sequence changed')))
+    with pytest.raises(ContractError, match='sequence'):
+        OperationLog(svc.store, first.operation_id, sleep=lambda s: None).event('plan', None, None)
+    assert len(calls) == 1
+
+
+def test_the_worker_records_its_own_pid_so_a_swallowed_submit_side_write_cannot_orphan_it(svc, monkeypatch):
+    original = svc._record_worker
+
+    def flaky(operation_id, pid):
+        if pid is not None:
+            raise OSError('disk')
+        return original(operation_id, pid)
+    monkeypatch.setattr(svc, '_record_worker', flaky)
+    first = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    path = svc._worker_path(first.operation_id)
+    path.write_text(json.dumps({'pid': None, 'created': None, 'submitted': svc.now() - 3600}))  # grace long over
+    assert svc.worker_alive(first.operation_id) is False
+    checkpoint_worker.register_self(svc.store, first.operation_id)  # what the worker does first thing
+    assert svc.worker_alive(first.operation_id) is True
+    assert json.loads(path.read_text())['pid'] == os.getpid()
+
+
+def test_worker_not_started_tells_the_caller_to_use_a_new_request_id(svc):
+    def broken(operation_id, root, log):
+        raise OSError('cannot spawn')
+    svc.launcher = broken
+    result = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    assert 'NEW request_id' in result.blockers[0].remedy and 'same request_id' not in result.blockers[0].remedy
+    again = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    assert again.operation_id == result.operation_id, 'the same request_id returns the same unstarted operation'

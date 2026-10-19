@@ -8,16 +8,22 @@ which status reports as `unknown`; the worker never relaunches work it cannot pr
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
 from .checkpoint_contract import Blocker, ContractError
-from .checkpoint_ops import OperationLog, make_result, read_params, seat_result
+from .checkpoint_ops import OperationLog, make_result, read_params, seat_result, write_worker_record
 from .checkpoint_restore import RestoreEnv, RestoreParams, run_restore
 from .checkpoint_save import SaveEnv, SaveParams, run_save
 from .checkpoint_store import CheckpointStore
 
 IN_FLIGHT = ('preparing', 'starting', 'verifying', 'reattaching')
+
+
+def register_self(store: CheckpointStore, operation_id: str) -> None:
+    """First thing the worker does: record its own pid, so status never depends on the submitter's write."""
+    write_worker_record(store, operation_id, os.getpid())
 
 
 def run(operation_id: str, harness_root: Path, *, save_env: SaveEnv | None = None,
@@ -26,6 +32,7 @@ def run(operation_id: str, harness_root: Path, *, save_env: SaveEnv | None = Non
     operation = store.operation(operation_id)
     if operation is None:
         raise ContractError('Unknown operation')
+    register_self(store, operation_id)
     params = read_params(store, operation_id)
     action = operation.request.action
     kind = params.get('kind', action)  # a retry runs the kind of the operation it retries

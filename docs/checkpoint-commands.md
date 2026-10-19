@@ -25,11 +25,11 @@ reports `unknown`, never `running`. One mutating operation may be active per sto
 The CLI is the trust anchor. `save`, `restore`, `cancel` and `retry` (not `--dry-run`, not
 `status`) need an actor id that resolves to a live registry ORCHESTRATOR
 (`recovered_destination.issuer`: online, owner process alive, not superseded). `--dry-run` exists
-only for `save` and `restore`; on any other action it is refused. On a direct CLI call the actor
-is the caller's own environment identity and `--actor-id`/`--leaf-id` are ignored. They count
-only on the tool path, where the bridge sets `LITESUITE_LEAF_ID` for the one-shot tool process:
-then `--leaf-id` must equal that leaf, and `--require-leaf` makes the leaf mandatory and equal to
-the actor row's `leaf_id`. Residual risk: a leaf id is discoverable by other seats through the
+only for `save` and `restore`; on any other action it is refused. Outside a LiteSuite terminal (no `LITESUITE_LEAF_ID`) the actor is the caller's own environment
+identity and `--actor-id`/`--leaf-id` are ignored. Where the bridge or a LiteSuite terminal set
+`LITESUITE_LEAF_ID`, `--actor-id` is honoured, but only because that leaf must equal the actor
+row's `leaf_id`; a `--leaf-id` that differs from the environment's is refused, and `--require-leaf`
+(always passed by the tool) makes the leaf mandatory. Residual risk: a leaf id is discoverable by other seats through the
 bridge, so this narrows impersonation without making it impossible; a scoped tool-only bridge
 token is the real fix and is out of this card.
 

@@ -20,7 +20,8 @@ from typing import Callable
 from uuid import uuid4
 
 from .checkpoint_contract import (Blocker, ContractError, Manifest, Request, Result, SeatResult, wire)
-from .checkpoint_ops import (OperationLog, make_result, read_params, rejected, seat_result, write_params)
+from .checkpoint_ops import (OperationLog, make_result, read_params, rejected, seat_result, worker_path,
+                             write_params, write_worker_record)
 from .checkpoint_restore import RestoreParams, resolve_checkpoint
 from .checkpoint_save import SaveParams, manifest_report
 from .checkpoint_store import AdmissionRefused, CheckpointStore, Operation, _atomic_json, _mkdir, checked_path, read_json
@@ -73,12 +74,10 @@ class Service:
 
     # -- worker bookkeeping --------------------------------------------------------------------
     def _worker_path(self, operation_id: str) -> Path:
-        return checked_path(self.store.root / 'params' / f'{operation_id}.worker.json', beneath=self.store.root)
+        return worker_path(self.store, operation_id)
 
     def _record_worker(self, operation_id: str, pid: int | None) -> None:
-        _mkdir(self._worker_path(operation_id).parent)
-        _atomic_json(self._worker_path(operation_id), {'pid': pid, 'created': _create_time(pid) if pid else None,
-                                                        'submitted': self.now()})
+        write_worker_record(self.store, operation_id, pid, submitted=self.now() if pid is None else None)
 
     def worker_alive(self, operation_id: str) -> bool:
         path = self._worker_path(operation_id)
@@ -148,7 +147,7 @@ class Service:
             pid = self.launcher(operation.operation_id, self.harness_root, log_path)
         except OSError:
             return make_result(operation.operation_id, None, 'unknown', [], [Blocker(
-                'worker-not-started', None, 'The operation is saved; status it, then submit again with the same request_id')])
+                'worker-not-started', None, 'The operation is saved but its worker did not start; submit again with a NEW request_id')])
         try:
             self._record_worker(operation.operation_id, pid)
         except OSError:
