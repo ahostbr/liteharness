@@ -66,3 +66,15 @@ Placement never puts a seat in the coordinator's pane: the coordinator's panes r
 session (`pointer-not-delivered` when no turn is confirmed). Bare restored shells (no child
 process, no seat, not the coordinator's pane, at least one leaf kept per pane) are closed after
 the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
+
+## Known limits
+
+- Restore refuses to launch a seat that another operation on the same checkpoint started and never
+  reported on (`prior-attempt-unknown`); reconcile it first. A seat's `live` needs the registry row
+  and a hosting PTY to agree, otherwise it is `unknown` and is not reattached.
+- Bare-shell cleanup closes only a PTY whose root process is a shell, with no child, not a seat, and
+  with a cwd equal to a saved seat's cwd. Anything unreadable stays.
+- A mid-work (`held`) seat keeps its handoff but is never compacted: `held-not-compacted`.
+- Compaction needs `checkpoint.compact_command` for Claude seats; none ships.
+- Layout receipts are observation, not a flush proof (LiteSuite has no flush endpoint).
+- An orchestrator caller of any `spawn --split` no longer falls into its own pane by default.
