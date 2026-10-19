@@ -253,7 +253,8 @@ class Saver:
         params, env = self.params, self.env
         self.layout = env.layout()
         discovery = discover_current(harness_root=params.harness_root, include_offline=params.include_offline,
-                                     exclude_ids=params.exclude_ids, litetui_root=params.litetui_root,
+                                     exclude_ids=params.exclude_ids, coordinator_id=params.coordinator_id,
+                                     litetui_root=params.litetui_root,
                                      layout_revision=self.layout[0] if self.layout else 'unobserved',
                                      live=env.live)
         census = roster_census(discovery, harness_root=params.harness_root, cwd_roots=params.cwd_roots)

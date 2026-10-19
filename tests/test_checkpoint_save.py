@@ -561,3 +561,39 @@ def test_the_watch_restarts_from_the_top_when_the_transcript_shrinks(tmp_path):
     fresh = json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'n', 'timestamp': '2026-10-19T12:00:00+00:00'})
     log.write_text(fresh + chr(10), encoding='utf-8')  # replaced by a shorter, rewritten file
     assert watch.poll()['uuid'] == 'n'
+
+
+def test_a_seat_the_user_started_himself_is_neither_asked_nor_compacted_and_is_recorded_as_excluded(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    direct = w.claude(3)  # started by hand: nobody spawned it
+    compacted(w, coord, handoff)
+    store, params, result, _ = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert {s.agent_id for s in manifest.seats} == {coord, peer}
+    assert [(e.agent_id, e.reason) for e in manifest.exclusions] == [(direct, 'started-directly')]
+    assert all(recipient != direct for _, recipient, _ in w.fleet.sent)       # never asked for a handoff
+    assert all(direct not in argv for argv in w.fleet.ran)                     # never compacted
+    assert result.state == 'complete' and direct not in {s.seat_id for s in result.seats}
+
+
+def test_exclude_by_name_keeps_a_spawned_seat_out_of_the_save(world):
+    w = world
+    coord, handoff = coordinator(w)
+    w.claude(2, parent=coord)
+    kept_out = w.claude(3, parent=coord)
+    compacted(w, coord, handoff)
+    put(w.harness / 'names.json', w.names)
+    store = CheckpointStore(w.harness)
+    operation = store.submit(Request(1, 'save', uid(810), None, None, [], False), actor_id=coord)
+    env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
+                  litetui=w.fleet.litetui, layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}),
+                  live=lambda row: row['agent_id'] in w.live, handoff_timeout=30, poll_interval=1,
+                  compact_command=['compact-tool', '{name}', '{agent_id}'])
+    params = SaveParams(str(w.harness), coord, str(handoff), uid(860), exclude_ids=['claude-3'],
+                        litetui_root=str(w.owned_root), cwd_roots=[str(w.tmp)])
+    run_save(store, operation.operation_id, params, env)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert kept_out not in {s.agent_id for s in manifest.seats}
+    assert [(e.agent_id, e.reason) for e in manifest.exclusions] == [(kept_out, 'excluded-by-request')]
