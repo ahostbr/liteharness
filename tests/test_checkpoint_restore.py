@@ -77,6 +77,12 @@ class Box:
                           send_mail=self.mail, wake=self.wake,
                           verify_timeout=5, poll_interval=1, **kw)
 
+    def make_live(self, agent_id):
+        session = f'pty-{agent_id[-3:]}'
+        self.registry[agent_id] = {'agent_id': agent_id, 'registered_at': T0.isoformat(), 'canvas_session_id': session}
+        self.state[agent_id] = 'live'
+        self.ptys.append({'id': session, 'pid': 100, 'harnessAgentId': agent_id})
+
     def mail(self, sender, recipient, body):
         if self.mail_error:
             raise self.mail_error
@@ -190,7 +196,8 @@ def test_restore_launches_in_order_one_at_a_time_and_reports_ready(tmp_path, box
 
 def test_live_seat_is_reattached_never_relaunched_and_unknown_is_never_launched(tmp_path, box):
     live, murky, dead = (seat(n, root=tmp_path) for n in (2, 3, 4))
-    box.state = {live.agent_id: 'live', murky.agent_id: 'unknown'}
+    box.make_live(live.agent_id)
+    box.state[murky.agent_id] = 'unknown'
     store, params, op = start(tmp_path, manifest(tmp_path, [live, murky, dead]))
     result = run_restore(store, op, params, box.env())
     assert launched(box) == [dead.agent_id]
@@ -340,13 +347,15 @@ def test_default_wake_types_the_fixed_line_once_into_the_exact_session_only(monk
 
 
 def test_coordinator_is_never_launched_and_a_foreign_caller_launches_nothing(tmp_path, box):
-    s2 = seat(2, root=tmp_path)
+    s2 = seat(2, root=tmp_path, parent=None)  # a root seat: only the gate, not a blocked parent, can stop it
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     stranger = uid(55)
     box.registry[stranger] = {'agent_id': stranger, 'name': 'Someone-Else', 'registered_at': T0.isoformat()}
     result = run_restore(store, op, RestoreParams(str(tmp_path), stranger, CID), box.env())
     assert {s.seat_id: s.state for s in result.seats}[COORD] == 'blocked'
-    assert COORD not in launched(box)
+    assert launched(box) == [], 'a caller who is not the coordinator launches NOTHING'
+    assert result.state == 'incomplete'
+    assert any(e.code == 'coordinator-mismatch' for r in result.seats for e in r.errors)
 
 
 def test_same_named_coordinator_under_a_new_id_is_accepted_and_is_the_spawner(tmp_path, box):
@@ -475,3 +484,83 @@ def test_dry_run_and_operation_id_must_agree(tmp_path, box):
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     with pytest.raises(Exception, match='dry run'):
         run_restore(store, op, replace(params, dry_run=True), box.env())
+
+
+# -- critic round: H2, M2, M3 -----------------------------------------------------------------------------
+
+def test_live_by_process_alone_without_a_registry_or_pty_join_is_not_reattached(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    box.state[s2.agent_id] = 'live'  # the probe says live, but nothing else corroborates it
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env())
+    assert box.calls == [] and {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'unknown'
+
+
+def test_a_new_restore_of_the_same_checkpoint_does_not_launch_a_seat_another_operation_left_unknown(tmp_path, box):
+    s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
+    m = manifest(tmp_path, [s2, s3])
+    store, params, op = start(tmp_path, m)
+    box.script[s2.agent_id] = 'crash'
+    with pytest.raises(Crash):
+        run_restore(store, op, params, box.env())
+    box.calls.clear()
+    operation = store.submit(Request(1, 'restore', uid(701), CID, None, [], False), actor_id=COORD)
+    again = run_restore(store, operation.operation_id, params, box.env())
+    states = {s.seat_id: s.state for s in again.seats}
+    assert launched(box) == [s3.agent_id], 'the intent-without-result seat is never launched by a second operation'
+    assert states[s2.agent_id] == 'unknown' and states[s3.agent_id] == 'ready-idle'
+    assert any(e.code == 'prior-attempt-unknown' for r in again.seats for e in r.errors)
+
+
+def default_world(tmp_path, monkeypatch, row, ptys):
+    import os
+    from liteharness import config
+    from liteharness import checkpoint_restore as mod
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    monkeypatch.setattr(mod, '_pty_list', lambda: ptys)
+    if row is not None:
+        (tmp_path / 'agents').mkdir(exist_ok=True)
+        (tmp_path / 'agents' / f'{uid(2)}.json').write_text(json.dumps(row))
+    return mod.default_liveness(uid(2))
+
+
+def mine():
+    import os
+    import psutil
+    return os.getpid(), psutil.Process(os.getpid()).create_time() * 1000
+
+
+@pytest.mark.parametrize('case,expected', [
+    ('process-matches', 'live'),
+    ('recycled-pid', 'dead'),
+    ('no-pid', 'unknown'),
+    ('zero-pid', 'unknown'),
+    ('no-birth', 'unknown'),
+    ('exited', 'dead'),
+    ('gone-and-unhosted', 'dead'),
+    ('gone-but-hosted', 'unknown'),
+    ('no-row-hosted', 'unknown'),
+    ('no-row-unhosted', 'dead'),
+    ('no-row-pty-unreadable', 'unknown'),
+])
+def test_default_liveness_branches(tmp_path, monkeypatch, case, expected):
+    pid, born = mine()
+    hosted = [{'id': 'p', 'harnessAgentId': uid(2)}]
+    row = {'agent_id': uid(2), 'session_pid': pid, 'session_process_started_at': born}
+    ptys = []
+    if case == 'recycled-pid':
+        row['session_process_started_at'] = born - 60_000
+    elif case == 'no-pid':
+        row.pop('session_pid')
+    elif case == 'zero-pid':
+        row['session_pid'] = 0
+    elif case == 'no-birth':
+        row.pop('session_process_started_at')
+    elif case == 'exited':
+        row['exited_at'] = '2026-10-19T00:00:00+00:00'
+    elif case.startswith('gone'):
+        row['session_pid'] = 4_000_000
+        ptys = hosted if case == 'gone-but-hosted' else []
+    elif case.startswith('no-row'):
+        row, ptys = None, (hosted if case == 'no-row-hosted' else None if case == 'no-row-pty-unreadable' else [])
+    assert default_world(tmp_path, monkeypatch, row, ptys) == expected

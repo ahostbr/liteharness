@@ -23,7 +23,7 @@ from .checkpoint_contract import (Blocker, ContractError, Manifest, Request, Res
 from .checkpoint_ops import (OperationLog, make_result, read_params, rejected, seat_result, write_params)
 from .checkpoint_restore import RestoreParams, resolve_checkpoint
 from .checkpoint_save import SaveParams, manifest_report
-from .checkpoint_store import CheckpointStore, Operation, _atomic_json, _mkdir, checked_path, read_json
+from .checkpoint_store import AdmissionRefused, CheckpointStore, Operation, _atomic_json, _mkdir, checked_path, read_json
 
 ACTIVE = ('accepted', 'running', 'canceling')
 STARTING_GRACE_SECONDS = 20.0
@@ -75,9 +75,9 @@ class Service:
     def _worker_path(self, operation_id: str) -> Path:
         return checked_path(self.store.root / 'params' / f'{operation_id}.worker.json', beneath=self.store.root)
 
-    def _record_worker(self, operation_id: str, pid: int) -> None:
+    def _record_worker(self, operation_id: str, pid: int | None) -> None:
         _mkdir(self._worker_path(operation_id).parent)
-        _atomic_json(self._worker_path(operation_id), {'pid': pid, 'created': _create_time(pid),
+        _atomic_json(self._worker_path(operation_id), {'pid': pid, 'created': _create_time(pid) if pid else None,
                                                         'submitted': self.now()})
 
     def worker_alive(self, operation_id: str) -> bool:
@@ -86,6 +86,8 @@ class Service:
             return False
         record = read_json(path)
         pid, created = record.get('pid'), record.get('created')
+        if pid is None:  # recorded at submit, before the process exists: starting, within a grace
+            return self.now() - float(record.get('submitted') or 0) < STARTING_GRACE_SECONDS
         if self.worker_alive_probe is not None:
             return self.worker_alive_probe(pid, created)
         actual = _create_time(pid) if isinstance(pid, int) else None
@@ -114,6 +116,10 @@ class Service:
                                [*result.blockers, Blocker('worker-dead', None, 'Reconcile, then retry the failed rows')])
         return result
 
+    def _admit(self) -> str | None:
+        busy = self.active_operation()
+        return f'{busy.operation_id} is active' if busy is not None else None
+
     def active_operation(self) -> Operation | None:
         for operation in self._operations():
             if operation.request.action in MUTATING and self.status_of(operation).state in ACTIVE:
@@ -128,21 +134,25 @@ class Service:
             if existing is not None:  # same id + same payload + same actor -> the same operation
                 self.store.submit(request, actor_id=actor_id)
                 return self.status_of(existing)
-            busy = self.active_operation()
-            if busy is not None:
-                return rejected('operation-active', f'Operation {busy.operation_id} is still active; '
-                                'status it, cancel it, or wait', operation_id=busy.operation_id)
-            operation = self.store.submit(request, actor_id=actor_id)
+            operation = self.store.submit(request, actor_id=actor_id, admit=self._admit)
+        except AdmissionRefused as exc:
+            busy_id = str(exc).split()[0]
+            return rejected('operation-active', f'Operation {busy_id} is still active; status it, cancel it, or wait',
+                            operation_id=busy_id)
         except ContractError as exc:
             return rejected('request-conflict', str(exc))
         write_params(self.store, operation.operation_id, params)
         log_path = self.store.root / 'logs' / f'{operation.operation_id}.log'
         try:
+            self._record_worker(operation.operation_id, None)  # "starting" is visible before the process exists
             pid = self.launcher(operation.operation_id, self.harness_root, log_path)
-            self._record_worker(operation.operation_id, pid)
         except OSError:
             return make_result(operation.operation_id, None, 'unknown', [], [Blocker(
                 'worker-not-started', None, 'The operation is saved; status it, then submit again with the same request_id')])
+        try:
+            self._record_worker(operation.operation_id, pid)
+        except OSError:
+            pass  # the worker IS running; the starting record keeps it ACTIVE for its grace period
         return make_result(operation.operation_id, params.get('checkpoint_id') if request.action == 'restore' else None,
                            'accepted', self._roster_rows(params, request), [], ['status', 'cancel'])
 

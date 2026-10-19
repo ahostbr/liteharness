@@ -380,3 +380,54 @@ def test_cancel_that_the_journal_refuses_is_a_typed_result_not_a_traceback(svc, 
     monkeypatch.setattr(svc.store, 'append', refuse)
     result = svc.cancel(Request(1, 'cancel', uid(712), None, first.operation_id, [], False))
     assert result.state == 'rejected' and result.blockers[0].code == 'cancel-refused'
+
+
+# -- critic round: M2 duplicate windows ---------------------------------------------------------------------
+
+def test_admission_check_runs_under_the_store_lock_and_refusal_creates_nothing(svc):
+    seen = {}
+
+    def admit():
+        seen['locked'] = (svc.store.root / '.writer-lock').exists()
+        return 'busy elsewhere'
+    from liteharness.checkpoint_store import AdmissionRefused
+    with pytest.raises(AdmissionRefused, match='busy elsewhere'):
+        svc.store.submit(restore_request(), actor_id=COORD, admit=admit)
+    assert seen == {'locked': True} and svc._operations() == []
+
+
+def test_a_worker_that_has_not_written_its_record_yet_counts_as_active_within_the_grace(svc, monkeypatch):
+    def slow_launcher(operation_id, root, log):
+        # The submit-time record exists before the process does, with no pid yet.
+        record = json.loads(svc._worker_path(operation_id).read_text())
+        assert record['pid'] is None
+        return os.getpid()
+    svc.launcher = slow_launcher
+    first = svc.submit(restore_request(700), actor_id=COORD, params=params(svc.harness_root))
+    record = svc._worker_path(first.operation_id)
+    record.write_text(json.dumps({'pid': None, 'created': None, 'submitted': svc.now()}))
+    assert svc.worker_alive(first.operation_id) is True
+    record.write_text(json.dumps({'pid': None, 'created': None, 'submitted': svc.now() - 3600}))
+    assert svc.worker_alive(first.operation_id) is False
+
+
+def test_a_failure_recording_the_worker_after_it_started_is_not_reported_as_not_started(svc, monkeypatch):
+    original = svc._record_worker
+    calls = []
+
+    def flaky(operation_id, pid):
+        calls.append(pid)
+        if pid is not None:
+            raise OSError('disk')
+        return original(operation_id, pid)
+    monkeypatch.setattr(svc, '_record_worker', flaky)
+    result = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    assert result.state == 'accepted' and svc.launched, 'the worker ran; the record failure must not say otherwise'
+
+
+def test_a_launcher_that_cannot_start_the_worker_says_so(svc):
+    def broken(operation_id, root, log):
+        raise OSError('cannot spawn')
+    svc.launcher = broken
+    result = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    assert result.state == 'unknown' and result.blockers[0].code == 'worker-not-started'

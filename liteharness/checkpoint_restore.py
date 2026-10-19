@@ -101,7 +101,11 @@ def _has_children(pid: int) -> bool | None:
 
 
 def default_liveness(agent_id: str) -> str:
-    """'live' | 'dead' | 'unknown' from the CURRENT registry row and process creation identity."""
+    """'live' | 'dead' | 'unknown' from the CURRENT registry row and process creation identity.
+
+    A PTY that claims the seat is never proof by itself: with no registry row it is `unknown`.
+    Anything this cannot read, or a row without a usable pid and birth time, is `unknown`.
+    """
     import psutil
     path = config.get_root() / 'agents' / f'{agent_id}.json'
     try:
@@ -111,15 +115,23 @@ def default_liveness(agent_id: str) -> str:
     except (OSError, ValueError):
         return 'unknown'
     ptys = _pty_list()
-    hosted = None if ptys is None else any(s.get('harnessAgentId') == agent_id for s in ptys)
+    if ptys is None:
+        return 'unknown'
+    hosted = any(s.get('harnessAgentId') == agent_id for s in ptys)
     if not isinstance(row, dict) or row.get('exited_at'):
-        return 'unknown' if hosted is None else ('live' if hosted else 'dead')
+        return 'unknown' if hosted else 'dead'
+    pid, born = row.get('session_pid'), row.get('session_process_started_at')
     try:
-        pid, born = int(row.get('session_pid') or 0), float(row.get('session_process_started_at'))
+        pid, born = int(pid), float(born)
+    except (TypeError, ValueError):
+        return 'unknown'
+    if pid <= 0 or born <= 0:
+        return 'unknown'
+    try:
         alive = psutil.Process(pid).create_time() * 1000
     except psutil.NoSuchProcess:
         return 'unknown' if hosted else 'dead'
-    except (psutil.Error, TypeError, ValueError):
+    except psutil.Error:
         return 'unknown'
     # A recycled pid has a different creation time: that is a dead seat, not a live one.
     return 'live' if abs(alive - born) < 2000 else 'dead'
@@ -352,6 +364,34 @@ class Restorer:
                     seen[event.seat_id] = match
         return seen
 
+    def foreign_unknown(self) -> set[str]:
+        """Seats another operation on this checkpoint started (intent) without ever reporting."""
+        if self.log is None:
+            return set()
+        from .checkpoint_ops import read_params
+        mine = self.operation_id
+        unknown: set[str] = set()
+        root = self.store.root / 'operations'
+        for path in sorted(root.glob('*.json')) if root.exists() else []:
+            other = self.store.operation_for_request(path.stem)
+            if other is None or other.operation_id == mine:
+                continue
+            kind = read_params(self.store, other.operation_id).get('kind', other.request.action)
+            checkpoint = other.request.checkpoint_id or read_params(self.store, other.operation_id).get('checkpoint_id')
+            if kind != 'restore' or checkpoint != self.manifest.checkpoint_id:
+                continue
+            seen: dict[str, str] = {}
+            for event in other.events:
+                if event.seat_id is None:
+                    continue
+                if event.stage == 'launch-intent':
+                    seen[event.seat_id] = 'unknown'
+                elif event.result is not None:
+                    seen[event.seat_id] = next((x.state for x in event.result.seats if x.seat_id == event.seat_id),
+                                               seen.get(event.seat_id, ''))
+            unknown |= {seat for seat, state in seen.items() if state == 'unknown'}
+        return unknown
+
     def cancelled(self) -> bool:
         return self.log is not None and any(e.stage == 'cancel-requested' for e in self.log.operation().events)
 
@@ -371,16 +411,18 @@ class Restorer:
             out += ['--prompt', self.prompt_for(seat)]
         return out
 
-    def verified(self, seat: Seat, since: datetime) -> bool:
-        """A NEW registration, live by process identity, joined to a PTY that hosts this agent."""
+    def verified(self, seat: Seat, since: datetime | None = None) -> bool:
+        """Registry row live by process identity and joined to a PTY that hosts this agent;
+        with `since`, also a NEW registration (a launch), without it any current one (a reattach)."""
         row = self.env.registry(seat.agent_id)
         if not row or row.get('exited_at') or self.env.liveness(seat.agent_id) != 'live':
             return False
-        try:
-            if datetime.fromisoformat(str(row.get('registered_at'))) < since:
+        if since is not None:
+            try:
+                if datetime.fromisoformat(str(row.get('registered_at'))) < since:
+                    return False
+            except ValueError:
                 return False
-        except ValueError:
-            return False
         sessions = self.env.pty_list()
         return bool(sessions) and any(s.get('harnessAgentId') == seat.agent_id
                                       and s.get('id') == row.get('canvas_session_id') for s in sessions)
@@ -459,8 +501,13 @@ class Restorer:
         params, env = self.params, self.env
         prior = self.journalled_states()
         coordinator_ok = self.coordinator_evidence()
-        liveness = {s.agent_id: env.liveness(s.agent_id) for s in self.manifest.seats
-                    if s.agent_id != self.manifest.coordinator.agent_id}
+        liveness = {}
+        for s in self.manifest.seats:
+            if s.agent_id != self.manifest.coordinator.agent_id:
+                state = env.liveness(s.agent_id)
+                # `live` needs the registry row and a hosting PTY to agree, else it is not reattached.
+                liveness[s.agent_id] = 'unknown' if state == 'live' and not self.verified(s) else state
+        foreign = self.foreign_unknown()
         full = plan(self.manifest, liveness, params.coordinator_id)
         rows = [r for r in full if params.seat_ids is None or r.seat_id in params.seat_ids]
         seats = {s.agent_id: s for s in self.manifest.seats}
@@ -469,6 +516,15 @@ class Restorer:
             self.states[row.seat_id] = prior.get(row.seat_id) or self.initial_state(row, seats.get(row.seat_id), coordinator_ok)
             if row.action == 'blocked':
                 self.errors[row.seat_id] = [Blocker(row.reason, row.seat_id, 'Reconcile this seat, then restore it')]
+        for seat_id in foreign:
+            if self.states.get(seat_id) in ('preparing', 'starting'):
+                self.states[seat_id] = 'unknown'
+                self.errors.setdefault(seat_id, []).append(Blocker(
+                    'prior-attempt-unknown', seat_id, 'Another operation started this seat and never reported; reconcile it'))
+        if not coordinator_ok and not params.dry_run:
+            result = self.report('incomplete')  # a caller who is not the coordinator launches nothing
+            self.journal('refused', None, result)
+            return result
         if params.dry_run:
             shells = [Blocker('would-close-shell', None, f'pane {pane} leaf {leaf}')
                       for pane, leaf, _ in ([] if params.keep_shells else self.shell_candidates(excluded))]
@@ -477,7 +533,7 @@ class Restorer:
         self.journal('plan', None, self.report('running'))
         for row in rows:
             seat = seats.get(row.seat_id)
-            if row.action != 'launch' or seat is None or row.seat_id in prior:
+            if row.action != 'launch' or seat is None or row.seat_id in prior or row.seat_id in foreign:
                 if row.action == 'reattach' and seat is not None:
                     self.journal('reattached', row.seat_id, self.report('running'))
                 continue

@@ -116,6 +116,10 @@ def _atomic_json(path: Path, value: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+class AdmissionRefused(ContractError):
+    """The caller's admission check said no, under the store lock; nothing was recorded."""
+
+
 @dataclass(frozen=True)
 class JournalEvent:
     sequence: int
@@ -271,12 +275,14 @@ class CheckpointStore:
             raise ContractError('Duplicate operation identity')
         return matches[0] if matches else None
 
-    def submit(self, request: Request, *, actor_id: str) -> Operation:
+    def submit(self, request: Request, *, actor_id: str, admit=None) -> Operation:
         """Persist acceptance before returning. actor_id must come from host authorization.
 
         A request ID is global to this store. Different payload OR actor conflicts;
         uncertain submitters look up the same ID, never mint a replacement ID.
         Cancel/retry are durable commands; their execution belongs to card C/D.
+        `admit`, if given, runs under the writer lock for a NEW request and returns a refusal
+        reason or None, so "is anything active" and "record this operation" cannot interleave.
         """
         payload = wire(request)
         if request.dry_run or request.action == 'status':
@@ -287,6 +293,9 @@ class CheckpointStore:
                 if wire(existing.request) != payload or existing.actor_id != actor_id:
                     raise ContractError('request_id already bound to another request or actor')
                 return existing
+            reason = admit() if admit is not None else None
+            if reason:
+                raise AdmissionRefused(reason)
             operation = Operation(1, str(uuid4()), actor_id, request, [])
             record = wire(operation)
             _mkdir(self._path('operations'))
