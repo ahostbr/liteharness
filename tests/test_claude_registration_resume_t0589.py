@@ -79,6 +79,14 @@ def test_registered_claude_resumes_by_name_and_uuid_without_manual_index_repair(
     # Simulated owner exit at the registry boundary, NOT name-index repair.
     row.update(exited_at=datetime.now(timezone.utc).isoformat(), status='offline')
     row_path.write_text(json.dumps(row), encoding='utf-8')
+    # This unit captures final native delegation, not an installed desktop.
+    # The external host must authoritatively report no reserved slot; UNKNOWN
+    # correctly refuses rather than authorizing an ordinary native launch.
+    def no_reserved_slot(method, path, body=None, **kwargs):
+        assert method == 'GET' and path.startswith('/harness/recovered-agent/locate?')
+        return {'ok': True, 'found': False}
+
+    monkeypatch.setattr(cli, '_bridge_request', no_reserved_slot)
     entrypoint = cli.cmd_spawn
     native_launches = []
     monkeypatch.setattr(cli, 'cmd_spawn', lambda **kwargs: native_launches.append(kwargs))

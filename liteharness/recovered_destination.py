@@ -136,7 +136,8 @@ def prepare(agent_id, cwd, conversation_id=None):
             raise ValueError('Claude original cwd/name/model authority unavailable')
         descriptor = {'cli': 'claude', 'agentId': agent_id, 'name': row['name'], 'conversationId': native_id,
                       'cwd': original, 'transcript': str(transcript), 'role': role,
-                      'backend': 'claude', 'model': row['model'], 'thinking_level': row.get('thinking_level')}
+                      'backend': 'claude', 'model': row['model'], 'thinking_level': row.get('thinking_level'),
+                      'cognitive': row.get('cognitive')}
     descriptor['launchParent'] = row.get('spawned_by')
     descriptor['authorityFingerprint'] = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
     return descriptor
@@ -210,6 +211,7 @@ def launch_native_claude(entry, role):
             raise ValueError('Native Claude owner process is inaccessible') from exc
     result = cli._bridge_request('POST', '/harness/spawn/resolve', {
         'cli': 'claude', 'name': entry['name'], 'tier': roles.wire_tier(role), 'cwd': entry['cwd'], 'model': entry['model'],
+        **({'cognitive': previous['cognitive']} if previous.get('cognitive') else {}),
     })
     if not isinstance(result, dict) or result.get('ok') is not True:
         raise ValueError('Native Claude launch resolution refused')
