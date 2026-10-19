@@ -1,4 +1,4 @@
-import { FLEET_PANE, fleetSnapshot, spawnDenial, normalizedCwd } from './mods/fleet.mjs'
+import { FLEET_PANE, fleetSnapshot, spawnDenial } from './mods/fleet.mjs'
 import { POLL_MS, validSessionId, restoredRequest, snapshot, bandText, cacheEstimate } from './mods/usage-schema.mjs'
 import { PASTE_PANE, PASTE_PAGE_SIZE, MANIFEST_BYTES, absolutePath, within, historyEntries, imageGeometry } from './mods/paste-schema.mjs'
 
@@ -702,15 +702,10 @@ export function register(on, options) {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    try {
-      const denial = spawnDenial(e, await $.session.cwd())
-      if (denial) return { deny: denial }
-      // Declared tier is metadata, not an authority or privilege assignment.
-      const target = await $.fs.stat(e.cwd || await $.session.cwd(), { resolve: true })
-      const owner = await $.fs.stat(await $.session.cwd(), { resolve: true })
-      if (target.kind !== 'dir' || owner.kind !== 'dir' || !normalizedCwd(target.realPath) || normalizedCwd(target.realPath) !== normalizedCwd(owner.realPath) || target.isLink || owner.isLink) return { deny: 'Spawn cwd must be a non-link owned directory.' }
-      return next(e)
-    } catch { return { deny: 'Spawn refused: model/tier/cwd could not be verified.' } }
+    let cwd = null
+    try { cwd = await $.session.cwd() } catch { /* spawnDenial refuses a call whose owned cwd is unreadable. */ }
+    const denial = spawnDenial(e, cwd)
+    return denial ? { deny: denial } : next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: 'liteharness-fleet' }, async ($, e, next) => {
