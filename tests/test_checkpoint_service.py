@@ -588,3 +588,25 @@ def test_allow_default_model_reaches_the_restore_params(svc, monkeypatch):
                     '--actor-id', COORD, root=svc.harness_root)
     result = checkpoint_cli.run(args, authorize=lambda a, l, r: a, service=svc)
     assert result.state == 'accepted' and read_params(svc.store, result.operation_id)['allow_default_model'] is True
+
+
+def test_save_dry_run_shows_the_resolved_model_and_its_source_not_the_registry_value(tmp_path, monkeypatch, capsys):
+    from liteharness import config
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    from checkpoint_world import World
+    w = World(tmp_path, monkeypatch)
+    w.harness = tmp_path
+    unknown, real = w.claude(5), w.claude(6)
+    row_path = tmp_path / 'agents' / f'{unknown}.json'
+    row = json.loads(row_path.read_text())
+    row['model'] = 'unknown'
+    row_path.write_text(json.dumps(row))
+    transcript = next(w.projects.glob(f'*/{unknown}.jsonl'))
+    with transcript.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'type': 'assistant', 'message': {'model': 'claude-opus-5-5'}}) + chr(10))
+    monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
+    checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
+    text = capsys.readouterr().out
+    assert 'claude-opus-5-5 (transcript)' in next(line for line in text.splitlines() if 'Claude-5' in line)
+    six = next(line for line in text.splitlines() if 'Claude-6' in line)
+    assert 'claude-x (registry)' in six and 'claude  unknown' not in text

@@ -91,13 +91,19 @@ def _request(args, store: CheckpointStore) -> Request:
     return Request(1, 'retry', rid, None, args.operation_id, list(args.seat_id), False)
 
 
-def _preview_save(root: Path, store: CheckpointStore, actor: str, args) -> Result:
+def _preview_save(root: Path, store: CheckpointStore, actor: str, args, labels_out: dict | None = None) -> Result:
     """Roster that WOULD be frozen; nothing is written, asked or compacted."""
     from .checkpoint_roster import discover_current, roster_census
     discovery = discover_current(harness_root=root, include_offline=args.include_offline)
     census = roster_census(discovery, harness_root=root)
     rows = [seat_result(r.expected.agent_id, 'blocked' if r.seat is None else 'preparing', errors=r.blockers)
             for r in census.rows]
+    if labels_out is not None:  # the model discovery RESOLVED, with where it came from, not the registry's value
+        for r in census.rows:
+            if r.seat is not None:
+                s = r.seat
+                labels_out[s.agent_id] = (f'{s.name}  {s.role}  {s.cli}  {s.execution.model} '
+                                          f'({discovery.model_sources.get(s.agent_id, "registry")})  {s.slot.pane if s.slot else "-"}')
     missing = [] if actor in {r.expected.agent_id for r in census.rows} else [
         Blocker('coordinator-missing', None, 'The caller is not a live seat in the registry')]
     return make_result(None, None, 'accepted' if not any(r.state == 'blocked' for r in rows) and not missing
@@ -128,7 +134,7 @@ def resolve_actor(args) -> tuple[str, str | None, bool]:
 
 
 def run(args, *, authorize: Callable = authorize_orchestrator, service: Service | None = None,
-        sleep: Callable[[float], None] = time.sleep) -> Result:
+        sleep: Callable[[float], None] = time.sleep, labels_out: dict | None = None) -> Result:
     root = Path(args.harness_root) if args.harness_root else config.get_root()
     store = CheckpointStore(root)
     service = service or Service(store, root)
@@ -145,7 +151,7 @@ def run(args, *, authorize: Callable = authorize_orchestrator, service: Service 
         return rejected('unauthorized', str(exc))
     if request.dry_run:
         if request.action == 'save':
-            return _preview_save(root, store, actor, args)
+            return _preview_save(root, store, actor, args, labels_out)
         return run_restore(store, None, RestoreParams(str(root), actor, request.checkpoint_id, keep_shells=args.keep_shells,
                                                       dry_run=True), RestoreEnv())
     try:
@@ -232,10 +238,11 @@ def render(result: Result, labels: dict[str, str] | None = None) -> str:
 
 def main(argv: list[str] | None = None, **kwargs) -> int:
     args = build_parser().parse_args(argv)
-    result = run(args, **kwargs)
+    labels: dict[str, str] = {}
+    result = run(args, labels_out=labels, **kwargs)
     if args.json:
         print(json.dumps(wire(result)))
     else:
         root = Path(args.harness_root) if args.harness_root else config.get_root()
-        print(render(result, seat_labels(result, CheckpointStore(root), root)))
+        print(render(result, {**seat_labels(result, CheckpointStore(root), root), **labels}))
     return 0 if result.state in OK_STATES and not not_ready_canceled(result) else 2
