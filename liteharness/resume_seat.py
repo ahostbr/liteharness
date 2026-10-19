@@ -140,14 +140,8 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
     """Claude resolves sessions by project cwd; never substitute the caller's cwd."""
     from . import cli
     registry = _registry(entry["agent_id"])
-    original_cwd = entry.get("cwd")
-    if not isinstance(original_cwd, str) or not original_cwd.strip():
+    if not isinstance(entry.get("cwd"), str) or not entry["cwd"].strip():
         raise ValueError(f"Claude seat {entry['name']} has no original cwd in the name index")
-    working_dir = Path(original_cwd).expanduser()
-    if not working_dir.is_absolute() or not working_dir.is_dir():
-        raise ValueError(f"Claude seat original cwd must be an absolute existing directory: {original_cwd}")
-    if cwd and Path(cwd).expanduser().resolve() != working_dir.resolve():
-        raise ValueError(f"Claude resume requires its original cwd: {original_cwd}")
     session_id = entry.get("convo_id")
     # This value is typed into the Claude shell command by the existing launcher.
     if not isinstance(session_id, str) or not _UUID_SHAPE.fullmatch(session_id):
@@ -163,7 +157,11 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
     if str(registry.get('backend') or 'claude').split('/', 1)[0].lower() != 'claude':
         raise ValueError('Claude registry backend contradicts its CLI identity')
     from .claude_identity import transcript_identity
-    transcript_identity(registry, native_id=session_id, cwd=original_cwd)
+    # The transcript's first cwd is the launch dir; the name index's cwd drifts.
+    _, launch_cwd, _ = transcript_identity(registry, native_id=session_id)
+    working_dir = Path(launch_cwd)
+    if cwd and Path(cwd).expanduser().resolve() != working_dir.resolve():
+        raise ValueError(f"Claude resume requires its original cwd: {launch_cwd}")
     from . import recovered_destination
     if recovered_destination.active_scope() is None and recovered_destination.recover_if_reserved(
             entry['agent_id'], spawned_by or os.environ.get('LITEHARNESS_AGENT_ID'), conversation_id=session_id,
