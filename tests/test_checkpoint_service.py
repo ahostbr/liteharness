@@ -11,7 +11,7 @@ import time
 import pytest
 
 from liteharness import checkpoint_cli, checkpoint_worker
-from liteharness.checkpoint_contract import Request, wire
+from liteharness.checkpoint_contract import ContractError, Request, wire
 from liteharness.checkpoint_ops import OperationLog, make_result, read_params, seat_result
 from liteharness.checkpoint_restore import RestoreParams
 from liteharness.checkpoint_service import Service
@@ -222,7 +222,8 @@ def test_json_output_is_exactly_the_wire_result(svc, capsys, monkeypatch):
     assert code == 0
 
 
-def test_unauthorised_actor_is_refused_and_nothing_is_persisted(svc):
+def test_unauthorised_actor_is_refused_and_nothing_is_persisted(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
     def deny(actor, leaf, require):
         raise checkpoint_cli.Unauthorized('A live registry ORCHESTRATOR is required to change checkpoints')
     args = cli_args('restore', '--checkpoint-id', CID, '--actor-id', uid(55), root=svc.harness_root)
@@ -240,7 +241,8 @@ def test_dry_run_needs_no_authority_launches_nothing_and_journals_nothing(svc):
     assert svc.launched == [] and svc._operations() == []
 
 
-def test_restore_accepts_latest_and_submits_with_the_authorized_actor(svc):
+def test_restore_accepts_latest_and_submits_with_the_authorized_actor(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
     seen = {}
     args = cli_args('restore', '--checkpoint-id', 'latest', '--request-id', uid(730), '--actor-id', COORD,
                     root=svc.harness_root)
@@ -249,7 +251,8 @@ def test_restore_accepts_latest_and_submits_with_the_authorized_actor(svc):
     assert svc.store.operation(result.operation_id).actor_id == COORD
 
 
-def test_save_without_a_coordinator_handoff_is_an_invalid_request(svc):
+def test_save_without_a_coordinator_handoff_is_an_invalid_request(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
     args = cli_args('save', '--actor-id', COORD, root=svc.harness_root)
     result = checkpoint_cli.run(args, authorize=lambda a, l, r: a, service=svc)
     assert result.state == 'rejected' and result.blockers[0].code == 'invalid-request'
@@ -302,3 +305,78 @@ def test_authorize_requires_the_leaf_on_the_tool_path_and_it_must_match(tmp_path
         checkpoint_cli.authorize_orchestrator(uid(60), None, True)
     with pytest.raises(checkpoint_cli.Unauthorized):
         checkpoint_cli.authorize_orchestrator(uid(60), 'someone-elses-leaf', True)
+
+
+# -- critic round: H1, M1, L1, L2 ------------------------------------------------------------------------
+
+@pytest.mark.parametrize('action,extra', [('cancel', ['--operation-id', uid(5)]),
+                                          ('retry', ['--operation-id', uid(5), '--seat-id', uid(2)]),
+                                          ('status', [])])
+def test_dry_run_is_refused_for_actions_that_have_no_dry_run(svc, monkeypatch, action, extra):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
+    asked = []
+    args = cli_args(action, *extra, '--dry-run', '--actor-id', COORD, root=svc.harness_root)
+    result = checkpoint_cli.run(args, authorize=lambda *a: asked.append(a) or COORD, service=svc)
+    assert result.state == 'rejected' and result.blockers[0].code == 'invalid-request'
+    assert 'dry-run' in result.blockers[0].remedy and asked == []
+    assert svc.launched == [] and svc._operations() == []
+
+
+def test_retry_with_dry_run_and_a_live_orchestrator_but_no_leaf_launches_nothing(svc, monkeypatch):
+    monkeypatch.delenv('LITESUITE_LEAF_ID', raising=False)
+    first = finished_restore(svc, {uid(2): 'failed'})
+    before = len(svc.launched)
+    args = cli_args('retry', '--operation-id', first.operation_id, '--seat-id', uid(2), '--dry-run',
+                    '--actor-id', COORD, root=svc.harness_root)
+    result = checkpoint_cli.run(args, authorize=lambda a, l, r: a, service=svc)
+    assert result.state == 'rejected' and len(svc.launched) == before
+
+
+def test_actor_and_leaf_flags_are_honoured_only_when_the_bridge_set_a_leaf(svc, monkeypatch):
+    from liteharness import config
+    monkeypatch.setattr(config, 'get_agent_id', lambda: uid(70))
+    asked = []
+
+    def ask(actor, leaf, require):
+        asked.append((actor, leaf, require))
+        return actor
+    args = cli_args('restore', '--checkpoint-id', CID, '--actor-id', uid(55), '--leaf-id', 'leaf-9', '--require-leaf',
+                    root=svc.harness_root)
+    monkeypatch.delenv('LITESUITE_LEAF_ID', raising=False)
+    checkpoint_cli.run(args, authorize=ask, service=svc)
+    assert asked == [(uid(70), None, False)], 'a typed actor id is ignored outside the tool path'
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-9')
+    asked.clear()
+    checkpoint_cli.run(cli_args('restore', '--checkpoint-id', CID, '--actor-id', uid(55), '--leaf-id', 'leaf-9',
+                                '--request-id', uid(741), '--require-leaf', root=svc.harness_root),
+                       authorize=ask, service=svc)
+    assert asked == [(uid(55), 'leaf-9', True)]
+
+
+def test_a_leaf_flag_that_differs_from_the_bridge_leaf_is_refused(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-9')
+    args = cli_args('restore', '--checkpoint-id', CID, '--actor-id', COORD, '--leaf-id', 'someone-elses', '--require-leaf',
+                    root=svc.harness_root)
+    result = checkpoint_cli.run(args, authorize=lambda a, l, r: a, service=svc)
+    assert result.state == 'rejected' and result.blockers[0].code == 'unauthorized'
+    assert svc.launched == []
+
+
+def test_canceled_with_unfinished_seats_prints_not_ready_and_exits_nonzero(svc, capsys):
+    first = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    svc.cancel(Request(1, 'cancel', uid(711), None, first.operation_id, [], False))
+    log = OperationLog(svc.store, first.operation_id)
+    rows = [seat_result(e.agent_id, 'preparing') for e in svc.store.read_manifest(CID).expected]
+    log.event('final', None, make_result(first.operation_id, CID, 'canceled', rows))
+    code = checkpoint_cli.main(['status', '--operation-id', first.operation_id, '--harness-root', str(svc.harness_root)])
+    assert code == 2 and 'NOT READY' in capsys.readouterr().out
+
+
+def test_cancel_that_the_journal_refuses_is_a_typed_result_not_a_traceback(svc, monkeypatch):
+    first = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+
+    def refuse(*a, **k):
+        raise ContractError('Journal sequence changed; reconcile before append')
+    monkeypatch.setattr(svc.store, 'append', refuse)
+    result = svc.cancel(Request(1, 'cancel', uid(712), None, first.operation_id, [], False))
+    assert result.state == 'rejected' and result.blockers[0].code == 'cancel-refused'

@@ -24,12 +24,14 @@ reports `unknown`, never `running`. One mutating operation may be active per sto
 
 The CLI is the trust anchor. `save`, `restore`, `cancel` and `retry` (not `--dry-run`, not
 `status`) need an actor id that resolves to a live registry ORCHESTRATOR
-(`recovered_destination.issuer`: online, owner process alive, not superseded). The tool path adds
-`--require-leaf`: the caller's leaf id (`LITESUITE_LEAF_ID`, from the bridge's
-`x-litesuite-leaf-id` header) must equal that row's `leaf_id`. An id or leaf typed into a
-model-supplied argument grants nothing alone. Residual risk: a leaf id is discoverable by other
-seats through the bridge, so this narrows impersonation without making it impossible; a scoped
-tool-only bridge token is the real fix and is out of this card.
+(`recovered_destination.issuer`: online, owner process alive, not superseded). `--dry-run` exists
+only for `save` and `restore`; on any other action it is refused. On a direct CLI call the actor
+is the caller's own environment identity and `--actor-id`/`--leaf-id` are ignored. They count
+only on the tool path, where the bridge sets `LITESUITE_LEAF_ID` for the one-shot tool process:
+then `--leaf-id` must equal that leaf, and `--require-leaf` makes the leaf mandatory and equal to
+the actor row's `leaf_id`. Residual risk: a leaf id is discoverable by other seats through the
+bridge, so this narrows impersonation without making it impossible; a scoped tool-only bridge
+token is the real fix and is out of this card.
 
 ## Save (`checkpoint_save.py`, roster in `checkpoint_roster.py`)
 

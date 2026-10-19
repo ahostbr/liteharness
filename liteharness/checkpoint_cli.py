@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -71,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _request(args, store: CheckpointStore) -> Request:
+    if args.dry_run and args.action not in ('save', 'restore'):
+        raise ContractError(f'--dry-run applies only to save and restore, not {args.action}')
     rid = args.request_id or str(uuid4())
     if args.action == 'save':
         return Request(1, 'save', rid, None, None, [], args.dry_run)
@@ -106,6 +109,20 @@ def _save_params(args, root: Path, actor: str) -> dict:
                       cwd_roots=cfg.get('cwd_roots'), litetui_root=cfg.get('litetui_root')).wire()
 
 
+def resolve_actor(args) -> tuple[str, str | None, bool]:
+    """(actor, leaf, require_leaf). Typed --actor-id/--leaf-id count only on the tool path.
+
+    The bridge sets LITESUITE_LEAF_ID for the one-shot tool process. Without it this is a direct
+    CLI call and the actor is the caller's own environment identity, whatever the flags say.
+    """
+    bridge_leaf = os.environ.get('LITESUITE_LEAF_ID', '').strip()
+    if not bridge_leaf:
+        return config.get_agent_id(), None, False
+    if args.leaf_id and args.leaf_id != bridge_leaf:
+        raise Unauthorized('The presented leaf is not the leaf this tool call arrived on')
+    return args.actor_id or config.get_agent_id(), bridge_leaf, args.require_leaf
+
+
 def run(args, *, authorize: Callable = authorize_orchestrator, service: Service | None = None,
         sleep: Callable[[float], None] = time.sleep) -> Result:
     root = Path(args.harness_root) if args.harness_root else config.get_root()
@@ -118,14 +135,17 @@ def run(args, *, authorize: Callable = authorize_orchestrator, service: Service 
         return rejected('invalid-request', str(exc))
     if request.action == 'status':
         return _waited(service, service.status(request), args, sleep)
-    actor = args.actor_id or config.get_agent_id()
+    try:
+        actor, leaf, require_leaf = resolve_actor(args)
+    except Unauthorized as exc:
+        return rejected('unauthorized', str(exc))
     if request.dry_run:
         if request.action == 'save':
             return _preview_save(root, store, actor, args)
         return run_restore(store, None, RestoreParams(str(root), actor, request.checkpoint_id, keep_shells=args.keep_shells,
                                                       dry_run=True), RestoreEnv())
     try:
-        actor = authorize(actor, args.leaf_id, args.require_leaf)
+        actor = authorize(actor, leaf, require_leaf)
     except Unauthorized as exc:
         return rejected('unauthorized', str(exc))
     if request.action == 'save':
@@ -152,6 +172,11 @@ def _waited(service: Service, result: Result, args, sleep) -> Result:
     return result
 
 
+def not_ready_canceled(result: Result) -> bool:
+    """A cancelled operation that left seats unfinished is NOT READY, whatever it was cancelled from."""
+    return result.state == 'canceled' and result.counts.ready < result.counts.expected
+
+
 def render(result: Result) -> str:
     c = result.counts
     lines = [f'{result.state.upper()}'
@@ -162,8 +187,8 @@ def render(result: Result) -> str:
         detail = '; '.join(f'{e.code}: {e.remedy}' for e in seat.errors)
         lines.append(f'  {seat.seat_id}  {seat.state}' + (f'  ({detail})' if detail else ''))
     lines += [f'  ! {b.code}: {b.remedy}' for b in result.blockers]
-    if result.state in ('incomplete', 'rejected', 'unknown'):
-        lines.append('NOT READY' if result.state != 'rejected' else 'REFUSED')
+    if result.state in ('incomplete', 'rejected', 'unknown') or not_ready_canceled(result):
+        lines.append('REFUSED' if result.state == 'rejected' else 'NOT READY')
     if result.allowed_next_actions:
         lines.append('  next: ' + ', '.join(result.allowed_next_actions))
     return '\n'.join(lines)
@@ -173,4 +198,4 @@ def main(argv: list[str] | None = None, **kwargs) -> int:
     args = build_parser().parse_args(argv)
     result = run(args, **kwargs)
     print(json.dumps(wire(result)) if args.json else render(result))
-    return 0 if result.state in OK_STATES else 2
+    return 0 if result.state in OK_STATES and not not_ready_canceled(result) else 2

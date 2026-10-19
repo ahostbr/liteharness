@@ -178,6 +178,12 @@ class Service:
         if current.state not in ACTIVE:
             return current  # nothing to cancel; report what it is
         log = OperationLog(self.store, operation.operation_id)
+        try:
+            return self._request_cancel(operation, current, log)
+        except ContractError as exc:
+            return rejected('cancel-refused', f'{exc}; status the operation and cancel again')
+
+    def _request_cancel(self, operation: Operation, current: Result, log: OperationLog) -> Result:
         if not any(e.stage == 'cancel-requested' for e in operation.events):
             # A restore that never journaled a result still has a frozen roster to report.
             seats = list(current.seats) or self._roster_rows({}, operation.request)
