@@ -397,7 +397,11 @@ def claude_world(world, tmp_path, monkeypatch):
     agent_names.record_name(NAME, AID, CID, str(project), backend="claude", model="claude-opus")
     registry = root / "agents" / f"{AID}.json"
     row = json.loads(registry.read_text(encoding="utf-8"))
-    row.update(cli="claude-code", backend="claude", model="claude-opus")
+    transcript = home / '.claude' / 'projects' / 'fixture-project' / f'{CID}.jsonl'
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({'type': 'user', 'sessionId': CID, 'cwd': str(project)}) + '\n', encoding='utf-8')
+    row.update(cli="claude-code", backend="claude", model="claude-opus",
+               cwd=str(project), transcript_path=str(transcript))
     registry.write_text(json.dumps(row), encoding="utf-8", newline="")
     # Claude needs neither LiteTUI data nor a bridge call before its launcher.
     def no_data():

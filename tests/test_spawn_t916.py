@@ -19,6 +19,8 @@ def split(monkeypatch, tmp_path):
     """A fake bridge whose /canvas/split mints MINTED; `on_launch` runs when the
     launch line is typed (that is when a real seat would boot and register)."""
     calls: list[tuple[str, str, dict]] = []
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     state = {"on_launch": lambda: None}
 
     def fake(method, path, body=None):
@@ -44,8 +46,19 @@ def split(monkeypatch, tmp_path):
 
 
 def _presence(agents, agent_id, **fields):
+    # Fake the CHILD's actual native transcript/registration, not the index writer.
+    from uuid import UUID, uuid5, NAMESPACE_URL
+    try:
+        native_id = str(UUID(agent_id))
+    except ValueError:
+        native_id = str(uuid5(NAMESPACE_URL, agent_id))
+    transcript = agents.parent / 'home' / '.claude' / 'projects' / 'fixture' / f'{native_id}.jsonl'
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    cwd = fields.get('cwd') or os.getcwd()
+    transcript.write_text(json.dumps({'sessionId': native_id, 'cwd': cwd}) + '\n', encoding='utf-8')
     (agents / f"{agent_id}.json").write_text(
-        json.dumps({"agent_id": agent_id, **fields}), encoding="utf-8"
+        json.dumps({"agent_id": agent_id, 'cli': 'claude-code', 'name': f'Fixture-{agent_id}',
+                    'cwd': cwd, 'transcript_path': str(transcript), **fields}), encoding="utf-8"
     )
 
 
@@ -219,7 +232,7 @@ def test_control_a_registration_reports_spawned_and_exits_zero(split, capsys):
     state["on_launch"] = lambda: _presence(agents, "zzzz-ours", canvas_session_id=MINTED)
     assert _run(split_mode=True, split_pane="canvas-pane-26", prompt="x") == 0
     out = capsys.readouterr().out
-    assert "Spawned: registered as zzzz-ours" in out
+    assert "Spawned: registered and resumable as zzzz-ours" in out
     assert "SPAWN FAILED" not in out
 
 
@@ -518,6 +531,7 @@ def test_a_name_claimed_during_launch_cannot_be_restored_from_presence(split, ca
 @pytest.fixture
 def bridge_http(monkeypatch, tmp_path):
     """urlopen fake: accepts only `state['good']`; records every token sent."""
+    monkeypatch.setenv('LITESUITE_BRIDGE_URL', 'http://t0589-token-peer.invalid')
     import io
     import urllib.error
     (tmp_path / ".litesuite").mkdir()
@@ -771,9 +785,12 @@ def _hook_register(source: str, **env_extra):
     env.update(LITEHARNESS_CLI="claude-code", LITEHARNESS_MODEL="test-model",
                LITEHARNESS_NO_PREAMBLE="1", CLAUDE_CODE_SESSION_ID=RESUMED, **env_extra)
     with mock.patch.dict(os.environ, env, clear=True):
+        transcript = Path.home() / '.claude' / 'projects' / 'hook-fixture' / f'{RESUMED}.jsonl'
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(json.dumps({'sessionId': RESUMED, 'cwd': os.getcwd()}) + '\n', encoding='utf-8')
         hooks._apply_hook_context({
             "session_id": RESUMED, "source": source, "hook_event_name": "SessionStart",
-            "transcript_path": str(Path("t") / f"{RESUMED}.jsonl"),
+            "transcript_path": str(transcript),
         })
         hooks.register_presence()
 
@@ -804,7 +821,7 @@ def test_a_resumed_split_is_adopted_and_repointed_at_its_new_pane(resumable, cap
     code = _run(split_mode=True, split_pane="canvas-pane-26", prompt="x",
                 additional_args=f"--resume {RESUMED}")
     assert code == 0, capsys.readouterr().out
-    assert f"Spawned: registered as {RESUMED}" in capsys.readouterr().out
+    assert f"Spawned: registered and resumable as {RESUMED}" in capsys.readouterr().out
     assert json.loads(row_path.read_text(encoding="utf-8"))["canvas_session_id"] == MINTED
 
 

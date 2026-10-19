@@ -13,7 +13,7 @@ OLD_ID = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
-def seat(tmp_path, monkeypatch):
+def seat(tmp_path, monkeypatch, runtime_observer):
     root = tmp_path / "harness"
     data = tmp_path / "data"
     data.mkdir()
@@ -36,9 +36,10 @@ def seat(tmp_path, monkeypatch):
                                                      if body and "systemPromptFile" in body else []),
                         "env": {}, "harnessAgentId": AGENT_ID},
         },
-        "/pty/create": {"session_id": "fixture-session"},
+        "/pty/create": (runtime_observer.publish(AGENT_ID, "fixture-session") if path == "/pty/create" else None) or {"session_id": "fixture-session"},
+        "/pty/list": {"sessions": list(runtime_observer.sessions)},
     }[path])
-    place = Mock(return_value={"ok": True, "newSessionId": "fixture-session"})
+    place = Mock(side_effect=lambda *a, **kw: runtime_observer.publish(AGENT_ID, "fixture-session") or {"ok": True, "newSessionId": "fixture-session"})
     monkeypatch.setattr(cli, "_bridge_request", bridge)
     monkeypatch.setattr(cli, "_place_split", place)
     kwargs = dict(spawn_cli="litetui", split_mode=True, cwd=str(tmp_path),
@@ -57,7 +58,7 @@ def test_owner_launch_passes_memory_identity_and_execution(seat, mode):
     assert (method, path) == ("POST", "/harness/spawn/resolve")
     assert body["name"] == "Alpha" and body["tier"] == roles.wire_tier("owner")
     assert "prompt" not in body and "cognitive" not in body
-    launch = place.call_args.kwargs["launch"] if mode == "split" else bridge.call_args.args[2]
+    launch = place.call_args.kwargs["launch"] if mode == "split" else next(call.args[2] for call in bridge.call_args_list if call.args[1] == "/pty/create")
     args = launch["args"]
     for flag, value in (("--owner", "Alpha"), ("--memory", kwargs["memory_dir"]),
                         ("--backend", "codex"), ("--model", "fixture"),
@@ -69,7 +70,8 @@ def test_owner_launch_passes_memory_identity_and_execution(seat, mode):
     assert launch["env"]["LITEHARNESS_NAME"] == "Alpha"
     assert launch["env"]["LITETUI_DATA_ROOT"] == str(data)
     assert launch["harnessAgentId"] == AGENT_ID
-    assert not (data / ".agents").exists() and not root.exists()
+    assert not (data / ".agents").exists()
+    assert (root / "agents" / f"{AGENT_ID}.json").is_file()
     owner.owner_prompt.assert_not_called()
 
 
@@ -148,7 +150,7 @@ def test_owner_custom_role_body_preserves_memory_and_explicit_method(seat, tmp_p
     source = tmp_path / "caller body.md"
     source.write_text("Own the producer domain.\n", encoding="utf-8")
     cli.cmd_spawn(**kwargs, system_prompt_file=str(source), cognitive=cognitive)
-    body = bridge.call_args.args[2]
+    body = next(call.args[2] for call in bridge.call_args_list if call.args[1] == "/harness/spawn/resolve")
     assert body["systemPromptFile"] == str(source)
     assert body["tier"] == "leader"
     assert body.get("cognitive") == cognitive
@@ -170,8 +172,8 @@ def test_takeover_allows_saved_name_successor_without_registry_holder(seat):
         "name": "Alpha", "agent_id": OLD_ID, "convo_id": AGENT_ID, "cwd": kwargs["cwd"],
     }
     cli.cmd_spawn(**kwargs, takeover=True)
-    assert bridge.call_count == 1
-    assert bridge.call_args.args[:2] == ("POST", "/harness/spawn/resolve")
+    assert [call.args[:2] for call in bridge.call_args_list] == [
+        ("POST", "/harness/spawn/resolve"), ("GET", "/pty/list"), ("GET", "/pty/list")]
     assert place.call_args.kwargs["launch"]["env"]["LITEHARNESS_AGENT_ID"] == AGENT_ID
 
 
@@ -269,7 +271,9 @@ def test_dead_owner_saved_name_allows_explicit_successor(seat, monkeypatch):
         "name": "Alpha", "agent_id": OLD_ID, "convo_id": AGENT_ID, "cwd": kwargs["cwd"],
     }
     cli.cmd_spawn(**kwargs, takeover=True)
-    assert bridge.call_count == 1 and place.call_count == 1
+    assert sum(call.args[1] == "/harness/spawn/resolve" for call in bridge.call_args_list) == 1
+    assert place.call_count == 1
+    assert sum(call.args[1] == "/pty/list" for call in bridge.call_args_list) == 2
     assert not (data / ".agents").exists() and presence.read_bytes() == before
 
 
@@ -282,5 +286,7 @@ def test_unrelated_live_title_does_not_block_owner(seat):
                                     "session_pid": os.getpid()}), encoding="utf-8")
     before = presence.read_bytes()
     cli.cmd_spawn(**kwargs)
-    assert bridge.call_count == 1 and place.call_count == 1
+    assert sum(call.args[1] == "/harness/spawn/resolve" for call in bridge.call_args_list) == 1
+    assert place.call_count == 1
+    assert sum(call.args[1] == "/pty/list" for call in bridge.call_args_list) == 2
     assert presence.read_bytes() == before

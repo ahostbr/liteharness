@@ -12,12 +12,13 @@ CID = '33333333-3333-4333-8333-333333333333'
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, runtime_observer):
     data = tmp_path / 'data'
     data.mkdir()
     project = tmp_path / 'project'
     project.mkdir()
     monkeypatch.setenv('LITETUI_DATA_ROOT', str(data))
+    monkeypatch.setattr(cli.config, 'get_root', lambda: tmp_path / 'registry')
     monkeypatch.setenv('LITEHARNESS_AGENT_ID', BID)
     monkeypatch.setattr(fleet_policy, 'gate', lambda *a: None)
     monkeypatch.setattr(fleet_policy, 'verify_seat', lambda *a, **kw: None)
@@ -27,13 +28,14 @@ def world(tmp_path, monkeypatch):
     def bridge(method, path, body=None):
         calls.append((method, path, body))
         if path == '/pty/list':
-            return {'sessions': []}
+            return {'sessions': list(runtime_observer.sessions)}
         if path == '/harness/spawn/resolve':
             return {'ok': True, 'agentId': AID, 'liteTuiDataRoot': str(data), 'request': {
                 'shell': 'litetui.exe', 'args': ['--backend', 'codex', '--model', 'fixture',
                                                '--thinking-level', 'high'],
                 'env': {'LITETUI_DATA_ROOT': str(data)}, 'harnessAgentId': AID}}
         if path == '/pty/create':
+            runtime_observer.publish(AID, 'fixture-session')
             return {'session_id': 'fixture-session'}
         raise AssertionError(path)
     monkeypatch.setattr(cli, '_bridge_request', bridge)
@@ -54,7 +56,7 @@ def test_actual_fresh_spawn_binds_child_birth_and_never_scans_archive(world, mon
     assert not (data / '.convos').exists()
 
 
-def test_actual_owned_resume_ignores_poisoned_registry_index_and_uses_home(world, monkeypatch):
+def test_actual_owned_resume_ignores_poisoned_registry_index_and_uses_home(world, monkeypatch, runtime_observer):
     data, project, calls = world
     with AgentSession.create_fresh(AgentStore(data), name='QuietHelm', agent_id=AID,
                                   backend='codex', model='fixture', thinking_level='high') as session:
@@ -63,7 +65,7 @@ def test_actual_owned_resume_ignores_poisoned_registry_index_and_uses_home(world
         target.write_text('{"type":"meta"}\n')
     monkeypatch.setattr(agent_names, 'resolve_name', lambda _: pytest.fail('legacy authority consulted'))
     placed = []
-    monkeypatch.setattr(cli, '_place_split', lambda *a, **kw: placed.append(kw) or {'newSessionId': 'fixture'})
+    monkeypatch.setattr(cli, '_place_split', lambda *a, **kw: runtime_observer.publish(AID, 'fixture') or placed.append(kw) or {'newSessionId': 'fixture'})
     cli.cmd_spawn(split_mode=True, resume_agent_id='QuietHelm', resume_convo_id=CID,
                   cwd=str(project), tier='worker', spawned_by=BID)
     launch = placed[0]['launch']

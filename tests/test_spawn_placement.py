@@ -14,7 +14,9 @@ def pane(ident, count=1, session=None):
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, runtime_observer):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     agents = tmp_path / "agents"
     agents.mkdir()
     state = {"panes": [pane("other"), pane("fleet", session="parent-pty"),
@@ -60,21 +62,34 @@ def world(tmp_path, monkeypatch):
                 return {"ok": False, "error": "no_terminals"}
             if target["leafCount"] >= 8:
                 return {"ok": False, "error": "grid_full", "count": 8, "max": 8}
+            if body.get("launch", {}).get("harnessAgentId"):
+                runtime_observer.publish(body["launch"]["harnessAgentId"], "new-pty")
             return {"ok": True, "newSessionId": "new-pty", "newLeafId": "new-leaf"}
         if path == "/pty/create":
             if "new_result" in state:
-                return state["new_result"]
+                result = state["new_result"]
+                if body.get("harnessAgentId") and isinstance(result, dict) and result.get("session_id"):
+                    runtime_observer.publish(body["harnessAgentId"], result["session_id"])
+                return result
+            if body.get("harnessAgentId"):
+                runtime_observer.publish(body["harnessAgentId"], "new-pty")
             state["panes"].append(pane("new-pane", session="new-pty"))
             return {"session_id": "new-pty", "pid": 123}
         if path == "/pty/write":
             # Simulate the hook registering the exact session that was launched.
+            native_id = "44444444-4444-4444-8444-444444444444"
+            transcript = tmp_path / "home" / ".claude" / "projects" / "fixture-project" / f"{native_id}.jsonl"
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text(json.dumps({"sessionId": native_id, "cwd": str(tmp_path)}) + "\n", encoding="utf-8")
             (agents / "child.json").write_text(json.dumps({
-                "agent_id": "child", "canvas_session_id": "new-pty", "pane_id": "stale"}))
+                "agent_id": "child", "canvas_session_id": "new-pty", "pane_id": "stale",
+                "name": "FixtureChild", "cli": "claude-code", "cwd": str(tmp_path),
+                "transcript_path": str(transcript)}))
             return {"ok": True}
         if path == "/canvas/rename-terminal":
             return {"ok": True}
         if path in ("/pty/list", "/session/list"):
-            return {"sessions": []}
+            return {"sessions": list(runtime_observer.sessions)}
         raise AssertionError((method, path, body))
 
     monkeypatch.setattr(cli, "_bridge_request", bridge)
@@ -315,7 +330,7 @@ def test_litetui_mount_gets_ten_second_budget_and_timeout_reports_running_seat(
     monkeypatch.setattr(fleet_policy, "verify_seat", lambda *a, **k: verified.append(True))
     if mount_after:
         spawn(world, spawn_cli="litetui", name="NewSeat", tier="worker")
-        assert len(polls) == mount_after and verified == [True]
+        assert len(polls) == mount_after and verified == [True, True]
     else:
         with pytest.raises(SystemExit) as exc:
             spawn(world, spawn_cli="litetui", name="NewSeat", tier="worker")

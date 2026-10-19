@@ -140,12 +140,6 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
     """Claude resolves sessions by project cwd; never substitute the caller's cwd."""
     from . import cli
     registry = _registry(entry["agent_id"])
-    if cli._live_owner_pid(registry):
-        raise ValueError(f"live: message {entry['name']} by inbox instead")
-    if registry.get("session_pid") and not registry.get("registered_at"):
-        from .hooks import _pid_alive
-        if _pid_alive(registry["session_pid"]):
-            raise ValueError("old seat pid is alive but its registration time is unknown")
     original_cwd = entry.get("cwd")
     if not isinstance(original_cwd, str) or not original_cwd.strip():
         raise ValueError(f"Claude seat {entry['name']} has no original cwd in the name index")
@@ -164,13 +158,35 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
         raise ValueError("--backend and --thinking-level overrides apply only to LiteTUI resume")
     if name and name != entry["name"]:
         raise ValueError(f"Claude resume keeps its indexed name: {entry['name']}")
+    if registry.get('agent_id') != entry['agent_id'] or registry.get('cli') not in ('claude', 'claude-code'):
+        raise ValueError('Claude registry identity is missing or contradicts its saved name')
+    if str(registry.get('backend') or 'claude').split('/', 1)[0].lower() != 'claude':
+        raise ValueError('Claude registry backend contradicts its CLI identity')
+    from .claude_identity import transcript_identity
+    transcript_identity(registry, native_id=session_id, cwd=original_cwd)
+    from . import recovered_destination
+    if recovered_destination.active_scope() is None and recovered_destination.recover_if_reserved(
+            entry['agent_id'], spawned_by or os.environ.get('LITEHARNESS_AGENT_ID'), conversation_id=session_id,
+            requested_cwd=str(working_dir), requested_role=tier,
+            overrides={'--prompt': prompt, '--cognitive': cognitive, '--model': model}):
+        return
+    if cli._live_owner_pid(registry):
+        raise ValueError(f"live: message {entry['name']} by inbox instead")
+    if registry.get("session_pid") and not registry.get("registered_at"):
+        from .hooks import _pid_alive
+        if _pid_alive(registry["session_pid"]):
+            raise ValueError("old seat pid is alive but its registration time is unknown")
+    if recovered_destination.active_scope() is not None:
+        recovered_destination.launch_native_claude(entry, roles.row_role(registry))
+        return
     # Delegate to the existing Claude launcher (trust, placement, env and registration).
     # Clearing the native resume fields avoids recursing back into this dispatcher.
     cli.cmd_spawn(spawn_cli="claude", split_mode=True, split_pane=pane,
                   split_direction=direction, cwd=str(working_dir), name=entry["name"],
                   model=model or entry.get("model"), tier=tier or roles.normalize_role(registry.get("role") or registry.get("tier")),
                   spawned_by=spawned_by if spawned_by is not None else registry.get("spawned_by"),
-                  prompt=prompt, cognitive=cognitive, additional_args=f"--resume {session_id}")
+                  prompt=prompt, cognitive=cognitive, additional_args=f"--resume {session_id}",
+                  resume_harness_id=entry["agent_id"])
 
 
 def _bridge_data_root(value: str | None, *, tier: str | None, backend: str | None,
@@ -269,6 +285,18 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
                 f"Owned-store data root unknown: set LITETUI_DATA_ROOT; name-index lookup: {exc}"
             ) from exc
         raise
+    if entry is None and agent_id:
+        registry = _registry(agent_id)
+        if registry.get('agent_id') == agent_id and registry.get('cli') in ('claude', 'claude-code'):
+            reported_backend = str(registry.get('backend') or 'claude').split('/', 1)[0].lower()
+            if reported_backend != 'claude':
+                raise ValueError('Claude registry backend contradicts its CLI identity')
+            from .claude_identity import transcript_identity
+            native_id, original_cwd, _ = transcript_identity(registry)
+            entry = dict(name=registry.get('name'), agent_id=agent_id, convo_id=native_id,
+                         cwd=original_cwd, backend='claude', model=registry.get('model'))
+            if not isinstance(entry['name'], str) or not entry['name'].strip():
+                raise ValueError('Claude registry has no resolved name')
     if entry is not None and kill_old:
         # Rule 25: a named seat is never closed to be resumed. Nothing below runs.
         raise ValueError(f"a named resume never closes a seat: message {entry['name']} by inbox, "

@@ -18,7 +18,7 @@ PARENT = '33333333-3333-4333-8333-333333333333'
 
 
 @pytest.fixture
-def launched(tmp_path, monkeypatch):
+def launched(tmp_path, monkeypatch, runtime_observer):
     data = tmp_path / 'data'
     data.mkdir()
     root = tmp_path / 'harness'
@@ -34,8 +34,10 @@ def launched(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_policy, 'verify_seat', lambda *a, **kw: None)
     monkeypatch.setattr(cli, '_rename_canvas_seat', lambda *a: None)
     def resolve(method, path, body=None):
+        if path.startswith('/harness/recovered-agent/locate?'):
+            return {'ok': True, 'found': False}
         if path == '/pty/list':
-            return {'sessions': []}
+            return {'sessions': list(runtime_observer.sessions)}
         assert path == '/harness/spawn/resolve'
         args = ['--role-prompt-file', 'fixture-role.md']
         if 'systemPromptFile' in body:
@@ -44,7 +46,7 @@ def launched(tmp_path, monkeypatch):
                 'request': {'args': args, 'env': {'LITEHARNESS_SPAWNED_BY': body['spawnedBy']},
                             'harnessAgentId': AID}}
     bridge = Mock(side_effect=resolve)
-    place = Mock(return_value={'newSessionId': 'fixture'})
+    place = Mock(side_effect=lambda *a, **kw: runtime_observer.publish(AID, 'fixture') or {'newSessionId': 'fixture'})
     monkeypatch.setattr(cli, '_bridge_request', bridge)
     monkeypatch.setattr(cli, '_place_split', place)
     kwargs = dict(spawn_cli='litetui', split_mode=True, cwd=str(tmp_path),
@@ -59,7 +61,8 @@ def launched(tmp_path, monkeypatch):
         target = session.conversation_directory(CID) / 'convo.jsonl'
         target.parent.mkdir()
         target.write_text('{"type":"meta"}\n', encoding='utf-8')
-    (root / 'agents').mkdir(parents=True)
+    (root / 'agents').mkdir(parents=True, exist_ok=True)
+    runtime_observer.sessions.clear()
     (root / 'agents' / f'{AID}.json').write_text(json.dumps({'agent_id': AID, 'name': 'Alpha', 'role': 'owner'}))
     bridge.reset_mock()
     place.reset_mock()

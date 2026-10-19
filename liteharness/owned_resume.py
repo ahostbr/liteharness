@@ -1,6 +1,7 @@
 """Named-agent resume uses folder identity/execution, never archive or index truth."""
 from pathlib import Path
 import os
+from datetime import datetime, timezone
 
 from .agent_store import AgentStore, StoreError, _unlinked, valid_id
 from . import owned_launch, roles
@@ -68,12 +69,24 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     tier = roles.normalize_role(tier)
     if tier not in roles.ROLES:
         raise StoreError('Owned resume requires explicit valid --tier')
-    caller = spawned_by or os.environ.get('LITEHARNESS_AGENT_ID')
-    if not caller:
+    from . import recovered_destination
+    recovery_scope = recovered_destination.active_scope()
+    caller = recovery_scope.get('launchParent') if recovery_scope else (spawned_by or os.environ.get('LITEHARNESS_AGENT_ID'))
+    if not caller and recovery_scope is None:
         raise StoreError('Owned resume requires explicit parent identity')
     refusal = fleet_policy.gate(saved['backend'], saved['model'], saved['thinking_level'])
     if refusal:
         raise StoreError(refusal)
+    recovery_overrides = {'--system-prompt-file': system_prompt_file, '--prompt': prompt, '--cognitive': cognitive,
+                          '--owner': owner_title, '--memory': memory_dir}
+    has_overrides = any(value is not None for value in recovery_overrides.values())
+    if recovery_scope is None and not has_overrides:
+        try:
+            if recovered_destination.recover_if_reserved(agent.agent_id, caller, conversation_id=conversation_id,
+                    requested_cwd=cwd, requested_role=tier):
+                return
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
     # Readonly preflight. This lock is released before creation; the launched
     # child independently reacquires it before registration. No transfer/gap claim.
     from .agent_ownership import AgentSession, OwnershipError
@@ -95,6 +108,13 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
             raise StoreError('Live owned seat exists; --system-prompt-file was not applied: '
                              'live prompt publication actor capability is unavailable; no seat was closed or duplicated')
         raise StoreError('Live owned seat exists; message it instead')
+    if recovery_scope is None and has_overrides:
+        try:
+            if recovered_destination.recover_if_reserved(agent.agent_id, caller, conversation_id=conversation_id,
+                    requested_cwd=cwd, requested_role=tier, overrides=recovery_overrides):
+                return
+        except ValueError as exc:
+            raise StoreError(str(exc)) from exc
     resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {
         'cli': 'litetui', 'name': agent.name, 'tier': roles.wire_tier(tier), 'model': saved['model'],
         'backend': saved['backend'], 'thinkingLevel': saved['thinking_level'],
@@ -113,12 +133,17 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     current = store.find_agent(agent_id=agent.agent_id)
     if current != agent:
         raise StoreError('Agent authority changed during launch resolution')
-    result = cli._place_split(pane, caller, direction, cwd=cwd, launch=launch)
+    launched_at = datetime.now(timezone.utc)
+    result = (recovered_destination.place(launch) if recovery_scope is not None
+              else cli._place_split(pane, caller, direction, cwd=cwd, launch=launch))
     if not isinstance(result, dict) or not result.get('newSessionId') or result.get('error') or result.get('ok') is False:
         raise StoreError('Owned seat creation refused or uncertain; inspect sessions')
     # Preserve the existing fleet verification/cleanup contract on owned resumes.
     # Only the exact newly returned session is eligible for cleanup.
     session_id = result['newSessionId']
+    receipt_error = cli._wait_owned_runtime(agent.agent_id, session_id, launched_at)
+    if receipt_error:
+        raise StoreError(receipt_error)
     try:
         governed = bool(fleet_policy.floor_for(fleet_policy.load()[0], saved['backend'], saved['model']))
         why = fleet_policy.verify_seat(agent.agent_id, cli.config.get_root(), wait=90,
@@ -127,6 +152,8 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     except Exception as exc:
         why = f'Owned fleet verification failed: {exc}'
     if why:
+        if recovery_scope is not None:
+            raise StoreError(f'Exact recovery session {session_id}: {why}; inspect, no automatic kill/relaunch')
         try:
             cleanup = cli._bridge_request('DELETE', f'/pty/{session_id}')
         except Exception as exc:
@@ -135,6 +162,17 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
                 or cleanup.get('ok') is False or cleanup.get('error')):
             raise StoreError(f'{why}; exact new session cleanup failed: {cleanup}')
         raise StoreError(f'{why}; exact new session kill requested, reap pending')
+    try:
+        final_policy_error = fleet_policy.verify_seat(
+            agent.agent_id, cli.config.get_root(), wait=0, backend=saved['backend'],
+            allow_silent=not governed, expect_model=saved['model'], expect_thinking=saved['thinking_level'])
+    except Exception as exc:
+        final_policy_error = f'Final policy evidence unavailable: {exc}'
+    if final_policy_error:
+        raise StoreError(f'Exact session {session_id}: {final_policy_error}; inspect, do not relaunch')
+    receipt_error = cli._owned_runtime_receipt(agent.agent_id, session_id, launched_at)
+    if receipt_error:
+        raise StoreError(f'Exact session {session_id}: {receipt_error}; inspect, do not relaunch')
     # Existing named thread identity is preserved; no registry/name-index repair.
     print(f"Launched owned seat {agent.name} ({agent.agent_id}); conversation {conversation_id or 'new'}; "
           f"session {result['newSessionId']}; home {agent.directory}")
