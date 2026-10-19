@@ -60,7 +60,10 @@ def _no_window() -> dict:
 
 
 def _run(argv: list[str], timeout: float) -> int:
-    return subprocess.run(argv, timeout=timeout, capture_output=True, **_no_window()).returncode
+    # Detached stdio: an inherited or captured pipe can wedge subprocess.run when the compactor leaves a
+    # background child holding it open.
+    return subprocess.run(argv, timeout=timeout, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, **_no_window()).returncode
 
 
 def _litetui(agent_id: str, command: dict) -> dict:
@@ -180,6 +183,43 @@ def observe_compaction(transcript: Path, since: datetime) -> dict | None:
     return found
 
 
+class CompactionWatch:
+    """Finds a Claude `compact_boundary` written AFTER it was created, reading only new bytes.
+
+    1M-context transcripts run to hundreds of MB; a poll must not rescan them. The offset starts at the
+    current end of file, and a trailing half-written line is left for the next poll.
+    """
+
+    def __init__(self, transcript: Path, since: datetime):
+        self.path, self.since = Path(transcript), since
+        try:
+            self.offset = self.path.stat().st_size
+        except OSError:
+            self.offset = 0
+
+    def poll(self) -> dict | None:
+        try:
+            with self.path.open('rb') as stream:
+                stream.seek(self.offset)
+                data = stream.read()
+        except OSError:
+            return None
+        cut = data.rfind(b'\n') + 1  # only complete lines; the rest waits for the next poll
+        self.offset += cut
+        found = None
+        for raw in data[:cut].splitlines():
+            if b'"compact_boundary"' not in raw:
+                continue
+            try:
+                record = json.loads(raw)
+                stamp = datetime.fromisoformat(str(record['timestamp']).replace('Z', '+00:00'))
+            except (ValueError, KeyError):
+                continue
+            if record.get('subtype') == 'compact_boundary' and stamp >= self.since:
+                found = {'uuid': record.get('uuid'), 'timestamp': record['timestamp']}
+        return found
+
+
 def _receipt(checkpoint_id: str, seat: Seat, kind: str, revision: str, path: Path, digest: str, *,
              durable: bool, assurance: str, at: datetime) -> Receipt:
     receipt = Receipt(str(uuid4()), checkpoint_id, seat.agent_id, kind, revision, str(path), digest,
@@ -189,6 +229,8 @@ def _receipt(checkpoint_id: str, seat: Seat, kind: str, revision: str, path: Pat
 
 
 class Saver:
+    ABANDON_AFTER = 3
+
     def __init__(self, store: CheckpointStore, params: SaveParams, env: SaveEnv, operation_id: str):
         self.store, self.params, self.env, self.operation_id = store, params, env, operation_id
         self.log = OperationLog(store, operation_id)
@@ -196,6 +238,7 @@ class Saver:
         self._last = env.now()
         self.layout = None  # (revision, leaf ids) as frozen; None until freeze() or when unobserved
         self.model_sources: dict[str, str] = {}  # agent id -> 'registry' | 'transcript', from discovery
+        self.timeout_streak = 0  # consecutive seats whose compaction never showed within compact_timeout
         self.prepared: list[str] = []  # LiteTUI seats THIS save put on hold: the only holds it may release
 
     def tick(self) -> datetime:
@@ -325,6 +368,13 @@ class Saver:
         out, cid, argv = Collected(), manifest.checkpoint_id, self.env.compact_command
         if not argv:
             return None
+        if self.timeout_streak >= self.ABANDON_AFTER:
+            out = self.unsupported(Collected(), cid, seat, seat.source_revision, blocker=False)
+            out.blockers.append(Blocker('compaction-abandoned', seat.agent_id,
+                                        f'{self.ABANDON_AFTER} seats in a row never compacted; fix the compactor, then retry this seat'))
+            return out
+        transcript = self.transcript_of(seat)
+        watch = CompactionWatch(transcript, requested_at) if transcript else None  # before the compactor runs
         values = {'{agent_id}': seat.agent_id, '{name}': seat.name, '{checkpoint_id}': cid,
                   '{handoff}': str(handoff) if handoff else ''}
         resolved = [self.fill(a, values) for a in argv]
@@ -333,13 +383,17 @@ class Saver:
             returncode = self.env.run(resolved, self.env.compact_timeout)
         except (OSError, subprocess.SubprocessError):
             returncode = None
-        transcript = self.transcript_of(seat)
         marker = None
-        while returncode == 0 and transcript:
-            marker = observe_compaction(transcript, requested_at)
-            if marker or self.env.now().timestamp() >= deadline:
+        timed_out = False
+        while returncode == 0 and watch:
+            marker = watch.poll()
+            if marker or self.cancelled():
+                break
+            if self.env.now().timestamp() >= deadline:
+                timed_out = True
                 break
             self.env.sleep(self.env.poll_interval)
+        self.timeout_streak = self.timeout_streak + 1 if timed_out else 0
         revision = seat.source_revision
         path, digest = evidence(self.store, cid, seat.agent_id, 'compact',
                                 {'kind': 'compact', 'returncode': returncode, 'observed': marker})
@@ -459,6 +513,11 @@ class Saver:
                 return result
             manifest = self.collect_one(manifest, seat, replies.get(seat.agent_id), requested_at, roots)
             self.log.event('seat-collected', seat.agent_id, self.report(manifest, 'running'))
+        if self.cancelled():  # cancelled during the last seat's compaction poll
+            self.release_holds()
+            result = self.report(manifest, 'canceled')
+            self.log.event('final', None, result)
+            return result
         manifest = self.finalize(manifest)
         result = self.report(manifest, manifest.state)
         self.log.event('final', None, result)
