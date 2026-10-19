@@ -477,8 +477,8 @@ def test_journal_append_gives_up_eventually_and_other_errors_are_not_retried(svc
         OperationLog(svc.store, first.operation_id, sleep=lambda s: None).event('plan', None, None)
     assert len(calls) > 3
     calls.clear()
-    monkeypatch.setattr(svc.store, 'append', lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(ContractError('Journal sequence changed')))
-    with pytest.raises(ContractError, match='sequence'):
+    monkeypatch.setattr(svc.store, 'append', lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(ContractError('Unknown operation')))
+    with pytest.raises(ContractError, match='Unknown'):
         OperationLog(svc.store, first.operation_id, sleep=lambda s: None).event('plan', None, None)
     assert len(calls) == 1
 
@@ -508,3 +508,20 @@ def test_worker_not_started_tells_the_caller_to_use_a_new_request_id(svc):
     assert 'NEW request_id' in result.blockers[0].remedy and 'same request_id' not in result.blockers[0].remedy
     again = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
     assert again.operation_id == result.operation_id, 'the same request_id returns the same unstarted operation'
+
+
+def test_a_sequence_collision_is_retried_because_the_sequence_is_reread_each_attempt(svc, monkeypatch):
+    first = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
+    real = svc.store.append
+    seen = []
+
+    def racing(operation_id, event, *, expected_sequence):
+        seen.append(expected_sequence)
+        if len(seen) == 1:  # another writer slipped an event in between our read and our append
+            real(operation_id, type(event)(expected_sequence, 'other-writer', None, None), expected_sequence=expected_sequence)
+            raise ContractError('Journal sequence changed; reconcile before append')
+        return real(operation_id, event, expected_sequence=expected_sequence)
+    monkeypatch.setattr(svc.store, 'append', racing)
+    OperationLog(svc.store, first.operation_id, sleep=lambda s: None).event('plan', None, None)
+    stages = [e.stage for e in svc.store.operation(first.operation_id).events]
+    assert stages == ['other-writer', 'plan'] and seen == [0, 1]

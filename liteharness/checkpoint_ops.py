@@ -68,8 +68,9 @@ class OperationLog:
         return operation
 
     def event(self, stage: str, seat_id: str | None = None, result: Result | None = None) -> Operation:
-        """Append one event. A held writer lock is retried with backoff (it is held for milliseconds
-        by another writer, and a worker that dies on it loses a launch result); any other refusal raises."""
+        """Append one event. A held writer lock, or a sequence another writer advanced, is retried with
+        backoff (the sequence is re-read every attempt); a worker that dies on either loses a launch
+        result. Any other refusal raises."""
         for attempt in range(self.LOCK_ATTEMPTS):
             operation = self.operation()
             sequence = len(operation.events)
@@ -77,7 +78,8 @@ class OperationLog:
                 return self.store.append(self.operation_id, JournalEvent(sequence, stage, seat_id, result),
                                          expected_sequence=sequence)
             except ContractError as exc:
-                if 'store locked' not in str(exc) or attempt == self.LOCK_ATTEMPTS - 1:
+                retryable = 'store locked' in str(exc) or 'Journal sequence changed' in str(exc)  # re-read each pass
+                if not retryable or attempt == self.LOCK_ATTEMPTS - 1:
                     raise
                 self.sleep(min(0.5, 0.02 * 2 ** attempt))
 

@@ -79,3 +79,15 @@ the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
 - Compaction needs `checkpoint.compact_command` for Claude seats; none ships.
 - Layout receipts are observation, not a flush proof (LiteSuite has no flush endpoint).
 - An orchestrator caller of any `spawn --split` no longer falls into its own pane by default.
+- A launch that never registered can read as dead: if `spawn` ran, no registry row was written, an old
+  row for the seat remains, and its process is gone, the seat reads `dead` once the operation is idle
+  for longer than spawn timeout plus verify timeout (about 330 s), and a later restore may launch it
+  again. The first attempt's seat could in principle still be starting; the wait is the only guard.
+- A seat that ends `failed`, `blocked` or `unknown` can lose its shell-husk leaf in cleanup when that
+  leaf is a saved leaf and its shell has no child. That is accepted: the leaf held nothing.
+- Saved `slot.leaf` ids are expected to survive a LiteSuite restart (`gone-terminal.ts` revives a
+  vanished terminal in the same leaf and the split tree persists), but no restart has proven it yet.
+  If they do not, the cleanup closes nothing and says so in its `shell-summary` line.
+- The shell summary (`N bare shells found, M matched a saved leaf, K closed`) is a journal line on a real
+  run (stage `shell-summary`) and an informational `shell-summary` blocker on a dry run; the Result
+  contract has no note field, so a final result cannot carry it without turning `complete` into `incomplete`.
