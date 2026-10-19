@@ -596,8 +596,12 @@ class Restorer:
             self.journal('refused', None, result)
             return result
         if params.dry_run:
-            shells = [Blocker('would-close-shell', None, f'pane {pane} leaf {leaf}')
-                      for pane, leaf, _, _ in ([] if params.keep_shells else self.shell_candidates(excluded))]
+            shells = []
+            if not params.keep_shells:
+                candidates, found, matched = self.shell_scan(excluded)
+                shells = [Blocker('would-close-shell', None, f'pane {pane} leaf {leaf}') for pane, leaf, _, _ in candidates]
+                shells.append(Blocker('shell-summary', None, f'{found} bare shells found, {matched} matched a saved leaf, '
+                                                              f'{len(candidates)} would close'))
             planned = self.report('accepted' if not any(s == 'blocked' for s in self.states.values()) else 'incomplete')
             return make_result(None, planned.checkpoint_id, planned.state, planned.seats, shells)
         self.journal('plan', None, self.report('running'))
@@ -662,6 +666,9 @@ class Restorer:
 
     # -- bare shells ---------------------------------------------------------------------------
     def shell_candidates(self, excluded: set[str]) -> list[tuple[str, str, str, str]]:
+        return self.shell_scan(excluded)[0]
+
+    def shell_scan(self, excluded: set[str]) -> tuple[list[tuple[str, str, str, str]], int, int]:
         """(pane, leaf, session, shell) of PTYs that look like what LiteSuite leaves after a restart.
 
         All of: the leaf is one a SAVED seat slot names (where LiteSuite put a placeholder back; a leaf
@@ -673,7 +680,8 @@ class Restorer:
         env = self.env
         sessions, panes = env.pty_list(), env.context()
         if sessions is None or panes is None:
-            return []
+            return [], 0, 0
+        found = matched = 0
         seat_sessions = {s.get('canvas_session_id') for e in self.manifest.expected if (s := env.registry(e.agent_id))}
         saved_leaves = {s.slot.leaf for s in self.manifest.seats if s.slot}
         by_id = {s.get('id'): s for s in sessions if isinstance(s, dict)}
@@ -690,8 +698,7 @@ class Restorer:
                 if not isinstance(leaf, dict) or not isinstance(leaf.get('leafId'), str):
                     continue
                 ids = leaf.get('sessionIds')
-                if (not isinstance(ids, list) or len(ids) != 1 or ids[0] in seat_sessions
-                        or leaf['leafId'] not in saved_leaves):
+                if not isinstance(ids, list) or len(ids) != 1 or ids[0] in seat_sessions:
                     continue
                 pty = by_id.get(ids[0])
                 pid = pty.get('pid') if pty else None
@@ -700,15 +707,24 @@ class Restorer:
                 name = env.process_name(pid)
                 if name not in SHELLS or env.has_children(pid) is not False:
                     continue  # a server, a busy shell, or one this cannot read
+                found += 1  # a bare shell, wherever it is
+                if leaf['leafId'] not in saved_leaves:
+                    continue
+                matched += 1
                 closable.append((pane_id, leaf['leafId'], ids[0], name))
             out.extend(closable[:max(0, len(leaves) - 1)])  # keep at least one leaf per pane
-        return out
+        return out, found, matched
 
     def cleanup_shells(self, excluded: set[str]) -> None:
-        for pane, leaf, session, shell in self.shell_candidates(excluded):
-            closed = self.env.close_leaf(leaf)
-            self.journal(f"{'shell-closed' if closed else 'shell-close-failed'} pane={pane} leaf={leaf} "
+        candidates, found, matched = self.shell_scan(excluded)
+        closed = 0
+        for pane, leaf, session, shell in candidates:
+            ok = self.env.close_leaf(leaf)
+            closed += bool(ok)
+            self.journal(f"{'shell-closed' if ok else 'shell-close-failed'} pane={pane} leaf={leaf} "
                          f"session={session} shell={shell}", None, None)
+        # One line even when nothing matched: a no-op must not be silent.
+        self.journal(f'shell-summary found={found} matched={matched} closed={closed}', None, None)
 
 
 def run_restore(store: CheckpointStore, operation_id: str | None, params: RestoreParams, env: RestoreEnv) -> Result:

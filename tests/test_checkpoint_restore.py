@@ -441,7 +441,7 @@ def test_dry_run_launches_nothing_journals_nothing_and_lists_shells(tmp_path, bo
     store, params, _ = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])]), dry_run=True)
     result = run_restore(store, None, params, box.env())
     assert box.calls == [] and box.closed == [] and result.operation_id is None
-    assert [b.code for b in result.blockers] == ['would-close-shell']
+    assert [b.code for b in result.blockers] == ['would-close-shell', 'shell-summary']
     assert {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'starting'
     assert not (store.root / 'operations').exists()
 
@@ -774,3 +774,44 @@ def test_an_old_launch_intent_without_result_expires_only_when_it_is_provably_de
         box.state[s2.agent_id] = liveness
     second_restore(store, params, box, **env_kw)
     assert (s2.agent_id in launched(box)) is relaunched
+
+
+# -- critic round 3: R2 a silent no-op must be visible --------------------------------------------------------
+
+def summary_stage(store, op):
+    return [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('shell-summary')]
+
+
+def test_final_report_journals_one_shell_summary_line_with_counts(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11}, {'id': 'sh2', 'pid': 12}], two_leaves('sh1', 'sh2'))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])]))
+    run_restore(store, op, params, box.env())
+    assert summary_stage(store, op) == ['shell-summary found=2 matched=2 closed=1']
+
+
+def test_a_silent_noop_is_visible_when_no_bare_shell_matches_a_saved_leaf(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11}, {'id': 'sh2', 'pid': 12}], two_leaves('sh1', 'sh2'))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    assert box.closed == [] and summary_stage(store, op) == ['shell-summary found=2 matched=0 closed=0']
+
+
+def test_summary_is_journaled_even_when_there_are_no_shells_and_skipped_with_keep_shells(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    assert summary_stage(store, op) == ['shell-summary found=0 matched=0 closed=0']
+    store2, params2, op2 = start(tmp_path, manifest(tmp_path, [s2], checkpoint_id=uid(902)), op=703, keep_shells=True)
+    run_restore(store2, op2, params2, box.env())
+    assert summary_stage(store2, op2) == []
+
+
+def test_dry_run_carries_the_same_summary_line_as_a_note(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11}, {'id': 'sh2', 'pid': 12}], two_leaves('sh1', 'sh2'))
+    store, params, _ = start(tmp_path, manifest(tmp_path, [s2]), dry_run=True)
+    result = run_restore(store, None, params, box.env())
+    notes = [b for b in result.blockers if b.code == 'shell-summary']
+    assert len(notes) == 1 and notes[0].remedy == '2 bare shells found, 0 matched a saved leaf, 0 would close'
