@@ -1,6 +1,8 @@
 """One-call save: real store, contract and roster; only the process boundary is faked."""
 from datetime import datetime, timedelta, timezone
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -183,7 +185,7 @@ def test_silent_and_bad_path_seats_are_blocked_rows_and_fail_safe_to_held(world)
     assert not w.fleet.ran, 'no compaction without a verified handoff'
 
 
-def test_midwork_seat_reports_held_and_is_still_saved(world):
+def test_midwork_seat_records_its_handoff_is_not_compacted_and_blocks_completion(world):
     w = world
     coord, handoff = coordinator(w)
     busy = w.claude(2, parent=coord)
@@ -191,8 +193,44 @@ def test_midwork_seat_reports_held_and_is_still_saved(world):
     compacted(w, coord, handoff)
     store, params, result, _ = save(w, coord, handoff)
     manifest = store.read_manifest(params.checkpoint_id)
-    assert manifest.state == 'complete'
+    assert manifest.state == 'incomplete' and result.state == 'incomplete'
+    assert [(b.seat_id, b.code) for b in manifest.blockers] == [(busy, 'held-not-compacted')]
     assert {s.agent_id: s.disposition for s in manifest.seats}[busy] == 'held'
+    assert not any(busy in argv for argv in w.fleet.ran), 'a mid-work seat is never compacted'
+    kinds = {r.kind: r for r in manifest.receipts if r.seat_id == busy}
+    assert kinds['handoff'].durable and kinds['compact'].assurance == 'unsupported'
+
+
+def test_held_litetui_seat_is_put_on_hold_but_never_compacted_or_flushed(world):
+    w = world
+    coord, handoff = coordinator(w)
+    tui = w.litetui(10, role='worker')
+    home_handoff = w.owned_root / '.agents' / tui.name / 'handoff.md'
+    home_handoff.write_text('owned handoff', encoding='utf-8')
+    plain = w.fleet.handoff_for
+    w.fleet.handoff_for = lambda agent_id: home_handoff if agent_id == tui.agent_id else plain(agent_id)
+    w.fleet.disposition[tui.agent_id] = 'held'
+    compacted(w, coord, handoff)
+    store, params, result, _ = save(w, coord, handoff, include_offline=[tui.agent_id])
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert w.fleet.litetui_calls == ['gui.checkpoint.prepare']
+    assert (tui.agent_id, 'held-not-compacted') in [(b.seat_id, b.code) for b in manifest.blockers]
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='case-insensitive paths')
+def test_handoff_root_containment_compares_resolved_paths(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    compacted(w, coord, handoff)
+    plain = w.fleet.handoff_for
+
+    def shouting(agent_id):
+        path = plain(agent_id)
+        return Path(str(path).upper()) if agent_id == peer else path
+    w.fleet.handoff_for = shouting
+    store, params, result, _ = save(w, coord, handoff)
+    assert store.read_manifest(params.checkpoint_id).state == 'complete'
 
 
 def test_failed_compact_command_blocks_with_failed_code(world):

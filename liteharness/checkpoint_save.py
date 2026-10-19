@@ -257,20 +257,36 @@ class Saver:
                                         'Seat did not report a handoff in time; ask it, then retry this seat'))
             return out
         path, out.disposition = reply
-        if not (path.is_absolute() and '..' not in path.parts and path.is_file()
-                and any(path.is_relative_to(root) for root in roots)):
+        if not self.under_roots(path, roots):
             out.blockers.append(Blocker('handoff-invalid', seat.agent_id,
                                         'Reported handoff is not an existing file under an authorized root'))
             out.disposition = 'held'
             return out
         revision = seat.source_revision
-        out.receipts.append(_receipt(cid, seat, 'handoff', revision, path, sha256_file(path), durable=True,
+        out.receipts.append(_receipt(cid, seat, 'handoff', revision, path.resolve(), sha256_file(path), durable=True,
                                      assurance='cooperative', at=self.tick()))
+        if out.disposition == 'held':
+            return self.not_compacted(out, cid, seat, revision)
         compaction = self.compact_claude(manifest, seat, requested_at)
         if compaction is None:
             return self.unsupported(out, cid, seat, revision)
         out.receipts.extend(compaction.receipts)
         out.blockers.extend(compaction.blockers)
+        return out
+
+    @staticmethod
+    def under_roots(path: Path, roots: list[Path]) -> bool:
+        """Containment on RESOLVED paths: case, short names and `.` segments cannot sneak out or in."""
+        if not (path.is_absolute() and '..' not in path.parts and path.is_file()):
+            return False
+        real = path.resolve()
+        return any(real.is_relative_to(root.resolve()) for root in roots)
+
+    def not_compacted(self, out: Collected, cid: str, seat: Seat, revision: str) -> Collected:
+        """A mid-work seat keeps its handoff but is never compacted: that would end its turn."""
+        self.unsupported(out, cid, seat, revision, blocker=False)
+        out.blockers.append(Blocker('held-not-compacted', seat.agent_id,
+                                    'Mid-work: let it finish or reach a safe stop, then retry this seat'))
         return out
 
     def unsupported(self, out: Collected, cid: str, seat: Seat, revision: str, *,
@@ -329,7 +345,7 @@ class Saver:
             return out
         path, out.disposition = reply
         home_handoff = Path(seat.data_root) / '.agents' / seat.name / 'handoff.md'
-        if not path.is_file() or not any(path.is_relative_to(root) for root in roots):
+        if not self.under_roots(path, roots):
             out.blockers.append(Blocker('handoff-invalid', seat.agent_id,
                                         'Reported handoff is not an existing file under an authorized root'))
             out.disposition = 'held'
@@ -339,6 +355,10 @@ class Saver:
             status = self.env.litetui(seat.agent_id, {'type': 'gui.checkpoint.prepare', 'checkpoint_id': cid,
                                                       'disposition': out.disposition})
             self.prepared.append(seat.agent_id)
+            if out.disposition == 'held':
+                out.receipts.append(_receipt(cid, seat, 'handoff', seat.source_revision, path.resolve(),
+                                             sha256_file(path), durable=True, assurance='cooperative', at=handoff_at))
+                return self.not_compacted(out, cid, seat, seat.source_revision)
             digest = sha256_file(path)
             self.env.litetui(seat.agent_id, {'type': 'gui.conversations.compact', 'checkpoint_id': cid,
                                              'handoff_sha256': digest})
