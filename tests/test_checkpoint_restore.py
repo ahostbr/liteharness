@@ -82,7 +82,8 @@ class Box:
         session = f'pty-{agent_id[-3:]}'
         self.registry[agent_id] = {'agent_id': agent_id, 'registered_at': T0.isoformat(), 'canvas_session_id': session}
         self.state[agent_id] = 'live'
-        self.ptys.append({'id': session, 'pid': 100, 'harnessAgentId': agent_id})
+        # An ordinary split-launched Claude seat's PTY carries NO harnessAgentId (measured 2026-10-19).
+        self.ptys.append({'id': session, 'pid': 100})
 
     def mail(self, sender, recipient, body):
         if self.mail_error:
@@ -114,7 +115,7 @@ class Box:
             self.registry[agent_id] = {'agent_id': agent_id, 'registered_at': self.clock.now().isoformat(),
                                        'canvas_session_id': session}
             self.state[agent_id] = 'live'
-            self.ptys.append({'id': session, 'pid': 100, 'harnessAgentId': agent_id})
+            self.ptys.append({'id': session, 'pid': 100})
             self.panes.append({'id': f'pane-{agent_id[-3:]}', 'leafCount': 1,
                                'leaves': [{'id': 'x', 'sessionIds': [session]}]})
         return SpawnOutcome(0)
@@ -318,6 +319,7 @@ def test_failed_inbox_send_means_no_wake_is_typed(tmp_path, box):
 def test_seat_that_came_up_between_plan_and_launch_is_reattached_not_relaunched(tmp_path, box):
     s2 = seat(2, root=tmp_path, disposition='held')
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    box.make_live(s2.agent_id)  # registry row + hosting PTY exist; only the plan-time probe said dead
     answers = iter(['dead', 'live', 'live', 'live'])  # dead at the plan, live at the re-check
     env = box.env()
     env.liveness = lambda agent_id: next(answers) if agent_id == s2.agent_id else 'dead'
@@ -644,3 +646,58 @@ def test_retry_result_shows_prior_states_for_seats_it_does_not_retry(tmp_path, b
     states = {s.seat_id: s.state for s in result.seats}
     assert launched(box) == [s2.agent_id]
     assert states[s2.agent_id] == 'ready-idle' and states[s3.agent_id] == 'ready-held'
+
+
+# -- critic round 2: N1/N6 identity join without harnessAgentId --------------------------------------------
+
+def test_an_ordinary_live_seat_without_harness_agent_id_is_reattached_not_unknown(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    box.make_live(s2.agent_id)
+    assert all('harnessAgentId' not in p for p in box.ptys), 'faithful fake: ordinary PTYs carry no harnessAgentId'
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env())
+    assert box.calls == [] and {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'ready-idle'
+
+
+def test_children_of_a_live_ordinary_parent_are_not_blocked_by_an_unverifiable_parent(tmp_path, box):
+    parent, child = seat(2, role='owner', root=tmp_path), seat(3, parent=uid(2), root=tmp_path)
+    box.make_live(parent.agent_id)
+    store, params, op = start(tmp_path, manifest(tmp_path, [parent, child]))
+    result = run_restore(store, op, params, box.env())
+    assert launched(box) == [child.agent_id]
+    assert {s.seat_id: s.state for s in result.seats}[child.agent_id] == 'ready-idle'
+
+
+def test_a_pty_that_names_a_different_agent_does_not_verify_the_seat(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    box.make_live(s2.agent_id)
+    box.ptys[-1]['harnessAgentId'] = uid(99)  # present, so it must equal the seat id
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env())
+    assert box.calls == [] and {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'unknown'
+
+
+def test_a_pty_that_is_not_the_registered_session_does_not_verify_the_seat(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    box.make_live(s2.agent_id)
+    box.ptys[-1]['id'] = 'some-other-pty'
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env())
+    assert {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'unknown'
+
+
+def test_a_seat_that_came_up_at_the_recheck_must_verify_or_it_is_unknown(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    answers = iter(['dead', 'live', 'live', 'live'])  # dead at the plan, "live" at the re-check, but no registry row
+    env = box.env()
+    env.liveness = lambda agent_id: next(answers) if agent_id == s2.agent_id else 'dead'
+    result = run_restore(store, op, params, env)
+    assert box.calls == [] and {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'unknown'
+
+
+def test_default_liveness_joins_by_the_registered_canvas_session_when_the_process_is_gone(tmp_path, monkeypatch):
+    pid, born = mine()
+    row = {'agent_id': uid(2), 'session_pid': 4_000_000, 'session_process_started_at': born, 'canvas_session_id': 'pty-7'}
+    assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7'}]) == 'unknown'
+    assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-8'}]) == 'dead'

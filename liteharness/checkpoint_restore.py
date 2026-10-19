@@ -139,7 +139,13 @@ def default_liveness(agent_id: str) -> str:
     ptys = _pty_list()
     if ptys is None:
         return 'unknown'
-    hosted = any(s.get('harnessAgentId') == agent_id for s in ptys)
+    # An ordinary split-launched Claude PTY carries no harnessAgentId, so the join is the registered
+    # canvas session id; harnessAgentId (slot recovery, LiteTUI) is an optional extra and, when
+    # present, must name this seat.
+    session = row.get('canvas_session_id') if isinstance(row, dict) else None
+    hosted = any(isinstance(s, dict) and (s.get('harnessAgentId') == agent_id
+                                          or (session and s.get('id') == session and s.get('harnessAgentId') in (None, agent_id)))
+                 for s in ptys)
     if not isinstance(row, dict) or row.get('exited_at'):
         return 'unknown' if hosted else 'dead'
     pid, born = row.get('session_pid'), row.get('session_process_started_at')
@@ -458,13 +464,16 @@ class Restorer:
             except ValueError:
                 return False
         sessions = self.env.pty_list()
-        return bool(sessions) and any(isinstance(s, dict) and s.get('harnessAgentId') == seat.agent_id
-                                      and s.get('id') == row.get('canvas_session_id') for s in sessions)
+        session = row.get('canvas_session_id')
+        return bool(session) and any(isinstance(s, dict) and s.get('id') == session
+                                     and s.get('harnessAgentId') in (None, seat.agent_id) for s in sessions or [])
 
     def launch(self, seat: Seat, excluded: set[str]) -> str:
         env = self.env
         state = env.liveness(seat.agent_id)  # re-check: it may have come up since the plan
         if state == 'live':
+            if not self.verified(seat):  # a bare "live" is not enough to call it reattached
+                return 'unknown'
             self.reattached.add(seat.agent_id)
             return self.ready_state(seat)
         if state != 'dead':
