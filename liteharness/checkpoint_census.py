@@ -179,6 +179,8 @@ def census(selected: list[Seat], *, harness_root: str | Path,
                     recorded = registry.get(key)
                     if key == 'cli' and recorded == 'claude-code':
                         recorded = 'claude'
+                    if key == 'spawned_by':  # a top-level seat records '' or nothing: both mean no parent
+                        recorded, value = recorded or None, value or None
                     if key in registry and recorded != value:
                         raise ContractError('Registry conflicts with selected context')
                 saved_role = registry.get('role') or registry.get('tier')

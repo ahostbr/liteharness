@@ -88,3 +88,24 @@ def test_unrecorded_thinking_only_matches_an_absent_registry_value(tmp_path, mon
     result = census([claimed], harness_root=harness, authorized_data_roots=[s.data_root],
                     authorized_cwd_roots=[s.cwd, s.data_root], exclusions=[])
     assert result.blockers
+
+
+def test_a_top_level_seat_with_an_empty_spawned_by_is_not_blocked(tmp_path, monkeypatch):
+    """Sentinel-shaped registry row: spawned_by '', cognitive '', no thinking_level, role orchestrator."""
+    s, harness = claude_seat(tmp_path, monkeypatch, names=lambda s: {})
+    path = harness / 'agents' / f'{s.agent_id}.json'
+    row = json.loads(path.read_text())
+    row.update({'spawned_by': '', 'cognitive': '', 'role': 'orchestrator', 'model': s.execution.model})
+    row.pop('thinking_level', None)
+    path.write_text(json.dumps(row))
+    result = run(replace(s, role='orchestrator', parent_id=None), harness)
+    assert not result.blockers, result.blockers
+
+
+def test_a_real_parent_mismatch_still_blocks(tmp_path, monkeypatch):
+    s, harness = claude_seat(tmp_path, monkeypatch, names=lambda s: {})
+    path = harness / 'agents' / f'{s.agent_id}.json'
+    row = json.loads(path.read_text())
+    row['spawned_by'] = uid(77)
+    path.write_text(json.dumps(row))
+    assert run(replace(s, parent_id=None), harness).blockers
