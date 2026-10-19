@@ -46,6 +46,8 @@ def world(tmp_path, monkeypatch, runtime_observer):
                 return state["context"]()
             return state.get("context", {"activePanes": state["panes"],
                                          "hiddenPanes": [pane("hidden")]})
+        if path.startswith("/harness/recovered-agent/locate"):
+            return {"ok": True, "found": False}  # no reserved slot: ordinary placement applies
         if path == "/harness/spawn/resolve":
             return {"ok": True, "agentId": "33333333-3333-4333-8333-333333333333", "request": {
                 "shell": "litetui.exe", "args": [], "env": {},
@@ -350,3 +352,28 @@ def test_codex_launcher_guard_still_rejects_unresolved_placement(world, monkeypa
         spawn(world, spawn_cli="codex", model="model", thinking_level="high")
     assert exc.value.code == 2
     assert not any(path == "/pty/write" for _, path, _ in world["calls"])
+
+
+def test_excluded_pane_never_receives_the_split_even_when_it_is_the_only_one_with_room(world, monkeypatch):
+    world["panes"] = [pane("other", 8), pane("fleet", 8), pane("own", 2)]
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "own")
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def test_excluded_pane_beats_an_explicit_request_and_others_keep_working(world, monkeypatch):
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "own,other")
+    spawn(world, split_pane="own")
+    assert placements(world)[0][1]["paneId"] == "fleet"
+
+
+def test_exclusion_argument_matches_the_environment_form(world):
+    world["panes"] = [pane("fleet", 8), pane("own", 2)]
+    result = cli._place_split(None, "caller", None, cwd=str(world["root"]), exclude_panes=["own"])
+    assert result["paneId"] == "new-pane" and [p for p, _ in placements(world)] == ["/pty/create"]
+
+
+def test_no_exclusion_leaves_ordinary_placement_unchanged(world, monkeypatch):
+    monkeypatch.delenv("LITEHARNESS_EXCLUDE_PANES", raising=False)
+    spawn(world)
+    assert placements(world)[0][1]["paneId"] == "own"

@@ -80,8 +80,12 @@ def _split_request_body(pane: str | None, agent_id: str, direction: str | None) 
 
 
 def _place_split(pane: str | None, agent_id: str, direction: str | None,
-                 *, cwd: str, launch: dict | None = None) -> dict:
+                 *, cwd: str, launch: dict | None = None, exclude_panes=()) -> dict:
     """Place one --split launch, not one per backend.
+
+    `exclude_panes` (plus the comma-separated LITEHARNESS_EXCLUDE_PANES, which a restore
+    sets on its spawn subprocesses) names panes that never receive this split, not even
+    when explicitly requested. Default empty: ordinary spawns are unchanged.
 
     Context is a snapshot, so only the bridge's pre-creation refusals permit
     another attempt. An unknown/malformed creation result must never duplicate
@@ -137,6 +141,8 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
         return (live or spatial.get("pane_id") or record.get("pane_id") or
                 (os.environ.get("LITESUITE_PANE_ID") if ident == agent_id else None))
 
+    excluded = {p for p in (*exclude_panes, *os.environ.get("LITEHARNESS_EXCLUDE_PANES", "").split(",")) if p}
+
     def candidates(panes):
         own = agent_pane(panes, agent_id)
         explicit = pane
@@ -153,7 +159,7 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
         ordered = []
         for ident in [explicit, own, *fleet, *by_id]:
             p = by_id.get(ident) if isinstance(ident, str) else None
-            if not p or ident in ordered:
+            if not p or ident in ordered or ident in excluded:
                 continue
             count = p.get("leafCount", 0)
             if isinstance(count, int) and 0 < count < 8:
