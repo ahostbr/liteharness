@@ -46,6 +46,8 @@ def world(tmp_path, monkeypatch, runtime_observer):
                 return state["context"]()
             return state.get("context", {"activePanes": state["panes"],
                                          "hiddenPanes": [pane("hidden")]})
+        if path.startswith("/harness/recovered-agent/locate"):
+            return {"ok": True, "found": False}  # no reserved slot: ordinary placement applies
         if path == "/harness/spawn/resolve":
             return {"ok": True, "agentId": "33333333-3333-4333-8333-333333333333", "request": {
                 "shell": "litetui.exe", "args": [], "env": {},
@@ -350,3 +352,121 @@ def test_codex_launcher_guard_still_rejects_unresolved_placement(world, monkeypa
         spawn(world, spawn_cli="codex", model="model", thinking_level="high")
     assert exc.value.code == 2
     assert not any(path == "/pty/write" for _, path, _ in world["calls"])
+
+
+def test_excluded_pane_never_receives_the_split_even_when_it_is_the_only_one_with_room(world, monkeypatch):
+    world["panes"] = [pane("other", 8), pane("fleet", 8), pane("own", 2)]
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "own")
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def test_excluded_pane_beats_an_explicit_request_and_others_keep_working(world, monkeypatch):
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "own,other")
+    spawn(world, split_pane="own")
+    assert placements(world)[0][1]["paneId"] == "fleet"
+
+
+def test_exclusion_argument_matches_the_environment_form(world):
+    world["panes"] = [pane("fleet", 8), pane("own", 2)]
+    result = cli._place_split(None, "caller", None, cwd=str(world["root"]), exclude_panes=["own"])
+    assert result["paneId"] == "new-pane" and [p for p, _ in placements(world)] == ["/pty/create"]
+
+
+def test_no_exclusion_leaves_ordinary_placement_unchanged(world, monkeypatch):
+    monkeypatch.delenv("LITEHARNESS_EXCLUDE_PANES", raising=False)
+    spawn(world)
+    assert placements(world)[0][1]["paneId"] == "own"
+
+
+def zen(n, count=1, **extra):
+    return {**pane(f"zen-term-{n}", count), "mirrorId": f"canvas-pane-{n}", **extra}
+
+
+def test_explicit_canvas_pane_resolves_to_its_active_zen_mirror(world):
+    world["panes"] = [zen(1), zen(2), pane("own", 8)]
+    spawn(world, split_pane="canvas-pane-2")
+    assert placements(world)[0][1]["paneId"] == "zen-term-2"
+
+
+def test_explicit_sync_form_resolves_and_the_active_id_is_what_the_bridge_gets(world):
+    world["panes"] = [zen(1, syncId="sync-canvas-pane-1"), pane("own", 8)]
+    spawn(world, split_pane="sync-canvas-pane-1")
+    assert placements(world)[0][1]["paneId"] == "zen-term-1"
+
+
+def test_hidden_pane_resolves_an_alias_but_never_receives_a_split(world):
+    world["panes"] = [pane("own", 8), {**pane("zen-term-3"), "syncId": "s3"}]
+    world["context"] = {"activePanes": world["panes"], "hiddenPanes": [
+        {**pane("canvas-pane-3"), "syncId": "s3"}, pane("lonely-hidden")]}
+    spawn(world, split_pane="canvas-pane-3")
+    assert placements(world)[0][1]["paneId"] == "zen-term-3"
+    world["calls"].clear()
+    spawn(world, split_pane="lonely-hidden")
+    assert placements(world)[0][1]["paneId"] != "lonely-hidden"
+
+
+def test_truly_missing_pane_still_falls_through_with_the_message(world, capsys):
+    spawn(world, split_pane="canvas-pane-99")
+    assert placements(world)[0][1]["paneId"] == "own"
+    assert "requested pane canvas-pane-99 is full, missing or has no terminals" in capsys.readouterr().out
+
+
+def test_canvas_mode_explicit_pane_is_unchanged(world):
+    world["panes"] = [pane("canvas-pane-1"), pane("canvas-pane-2"), pane("own", 8)]
+    spawn(world, split_pane="canvas-pane-2")
+    assert placements(world)[0][1]["paneId"] == "canvas-pane-2"
+
+
+def test_excluded_canvas_alias_bars_its_zen_mirror(world, monkeypatch):
+    world["panes"] = [zen(1), pane("own", 8)]
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "canvas-pane-1")
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def as_orchestrator(world):
+    path = world["root"] / "agents/caller.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "role": "orchestrator"}))
+
+
+def test_orchestrator_caller_skips_its_own_pane_for_fleet(world):
+    as_orchestrator(world)
+    spawn(world)
+    assert placements(world)[0][1]["paneId"] == "fleet"
+
+
+def test_orchestrator_with_room_only_in_its_own_pane_gets_a_new_pane(world):
+    as_orchestrator(world)
+    world["panes"] = [pane("other", 8), pane("fleet", 8), pane("own", 2)]
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def test_orchestrator_explicit_own_pane_is_still_honoured(world):
+    as_orchestrator(world)
+    spawn(world, split_pane="self")
+    assert placements(world)[0][1]["paneId"] == "own"
+
+
+def test_orchestrator_own_pane_is_resolved_through_aliases(world):
+    as_orchestrator(world)
+    world["panes"] = [pane("other", 8), pane("fleet", 8), {**pane("zen-term-9", 2, "caller-pty"), "mirrorId": "canvas-pane-9"}]
+    path = world["root"] / "agents/caller.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "pane_id": "canvas-pane-9", "canvas_session_id": "stale"}))
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def test_non_orchestrator_caller_keeps_its_own_pane_first(world):
+    path = world["root"] / "agents/caller.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "role": "builder"}))
+    spawn(world)
+    assert placements(world)[0][1]["paneId"] == "own"
+
+
+def test_placement_exclusion_never_reaches_the_new_seats_environment(world, monkeypatch):
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "own")
+    spawn(world, split_pane="fleet")
+    typed = " ".join(str(body.get("data", "")) for _, path, body in world["calls"] if path == "/pty/write")
+    assert "EXCLUDE_PANES" not in typed and "'own'" not in typed, "the seat's terminal never sees the exclusion"

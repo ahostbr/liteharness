@@ -83,6 +83,33 @@ def _name_entry(index: dict, seat: Seat, *, required: bool) -> dict | None:
     return row
 
 
+UNRECORDED_THINKING = 'unrecorded'
+
+
+def _claude_corroborated(registry: dict, index_entry: dict | None, candidate: Seat) -> None:
+    """Native transcript first; a names row alone only for a transcript with no evidence.
+
+    A transcript that names a different launch cwd always blocks. Absent names rows
+    and `cwd: null` rows do not.
+    """
+    from .claude_identity import transcript_identity
+    try:
+        _, launch_cwd, _ = transcript_identity(registry, native_id=candidate.conversation_id)
+    except ValueError as exc:
+        if index_entry is None or index_entry.get('cwd') != candidate.cwd:
+            raise ContractError(f'Claude identity is not corroborated: {exc}') from exc
+    else:
+        if Path(launch_cwd).resolve() != Path(candidate.cwd).resolve():
+            raise ContractError('Claude original cwd disagrees with native transcript')
+    if candidate.execution.backend != 'claude':
+        raise ContractError('Native execution conflicts with its CLI')
+    models = [m for m in (registry.get('model'), (index_entry or {}).get('model')) if m is not None]
+    if not models or any(m != candidate.execution.model for m in models):
+        raise ContractError('Native model is absent or conflicts with registry/name index')
+    if index_entry is not None and index_entry.get('backend', '').split('/', 1)[0] != 'claude':
+        raise ContractError('Native CLI disagrees with name index')
+
+
 def census(selected: list[Seat], *, harness_root: str | Path,
            authorized_data_roots: list[str | Path], authorized_cwd_roots: list[str | Path],
            exclusions: list[Exclusion]) -> Census:
@@ -142,12 +169,17 @@ def census(selected: list[Seat], *, harness_root: str | Path,
             if root not in roots:
                 raise ContractError('Data root not explicitly authorized')
             _directory(str(_within(candidate.cwd, cwd_roots)))
-            index_entry = _name_entry(index, candidate, required=candidate.cli != 'litetui')
+            # Claude's names row is a hint that drifts or is missing (2 of 21 seats on
+            # 2026-10-19); its registry row + native transcript are the authority.
+            index_entry = _name_entry(index, candidate, required=candidate.cli not in ('litetui', 'claude'))
             registry = _registry(harness, candidate.agent_id)
             if registry:
                 for key, value in (('name', candidate.name), ('cli', candidate.cli),
                                    ('spawned_by', candidate.parent_id)):
-                    if key in registry and registry[key] != value:
+                    recorded = registry.get(key)
+                    if key == 'cli' and recorded == 'claude-code':
+                        recorded = 'claude'
+                    if key in registry and recorded != value:
                         raise ContractError('Registry conflicts with selected context')
                 saved_role = registry.get('role') or registry.get('tier')
                 if saved_role and normalize_role(saved_role) != normalize_role(candidate.role):
@@ -189,14 +221,20 @@ def census(selected: list[Seat], *, harness_root: str | Path,
                                                             execution['thinking_level']))
                 wire(seat)  # an unchosen home model is not a runnable execution contract
             else:
-                if index_entry.get('cwd') != candidate.cwd:
-                    raise ContractError('Native CLI requires its indexed original cwd')
-                if index_entry.get('backend', '').split('/', 1)[0] != candidate.cli:
-                    raise ContractError('Native CLI disagrees with name index')
-                if (index_entry.get('model') != candidate.execution.model
-                        or candidate.execution.backend != candidate.cli):
-                    raise ContractError('Native execution conflicts with name index')
-                if registry.get('thinking_level') != candidate.execution.thinking_level:
+                if candidate.cli == 'claude':
+                    _claude_corroborated(registry, index_entry, candidate)
+                else:
+                    if index_entry.get('cwd') != candidate.cwd:
+                        raise ContractError('Native CLI requires its indexed original cwd')
+                    if index_entry.get('backend', '').split('/', 1)[0] != candidate.cli:
+                        raise ContractError('Native CLI disagrees with name index')
+                    if (index_entry.get('model') != candidate.execution.model
+                            or candidate.execution.backend != candidate.cli):
+                        raise ContractError('Native execution conflicts with name index')
+                recorded_thinking = registry.get('thinking_level')
+                if candidate.cli == 'claude' and recorded_thinking is None:
+                    recorded_thinking = UNRECORDED_THINKING  # Claude registry rows carry none
+                if recorded_thinking != candidate.execution.thinking_level:
                     raise ContractError('Native thinking level is absent or conflicts with registry')
                 transcript_value = registry.get('transcript_path')
                 if not isinstance(transcript_value, str):

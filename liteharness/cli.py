@@ -80,8 +80,17 @@ def _split_request_body(pane: str | None, agent_id: str, direction: str | None) 
 
 
 def _place_split(pane: str | None, agent_id: str, direction: str | None,
-                 *, cwd: str, launch: dict | None = None) -> dict:
+                 *, cwd: str, launch: dict | None = None, exclude_panes=()) -> dict:
     """Place one --split launch, not one per backend.
+
+    `exclude_panes` (plus the comma-separated LITEHARNESS_EXCLUDE_PANES, which a restore
+    sets on its spawn subprocesses) names panes that never receive this split, not even
+    when explicitly requested. Default empty: spawns that name none are unchanged.
+
+    Pane ids resolve through id/syncId/mirrorId aliases to the ACTIVE pane. One placement rule
+    changes for ordinary spawns: a caller whose registry role is orchestrator never falls into its
+    own pane as a default (it lands in an explicit pane, a fleet pane, another pane, or a new one);
+    an explicit request for its own pane is still honoured.
 
     Context is a snapshot, so only the bridge's pre-creation refusals permit
     another attempt. An unknown/malformed creation result must never duplicate
@@ -99,6 +108,8 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
         except (OSError, ValueError):
             continue  # Presence is a preference, never proof of a live pane.
 
+    hidden: list[dict] = []
+
     def context_panes():
         try:
             context = _bridge_request("GET", context_path)
@@ -115,6 +126,7 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
                     not isinstance(leaf, dict) or not isinstance(leaf.get("sessionIds", []), list)
                     for leaf in leaves):
                 return None
+        hidden[:] = [h for h in context.get("hiddenPanes") or [] if isinstance(h, dict)]
         return context["activePanes"]
 
     def session_pane(panes, session):
@@ -137,23 +149,53 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
         return (live or spatial.get("pane_id") or record.get("pane_id") or
                 (os.environ.get("LITESUITE_PANE_ID") if ident == agent_id else None))
 
+    excluded = {p for p in (*exclude_panes, *os.environ.get("LITEHARNESS_EXCLUDE_PANES", "").split(",")) if p}
+
+    def alias_map(panes):
+        """Every id/syncId/mirrorId a pane is known by -> its ACTIVE pane id.
+
+        Zen mode shows `zen-term-N` (mirrorId `canvas-pane-N`) while presence, callers and the
+        grid_full 409 say `canvas-pane-N` or `sync-canvas-pane-N`. Hidden panes only help resolve
+        an alias to its active mirror; a group with no single active pane maps nothing.
+        """
+        groups: list[tuple[set, set]] = []
+        for row, active in [*((p, True) for p in panes), *((h, False) for h in hidden)]:
+            names = {v for k in ("id", "syncId", "mirrorId") if isinstance(v := row.get(k), str) and v}
+            actives = {row["id"]} if active else set()
+            for group in [g for g in groups if g[0] & names]:
+                groups.remove(group)
+                names |= group[0]
+                actives |= group[1]
+            groups.append((names, actives))
+        return {name: next(iter(actives)) for names, actives in groups if len(actives) == 1 for name in names}
+
     def candidates(panes):
-        own = agent_pane(panes, agent_id)
+        alias = alias_map(panes)
+
+        def resolve(ident):
+            return alias.get(ident, ident) if isinstance(ident, str) else ident
+        own = resolve(agent_pane(panes, agent_id))
+        # An orchestrator's own pane is its console: it never falls into it as a default
+        # (T0558: 27 restored seats landed in Sentinel's pane). An explicit request still wins.
+        keep_clear = own if _roles.row_role(agents.get(agent_id, {}), "") == "orchestrator" else None
         explicit = pane
         if pane == "self":
             explicit = own
         elif pane and pane.startswith("self:"):
             explicit = agent_pane(panes, pane[5:])
+        explicit = resolve(explicit)
         parent = agents.get(agent_id, {}).get("spawned_by") or os.environ.get("LITEHARNESS_SPAWNED_BY")
         fleet = [agent_pane(panes, parent)] if parent else []
         if parent:
             fleet.extend(agent_pane(panes, ident) for ident, record in agents.items()
                          if ident != agent_id and record.get("spawned_by") == parent)
+        fleet = [resolve(ident) for ident in fleet]
+        barred = {resolve(ident) for ident in excluded}
         by_id = {p["id"]: p for p in panes}
         ordered = []
         for ident in [explicit, own, *fleet, *by_id]:
             p = by_id.get(ident) if isinstance(ident, str) else None
-            if not p or ident in ordered:
+            if not p or ident in ordered or ident in barred or (ident == keep_clear and ident != explicit):
                 continue
             count = p.get("leafCount", 0)
             if isinstance(count, int) and 0 < count < 8:
@@ -4713,6 +4755,9 @@ def cmd_spawn(
             raise ValueError("Harness resume identity requires an exact Claude native session")
         transcript_identity(_registry(resume_harness_id), native_id=native_id)
     context_env["LITEHARNESS_AGENT_ID"] = resume_harness_id or ""
+    # A restore sets this for ITS placement only; the seat it launches must not inherit it.
+    if os.environ.get("LITEHARNESS_EXCLUDE_PANES"):
+        context_env["LITEHARNESS_EXCLUDE_PANES"] = ""
 
     # `--name` used to reach the agent only as an instruction inside the typed
     # bootstrap ("register with --name X") — which vanished whenever the
