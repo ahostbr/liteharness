@@ -932,7 +932,9 @@ def test_opus_transcript_and_sonnet_default_is_blocked_and_nothing_is_launched(t
     row = next(r for r in result.seats if r.seat_id == s2.agent_id)
     assert row.state == 'blocked' and [e.code for e in row.errors] == ['model-mismatch']
     assert OPUS in row.errors[0].remedy and SONNET in row.errors[0].remedy and '--allow-default-model' in row.errors[0].remedy
-    assert next(r for r in result.seats if r.seat_id == child.agent_id).state == 'blocked', 'its subtree waits'
+    kid = next(r for r in result.seats if r.seat_id == child.agent_id)
+    assert kid.state == 'blocked', 'its subtree waits'
+    assert 'parent blocked: model-mismatch' in kid.errors[0].remedy and 'did not come up' not in kid.errors[0].remedy
     assert result.state == 'incomplete'
 
 

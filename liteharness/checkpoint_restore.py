@@ -687,7 +687,9 @@ class Restorer:
                 continue
             if self.states.get(seat.parent_id or '', '') in ('failed', 'unknown', 'blocked'):
                 self.states[row.seat_id] = 'blocked'
-                self.errors[row.seat_id] = [Blocker('parent-failed', row.seat_id, 'Its parent did not come up')]
+                why = next((e.code for e in self.errors.get(seat.parent_id or '', [])), None)
+                self.errors[row.seat_id] = [Blocker('parent-failed', row.seat_id,
+                                                    f'parent blocked: {why}' if why else 'Its parent did not come up')]
                 self.journal('seat-result', row.seat_id, self.report('running'))
                 continue
             if self.cancelled():
