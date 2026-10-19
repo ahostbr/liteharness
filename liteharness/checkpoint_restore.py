@@ -1,0 +1,514 @@
+"""One-call restore: a pure plan, then an idempotent driver over the saved roster.
+
+Restore = `live seat(Seat)` folded over the roster, parents before children, owners before
+crew, one launch at a time. The journal is the only memory of what was attempted: a launch
+intent is appended BEFORE dispatch, so a crash between intent and result is `unknown` and is
+never retried. A live seat is reattached, never relaunched; unknown liveness is `unknown`.
+Never `--kill-old`, never a new name, never a takeover. Works from an incomplete checkpoint.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+from typing import Callable
+
+from . import config, roles
+from .checkpoint_contract import Blocker, ContractError, Manifest, Receipt, Result, Seat, wire
+from .checkpoint_ops import OperationLog, make_result, seat_result
+from .checkpoint_save import evidence, sha256_file
+from .checkpoint_store import CheckpointStore
+from uuid import uuid4
+
+SPAWN_TIMEOUT = 300.0
+VERIFY_TIMEOUT = 30.0
+MAX_LEAVES = 8  # fleet panes cap at 8 leaves
+POINTER = ('Restored from checkpoint {checkpoint_id}. Resume as-is. Arm ONE inbox Monitor for your own id. '
+           'Do not start new work, commit, push or rebuild. Wait for an inbox message from {coordinator}.')
+HELD_POINTER = ' You were mid-work when saved: hold until your owner reconciles.'
+PROMPT_REFUSAL = 'does not support explicit --prompt'  # T0589 slot recovery refuses before launching
+ROLE_RANK = {role: n for n, role in enumerate(roles.ROLES)}
+
+
+@dataclass(frozen=True)
+class SpawnOutcome:
+    returncode: int | None  # None = timed out: the outcome is unknown, never retried
+    tail: str = ''
+
+
+@dataclass(frozen=True)
+class PlanRow:
+    seat_id: str
+    name: str
+    action: str  # launch | reattach | coordinator | blocked | unknown
+    reason: str = ''
+
+
+def _spawn(argv: list[str], env: dict, timeout: float) -> SpawnOutcome:
+    try:
+        done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout,
+                              cwd=str(config.get_root()))
+    except subprocess.TimeoutExpired:
+        return SpawnOutcome(None, 'timed out')
+    return SpawnOutcome(done.returncode, ((done.stderr or '') + (done.stdout or ''))[-400:])
+
+
+def _bridge(method: str, path: str, body: dict | None = None):
+    from . import cli
+    try:
+        return cli._bridge_request(method, path, body)
+    except Exception:
+        return None
+
+
+def _pty_list() -> list[dict] | None:
+    result = _bridge('GET', '/pty/list')
+    sessions = result.get('sessions') if isinstance(result, dict) else None
+    return sessions if isinstance(sessions, list) and all(isinstance(s, dict) for s in sessions) else None
+
+
+def _context() -> list[dict] | None:
+    result = _bridge('GET', '/context')
+    panes = result.get('activePanes') if isinstance(result, dict) else None
+    return panes if isinstance(panes, list) and all(isinstance(p, dict) for p in panes) else None
+
+
+def _leaves(pane_id: str) -> list[dict] | None:
+    from urllib.parse import quote
+    result = _bridge('GET', f'/canvas/leaves?paneId={quote(pane_id)}')
+    leaves = result.get('leaves') if isinstance(result, dict) and result.get('ok') is True else None
+    return leaves if isinstance(leaves, list) else None
+
+
+def _close_leaf(leaf_id: str) -> bool:
+    result = _bridge('POST', '/canvas/close-leaf', {'leafId': leaf_id})
+    return isinstance(result, dict) and result.get('ok') is True
+
+
+def _has_children(pid: int) -> bool | None:
+    """True/False for a shell pid, None when it cannot be inspected (then: never touch it)."""
+    try:
+        import psutil
+        return bool(psutil.Process(pid).children())
+    except Exception:
+        return None
+
+
+def default_liveness(agent_id: str) -> str:
+    """'live' | 'dead' | 'unknown' from the CURRENT registry row and process creation identity."""
+    import psutil
+    path = config.get_root() / 'agents' / f'{agent_id}.json'
+    try:
+        row = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        row = None
+    except (OSError, ValueError):
+        return 'unknown'
+    ptys = _pty_list()
+    hosted = None if ptys is None else any(s.get('harnessAgentId') == agent_id for s in ptys)
+    if not isinstance(row, dict) or row.get('exited_at'):
+        return 'unknown' if hosted is None else ('live' if hosted else 'dead')
+    try:
+        pid, born = int(row.get('session_pid') or 0), float(row.get('session_process_started_at'))
+        alive = psutil.Process(pid).create_time() * 1000
+    except psutil.NoSuchProcess:
+        return 'unknown' if hosted else 'dead'
+    except (psutil.Error, TypeError, ValueError):
+        return 'unknown'
+    # A recycled pid has a different creation time: that is a dead seat, not a live one.
+    return 'live' if abs(alive - born) < 2000 else 'dead'
+
+
+@dataclass
+class RestoreEnv:
+    """The process boundary. Tests replace it; the plan and the driver are real."""
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    sleep: Callable[[float], None] = time.sleep
+    liveness: Callable[[str], str] = default_liveness
+    spawn: Callable[[list[str], dict, float], SpawnOutcome] = _spawn
+    registry: Callable[[str], dict | None] = lambda agent_id: _read_registry(agent_id)
+    context: Callable[[], list[dict] | None] = _context
+    pty_list: Callable[[], list[dict] | None] = _pty_list
+    leaves: Callable[[str], list[dict] | None] = _leaves
+    close_leaf: Callable[[str], bool] = _close_leaf
+    has_children: Callable[[int], bool | None] = _has_children
+    spawn_timeout: float = SPAWN_TIMEOUT
+    verify_timeout: float = VERIFY_TIMEOUT
+    poll_interval: float = 1.0
+    python: str = field(default_factory=lambda: sys.executable)
+
+
+def _read_registry(agent_id: str) -> dict | None:
+    try:
+        row = json.loads((config.get_root() / 'agents' / f'{agent_id}.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return row if isinstance(row, dict) else None
+
+
+@dataclass
+class RestoreParams:
+    harness_root: str
+    coordinator_id: str  # the authorized actor: restore never launches or closes it
+    checkpoint_id: str
+    keep_shells: bool = False
+    dry_run: bool = False
+    seat_ids: list[str] | None = None  # retry: only these (reconciled failed) rows
+
+    def wire(self) -> dict:
+        return dict(self.__dict__)
+
+    @classmethod
+    def from_wire(cls, value: dict) -> 'RestoreParams':
+        return cls(**value)
+
+
+# -- plan --------------------------------------------------------------------------------------
+
+def plan(manifest: Manifest, liveness: dict[str, str], coordinator_id: str) -> list[PlanRow]:
+    """Pure. Parent-first, owners before crew; a bad parent blocks only its own subtree."""
+    seats = {s.agent_id: s for s in manifest.seats}
+    expected = {e.agent_id: e for e in manifest.expected}
+    saved_coordinator = manifest.coordinator.agent_id
+    rows: dict[str, PlanRow] = {}
+    for agent_id, e in expected.items():
+        seat = seats.get(agent_id)
+        if agent_id == saved_coordinator:
+            rows[agent_id] = PlanRow(agent_id, e.name, 'coordinator')
+        elif seat is None:
+            rows[agent_id] = PlanRow(agent_id, e.name, 'blocked', 'unresolved-in-checkpoint')
+        else:
+            state = liveness.get(agent_id, 'unknown')
+            rows[agent_id] = PlanRow(agent_id, e.name, {'live': 'reattach', 'dead': 'launch'}.get(state, 'unknown'),
+                                     '' if state in ('live', 'dead') else 'liveness-unknown')
+
+    def parent_of(agent_id: str) -> str | None:
+        seat = seats.get(agent_id)
+        parent = seat.parent_id if seat else None
+        return None if parent in (None, saved_coordinator) else parent
+
+    depth: dict[str, int] = {}
+    cyclic: set[str] = set()
+
+    def resolve(agent_id: str, path: tuple[str, ...]) -> int:
+        if agent_id in depth:
+            return depth[agent_id]
+        if agent_id in path:
+            cyclic.update(path[path.index(agent_id):])
+            return 0
+        parent = parent_of(agent_id)
+        value = 0 if parent is None or parent not in expected else 1 + resolve(parent, (*path, agent_id))
+        depth[agent_id] = value
+        return value
+
+    for agent_id in expected:
+        resolve(agent_id, ())
+
+    def verdict(agent_id: str, trail: tuple[str, ...] = ()) -> tuple[str, str] | None:
+        row = rows[agent_id]
+        if row.action == 'blocked':
+            return 'blocked', row.reason
+        if agent_id in cyclic:
+            return 'blocked', 'parent-cycle'
+        parent = parent_of(agent_id)
+        if parent is None or row.action in ('coordinator', 'reattach'):
+            return None
+        if parent not in expected:
+            return 'blocked', 'parent-missing'
+        if parent in trail:
+            return 'blocked', 'parent-cycle'
+        above = verdict(parent, (*trail, agent_id))
+        if above is not None:
+            return 'blocked', 'parent-blocked'
+        if rows[parent].action == 'unknown':
+            return 'blocked', 'parent-unknown'
+        return None
+
+    for agent_id in list(rows):
+        blocked = verdict(agent_id)
+        if blocked and rows[agent_id].action in ('launch', 'unknown', 'blocked'):
+            rows[agent_id] = PlanRow(agent_id, rows[agent_id].name, *blocked)
+
+    def key(row: PlanRow):
+        seat = seats.get(row.seat_id)
+        return (depth.get(row.seat_id, 0), ROLE_RANK.get(roles.normalize_role(seat.role) if seat else '', 99),
+                row.name.casefold())
+    return sorted(rows.values(), key=key)
+
+
+def resolve_checkpoint(store: CheckpointStore, checkpoint_id: str) -> str:
+    """Explicit id, or `latest`: the newest manifest by created_at in ANY state."""
+    if checkpoint_id != 'latest':
+        return store.read_manifest(checkpoint_id).checkpoint_id
+    newest = None
+    for path in sorted(store.root.glob('*/manifest.json')) if store.root.exists() else []:
+        try:
+            manifest = store.read_manifest(path.parent.name)
+        except ContractError:
+            continue
+        stamp = datetime.fromisoformat(manifest.created_at.replace('Z', '+00:00'))
+        if newest is None or stamp > newest[0]:
+            newest = (stamp, manifest.checkpoint_id)
+    if newest is None:
+        raise ContractError('No checkpoint exists to restore')
+    return newest[1]
+
+
+# -- placement ---------------------------------------------------------------------------------
+
+def coordinator_panes(env: RestoreEnv, coordinator_id: str) -> set[str]:
+    """Every pane id the coordinator occupies: restore never places a seat there."""
+    row = env.registry(coordinator_id) or {}
+    panes = env.context() or []
+    found = {row['pane_id']} if isinstance(row.get('pane_id'), str) else set()
+    session = row.get('canvas_session_id')
+    for pane in panes:
+        if session and any(session in leaf.get('sessionIds', []) for leaf in pane.get('leaves', [])
+                           if isinstance(leaf, dict)):
+            found.add(pane['id'])
+    return found
+
+
+def choose_pane(env: RestoreEnv, seat: Seat, excluded: set[str], restored_panes: list[str]) -> str | None:
+    """Saved pane if it exists with room and is not excluded; else a pane already holding
+    restored seats; else None, letting the placement hierarchy (and finally a new pane) decide."""
+    panes = {p['id']: p for p in env.context() or [] if isinstance(p.get('id'), str)}
+
+    def room(pane_id: str) -> bool:
+        pane = panes.get(pane_id)
+        count = pane.get('leafCount', 0) if pane else 0
+        return pane is not None and pane_id not in excluded and isinstance(count, int) and 0 < count < MAX_LEAVES
+    if seat.slot and room(seat.slot.pane):
+        return seat.slot.pane
+    return next((p for p in restored_panes if room(p)), None)
+
+
+# -- driver --------------------------------------------------------------------------------------
+
+class Restorer:
+    def __init__(self, store: CheckpointStore, params: RestoreParams, env: RestoreEnv, operation_id: str):
+        self.store, self.params, self.env, self.operation_id = store, params, env, operation_id
+        self.log = OperationLog(store, operation_id) if operation_id else None  # None = dry-run: read-only
+        self.manifest = store.read_manifest(params.checkpoint_id)
+        self.states: dict[str, str] = {}
+        self.errors: dict[str, list[Blocker]] = {}
+        self.evidence: dict[str, list[Receipt]] = {}
+        self.restored_panes: list[str] = []
+
+    def report(self, state: str, *, final: bool = False) -> Result:
+        rows = [seat_result(e.agent_id, self.states.get(e.agent_id, 'preparing'),
+                            evidence=self.evidence.get(e.agent_id, []), errors=self.errors.get(e.agent_id, []))
+                for e in self.manifest.expected]
+        if final and state == 'complete' and any(r.state not in ('ready-idle', 'ready-held') or r.errors for r in rows):
+            state = 'incomplete'
+        return make_result(self.operation_id, self.manifest.checkpoint_id, state, rows)
+
+    def journal(self, stage: str, seat_id: str | None, result: Result | None) -> None:
+        if self.log is not None:
+            self.log.event(stage, seat_id, result)
+
+    def journalled_states(self) -> dict[str, str]:
+        """What this operation already attempted. An intent with no result is `unknown`."""
+        seen: dict[str, str] = {}
+        for event in (self.log.operation().events if self.log else []):
+            if event.seat_id is None:
+                continue
+            if event.stage == 'launch-intent':
+                seen[event.seat_id] = 'unknown'
+            elif event.result is not None:
+                match = next((s.state for s in event.result.seats if s.seat_id == event.seat_id), None)
+                if match in ('ready-idle', 'ready-held', 'failed', 'unknown', 'blocked'):
+                    seen[event.seat_id] = match
+        return seen
+
+    def cancelled(self) -> bool:
+        return self.log is not None and any(e.stage == 'cancel-requested' for e in self.log.operation().events)
+
+    def ready_state(self, seat: Seat) -> str:
+        return 'ready-held' if seat.disposition == 'held' else 'ready-idle'
+
+    def prompt_for(self, seat: Seat) -> str:
+        text = POINTER.format(checkpoint_id=self.manifest.checkpoint_id, coordinator=self.params.coordinator_id)
+        return text + (HELD_POINTER if seat.disposition == 'held' else '')
+
+    def argv(self, seat: Seat, pane: str | None, *, prompt: bool) -> list[str]:
+        out = [self.env.python, '-m', 'liteharness.cli', 'spawn', '--resume', seat.agent_id, '--split',
+               '--spawned-by', self.params.coordinator_id]
+        if pane:
+            out += ['--pane', pane]
+        if prompt:
+            out += ['--prompt', self.prompt_for(seat)]
+        return out
+
+    def verified(self, seat: Seat, since: datetime) -> bool:
+        """A NEW registration, live by process identity, joined to a PTY that hosts this agent."""
+        row = self.env.registry(seat.agent_id)
+        if not row or row.get('exited_at') or self.env.liveness(seat.agent_id) != 'live':
+            return False
+        try:
+            if datetime.fromisoformat(str(row.get('registered_at'))) < since:
+                return False
+        except ValueError:
+            return False
+        sessions = self.env.pty_list()
+        return bool(sessions) and any(s.get('harnessAgentId') == seat.agent_id
+                                      and s.get('id') == row.get('canvas_session_id') for s in sessions)
+
+    def launch(self, seat: Seat, excluded: set[str]) -> str:
+        env = self.env
+        if self.env.liveness(seat.agent_id) != 'dead':  # re-check: it may have come up meanwhile
+            return 'ready-idle' if self.env.liveness(seat.agent_id) == 'live' and not self._note_reattach(seat) \
+                else 'unknown'
+        pane = choose_pane(env, seat, excluded, self.restored_panes)
+        started = env.now()
+        self.journal('launch-intent', seat.agent_id, self.report('running'))
+        child_env = {**os.environ, 'LITEHARNESS_AGENT_ID': self.params.coordinator_id,
+                     'LITEHARNESS_EXCLUDE_PANES': ','.join(sorted(excluded))}
+        outcome = env.spawn(self.argv(seat, pane, prompt=True), child_env, env.spawn_timeout)
+        if outcome.returncode not in (None, 0) and PROMPT_REFUSAL in outcome.tail:
+            # A reserved slot takes no prompt and refuses BEFORE launching: safe to retry bare.
+            self.errors.setdefault(seat.agent_id, []).append(Blocker(
+                'pointer-not-delivered', seat.agent_id, 'Slot recovery takes no prompt; message the seat by inbox'))
+            outcome = env.spawn(self.argv(seat, pane, prompt=False), child_env, env.spawn_timeout)
+        if outcome.returncode is None:
+            return 'unknown'
+        deadline = env.now().timestamp() + env.verify_timeout
+        while not self.verified(seat, started):
+            if env.now().timestamp() >= deadline:
+                return 'failed' if outcome.returncode != 0 and env.liveness(seat.agent_id) == 'dead' else 'unknown'
+            env.sleep(env.poll_interval)
+        row = env.registry(seat.agent_id) or {}
+        for pane_id in [p['id'] for p in env.context() or [] if any(
+                row.get('canvas_session_id') in leaf.get('sessionIds', []) for leaf in p.get('leaves', [])
+                if isinstance(leaf, dict))]:
+            self.restored_panes.append(pane_id)
+        if outcome.returncode != 0:
+            self.errors.setdefault(seat.agent_id, []).append(Blocker(
+                'spawn-exit-nonzero', seat.agent_id, 'Spawn exited non-zero but the seat registered live'))
+        return self.ready_state(seat)
+
+    def run(self) -> Result:
+        params, env = self.params, self.env
+        prior = self.journalled_states()
+        coordinator_ok = self.coordinator_evidence()
+        liveness = {s.agent_id: env.liveness(s.agent_id) for s in self.manifest.seats
+                    if s.agent_id != self.manifest.coordinator.agent_id}
+        full = plan(self.manifest, liveness, params.coordinator_id)
+        rows = [r for r in full if params.seat_ids is None or r.seat_id in params.seat_ids]
+        seats = {s.agent_id: s for s in self.manifest.seats}
+        excluded = coordinator_panes(env, params.coordinator_id)
+        for row in full:
+            self.states[row.seat_id] = prior.get(row.seat_id) or self.initial_state(row, seats.get(row.seat_id), coordinator_ok)
+            if row.action == 'blocked':
+                self.errors[row.seat_id] = [Blocker(row.reason, row.seat_id, 'Reconcile this seat, then restore it')]
+        if params.dry_run:
+            shells = [Blocker('would-close-shell', None, f'pane {pane} leaf {leaf}')
+                      for pane, leaf, _ in ([] if params.keep_shells else self.shell_candidates(excluded))]
+            planned = self.report('accepted' if not any(s == 'blocked' for s in self.states.values()) else 'incomplete')
+            return make_result(None, planned.checkpoint_id, planned.state, planned.seats, shells)
+        self.journal('plan', None, self.report('running'))
+        for row in rows:
+            seat = seats.get(row.seat_id)
+            if row.action != 'launch' or seat is None or row.seat_id in prior:
+                if row.action == 'reattach' and seat is not None:
+                    self.journal('reattached', row.seat_id, self.report('running'))
+                continue
+            if self.states.get(seat.parent_id or '', '') in ('failed', 'unknown', 'blocked'):
+                self.states[row.seat_id] = 'blocked'
+                self.errors[row.seat_id] = [Blocker('parent-failed', row.seat_id, 'Its parent did not come up')]
+                self.journal('seat-result', row.seat_id, self.report('running'))
+                continue
+            if self.cancelled():
+                break
+            self.states[row.seat_id] = 'starting'
+            outcome = self.launch(seat, excluded)
+            self.states[row.seat_id] = outcome
+            if outcome == 'failed':
+                self.errors.setdefault(row.seat_id, []).append(
+                    Blocker('launch-failed', row.seat_id, 'Spawn failed; reconcile, then retry this seat'))
+            self.journal('seat-result', row.seat_id, self.report('running'))
+        if not params.keep_shells and not self.cancelled():
+            self.cleanup_shells(excluded)
+        state = 'canceled' if self.cancelled() else 'complete'
+        result = self.report(state, final=True)
+        self.journal('final', None, result)
+        return result
+
+    def initial_state(self, row: PlanRow, seat: Seat | None, coordinator_ok: bool) -> str:
+        if row.action == 'coordinator':
+            return 'ready-idle' if coordinator_ok else 'blocked'
+        if row.action == 'blocked':
+            return 'blocked'
+        if row.action == 'unknown':
+            return 'unknown'
+        if row.action == 'reattach':
+            return self.ready_state(seat)
+        return 'starting' if self.params.dry_run else 'preparing'
+
+    def coordinator_evidence(self) -> bool:
+        """The caller must be the saved coordinator, or the same NAMED seat under a new id."""
+        saved = self.manifest.coordinator.agent_id
+        actor, row = self.params.coordinator_id, self.env.registry(self.params.coordinator_id)
+        name = next(e.name for e in self.manifest.expected if e.agent_id == saved)
+        if actor != saved and (not row or str(row.get('name')) != name):
+            self.errors[saved] = [Blocker('coordinator-mismatch', saved,
+                                          'The caller is not the saved coordinator; no launch will happen')]
+            return False
+        if not self.params.dry_run:
+            path, digest = evidence(self.store, self.manifest.checkpoint_id, saved, f'manual-return-{self.operation_id}',
+                                    {'actor': actor, 'saved_coordinator': saved, 'name': name,
+                                     'registered_at': (row or {}).get('registered_at')})
+            seat = next((s for s in self.manifest.seats if s.agent_id == saved), None)
+            if seat:
+                self.evidence[saved] = [Receipt(str(uuid4()), self.manifest.checkpoint_id, saved, 'manual-return',
+                                                seat.source_revision, str(path), digest, True, 'cooperative',
+                                                self.env.now().isoformat())]
+        return True
+
+    # -- bare shells ---------------------------------------------------------------------------
+    def shell_candidates(self, excluded: set[str]) -> list[tuple[str, str, str]]:
+        """(pane, leaf, session) of PTYs that are bare shells: no child process, no seat."""
+        env = self.env
+        sessions = env.pty_list()
+        panes = env.context()
+        if sessions is None or panes is None:
+            return []
+        seat_sessions = {s.get('canvas_session_id') for e in self.manifest.expected
+                         if (s := env.registry(e.agent_id))}
+        out = []
+        by_id = {s.get('id'): s for s in sessions}
+        for pane in panes:
+            if pane.get('id') in excluded:
+                continue
+            leaves = env.leaves(pane['id'])
+            if not leaves:
+                continue
+            closable = []
+            for leaf in leaves:
+                ids = leaf.get('sessionIds') or []
+                if len(ids) != 1 or ids[0] in seat_sessions:
+                    continue
+                pty = by_id.get(ids[0])
+                if (pty is None or pty.get('harnessAgentId') or not isinstance(pty.get('pid'), int)
+                        or env.has_children(pty['pid']) is not False):
+                    continue  # a shell with a child, an unreadable one, or a seat: never touched
+                closable.append((pane['id'], leaf['leafId'], ids[0]))
+            out.extend(closable[:max(0, len(leaves) - 1)])  # keep at least one leaf per pane
+        return out
+
+    def cleanup_shells(self, excluded: set[str]) -> None:
+        for pane, leaf, session in self.shell_candidates(excluded):
+            closed = self.env.close_leaf(leaf)
+            self.journal('shell-closed' if closed else 'shell-close-failed', None, None)
+
+
+def run_restore(store: CheckpointStore, operation_id: str | None, params: RestoreParams, env: RestoreEnv) -> Result:
+    """operation_id None is a dry run: it lists the plan and the bare shells, journals nothing, launches nothing."""
+    if params.dry_run != (operation_id is None):
+        raise ContractError('A dry run has no operation; a real restore needs one')
+    return Restorer(store, params, env, operation_id).run()
