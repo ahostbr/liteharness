@@ -629,3 +629,18 @@ def test_the_journal_names_what_was_closed(tmp_path, box):
     run_restore(store, op, params, box.env())
     closed = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('shell-closed')]
     assert closed == ['shell-closed pane=pane-a leaf=l1 session=sh1 shell=powershell.exe']
+
+
+def test_retry_result_shows_prior_states_for_seats_it_does_not_retry(tmp_path, box):
+    from liteharness.checkpoint_ops import make_result, seat_result
+    s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
+    m = manifest(tmp_path, [s2, s3])
+    store, params, first = start(tmp_path, m)
+    rows = [seat_result(COORD, 'ready-idle'), seat_result(s2.agent_id, 'failed'), seat_result(s3.agent_id, 'ready-held')]
+    OperationLog(store, first).event('final', None, make_result(first, CID, 'incomplete', rows))
+    retry_op = store.submit(Request(1, 'retry', uid(702), None, first, [s2.agent_id], False), actor_id=COORD)
+    retry = RestoreParams(str(tmp_path), COORD, CID, seat_ids=[s2.agent_id], retry_of=first)
+    result = run_restore(store, retry_op.operation_id, retry, box.env())
+    states = {s.seat_id: s.state for s in result.seats}
+    assert launched(box) == [s2.agent_id]
+    assert states[s2.agent_id] == 'ready-idle' and states[s3.agent_id] == 'ready-held'

@@ -219,6 +219,7 @@ class RestoreParams:
     keep_shells: bool = False
     dry_run: bool = False
     seat_ids: list[str] | None = None  # retry: only these (reconciled failed) rows
+    retry_of: str | None = None  # retry: the operation whose other rows are reported as they were
 
     def wire(self) -> dict:
         return dict(self.__dict__)
@@ -387,6 +388,16 @@ class Restorer:
                     seen[event.seat_id] = match
         return seen
 
+    def adopt_prior_states(self, operation_id: str, retrying: set[str]) -> None:
+        """Seats a retry does not touch keep the state, errors and evidence the retried operation left."""
+        previous = self.store.operation(operation_id)
+        last = next((e.result for e in reversed(previous.events) if e.result is not None), None) if previous else None
+        for row in (last.seats if last else []):
+            if row.seat_id not in retrying and row.seat_id in self.states:
+                self.states[row.seat_id] = row.state
+                self.errors[row.seat_id] = list(row.errors)
+                self.evidence[row.seat_id] = list(row.evidence)
+
     def foreign_unknown(self) -> set[str]:
         """Seats another operation on this checkpoint started (intent) without ever reporting."""
         if self.log is None:
@@ -539,6 +550,8 @@ class Restorer:
             self.states[row.seat_id] = prior.get(row.seat_id) or self.initial_state(row, seats.get(row.seat_id), coordinator_ok)
             if row.action == 'blocked':
                 self.errors[row.seat_id] = [Blocker(row.reason, row.seat_id, 'Reconcile this seat, then restore it')]
+        if params.retry_of and params.seat_ids is not None and self.log is not None:
+            self.adopt_prior_states(params.retry_of, set(params.seat_ids))
         for seat_id in foreign:
             if self.states.get(seat_id) in ('preparing', 'starting'):
                 self.states[seat_id] = 'unknown'
