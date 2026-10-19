@@ -63,6 +63,7 @@ class Box:
         self.state, self.registry, self.script = {}, {}, {}
         self.ptys, self.panes, self.calls, self.closed = [], [], [], []
         self.leaves_by_pane, self.children = {}, {}
+        self.events, self.wake_status, self.mail_error = [], 'nudge; turn confirmed on attempt 1 (hook stamp)', None
         self.registry[COORD] = {'agent_id': COORD, 'name': 'Seat-1', 'registered_at': T0.isoformat(),
                                 'canvas_session_id': 'pty-coord', 'pane_id': 'pane-coord'}
         self.panes.append({'id': 'pane-coord', 'leafCount': 2, 'leaves': [{'id': 'lc', 'sessionIds': ['pty-coord']}]})
@@ -73,7 +74,18 @@ class Box:
                           pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
                           close_leaf=lambda leaf: self.closed.append(leaf) or True,
                           has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
+                          send_mail=self.mail, wake=self.wake,
                           verify_timeout=5, poll_interval=1, **kw)
+
+    def mail(self, sender, recipient, body):
+        if self.mail_error:
+            raise self.mail_error
+        self.events.append(('mail', sender, recipient, body))
+        return 'mail-1'
+
+    def wake(self, session_id, line):
+        self.events.append(('wake', session_id, line))
+        return self.wake_status
 
     def spawn(self, argv, env, timeout):
         agent_id = argv[argv.index('--resume') + 1]
@@ -243,15 +255,88 @@ def test_restores_from_an_incomplete_checkpoint_and_lists_blocked_rows(tmp_path,
     assert result.state == 'incomplete'
 
 
-def test_prompt_refusal_from_slot_recovery_is_retried_bare_with_a_blocker(tmp_path, box):
-    s2 = seat(2, root=tmp_path)
+def slot_seat(box, tmp_path, n=2, disposition='idle'):
+    s2 = seat(n, root=tmp_path, disposition=disposition)
     box.script[s2.agent_id] = ['refuse-prompt']
+    return s2
+
+
+def test_slot_recovered_seat_gets_its_pointer_by_inbox_first_then_one_fixed_wake(tmp_path, box):
+    s2 = slot_seat(box, tmp_path, disposition='held')
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     result = run_restore(store, op, params, box.env())
     assert len(box.calls) == 2 and '--prompt' in box.calls[0][0] and '--prompt' not in box.calls[1][0]
+    session = box.registry[s2.agent_id]['canvas_session_id']
+    assert [e[0] for e in box.events] == ['mail', 'wake'], 'content by inbox BEFORE the wake'
+    kind, sender, recipient, body = box.events[0]
+    assert (sender, recipient) == (COORD, s2.agent_id)
+    assert body.startswith(f'Restored from checkpoint {CID}.') and 'hold until your owner reconciles' in body
+    assert 'Next: Read your handoff' in body
+    assert box.events[1] == ('wake', session, 'resumed: arm ONE inbox Monitor and read your inbox')
+    row = next(s for s in result.seats if s.seat_id == s2.agent_id)
+    assert row.state == 'ready-held' and not row.errors
+    assert [r.kind for r in row.evidence] == ['readiness'] and result.state == 'complete'
+    stages = [e.stage for e in OperationLog(store, op).operation().events]
+    assert stages.index('pointer-mailed') < stages.index('pointer-wake')
+
+
+def test_seats_launched_with_a_prompt_are_never_mailed_or_woken(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    assert box.events == []
+
+
+def test_wake_that_confirms_no_turn_is_a_pointer_not_delivered_blocker(tmp_path, box):
+    s2 = slot_seat(box, tmp_path)
+    box.wake_status = 'UNVERIFIED: nudge typed once, Enter pressed twice more, and the hooks never stamped a turn'
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env())
     row = next(s for s in result.seats if s.seat_id == s2.agent_id)
     assert row.state == 'ready-idle' and [e.code for e in row.errors] == ['pointer-not-delivered']
-    assert result.state == 'incomplete', 'up but not briefed is not complete'
+    assert [e[0] for e in box.events] == ['mail', 'wake'] and result.state == 'incomplete'
+
+
+def test_failed_inbox_send_means_no_wake_is_typed(tmp_path, box):
+    s2 = slot_seat(box, tmp_path)
+    box.mail_error = OSError('disk')
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env())
+    row = next(s for s in result.seats if s.seat_id == s2.agent_id)
+    assert [e.code for e in row.errors] == ['pointer-not-delivered'] and 'no wake was typed' in row.errors[0].remedy
+    assert box.events == []
+
+
+def test_seat_that_came_up_between_plan_and_launch_is_reattached_not_relaunched(tmp_path, box):
+    s2 = seat(2, root=tmp_path, disposition='held')
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    answers = iter(['dead', 'live', 'live', 'live'])  # dead at the plan, live at the re-check
+    env = box.env()
+    env.liveness = lambda agent_id: next(answers) if agent_id == s2.agent_id else 'dead'
+    result = run_restore(store, op, params, env)
+    assert box.calls == []
+    assert {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'ready-held'
+    assert 'reattached' in [e.stage for e in OperationLog(store, op).operation().events]
+
+
+def test_default_wake_types_the_fixed_line_once_into_the_exact_session_only(monkeypatch):
+    from liteharness import cli
+    from liteharness.checkpoint_restore import WAKE_LINE, _wake
+    writes = []
+    monkeypatch.setattr(cli, '_bridge_request', lambda method, path, body=None, **k: writes.append((method, path, body)) or {'ok': True})
+    monkeypatch.setattr(cli, '_turn_seen_since', lambda key, value, t0: key == 'canvas_session_id' and value == 'pty-9')
+    status = _wake('pty-9', WAKE_LINE)
+    assert 'turn confirmed on attempt 1' in status
+    assert writes == [('POST', '/pty/write', {'session_id': 'pty-9', 'data': WAKE_LINE + chr(13)})]
+    writes.clear()
+    monkeypatch.setattr(cli, '_turn_seen_since', lambda *a: False)
+    monkeypatch.setattr(cli.time, 'sleep', lambda s: None)
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(cli.time, 'time', lambda: next(ticks))
+    status = _wake('pty-9', WAKE_LINE)
+    assert status.startswith('UNVERIFIED')
+    assert {w[2]['session_id'] for w in writes} == {'pty-9'}
+    assert [w[2]['data'] for w in writes] == [WAKE_LINE + chr(13), chr(13), chr(13)], 'retries press Enter only'
 
 
 def test_coordinator_is_never_launched_and_a_foreign_caller_launches_nothing(tmp_path, box):

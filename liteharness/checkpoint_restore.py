@@ -32,6 +32,7 @@ POINTER = ('Restored from checkpoint {checkpoint_id}. Resume as-is. Arm ONE inbo
            'Do not start new work, commit, push or rebuild. Wait for an inbox message from {coordinator}.')
 HELD_POINTER = ' You were mid-work when saved: hold until your owner reconciles.'
 PROMPT_REFUSAL = 'does not support explicit --prompt'  # T0589 slot recovery refuses before launching
+WAKE_LINE = 'resumed: arm ONE inbox Monitor and read your inbox'
 ROLE_RANK = {role: n for n, role in enumerate(roles.ROLES)}
 
 
@@ -132,6 +133,8 @@ class RestoreEnv:
     liveness: Callable[[str], str] = default_liveness
     spawn: Callable[[list[str], dict, float], SpawnOutcome] = _spawn
     registry: Callable[[str], dict | None] = lambda agent_id: _read_registry(agent_id)
+    send_mail: Callable[[str, str, str], str] = lambda sender, to, body: _send_mail(sender, to, body)
+    wake: Callable[[str, str], str] = lambda session_id, line: _wake(session_id, line)
     context: Callable[[], list[dict] | None] = _context
     pty_list: Callable[[], list[dict] | None] = _pty_list
     leaves: Callable[[str], list[dict] | None] = _leaves
@@ -141,6 +144,28 @@ class RestoreEnv:
     verify_timeout: float = VERIFY_TIMEOUT
     poll_interval: float = 1.0
     python: str = field(default_factory=lambda: sys.executable)
+
+
+def _send_mail(sender: str, recipient: str, body: str) -> str:
+    from . import inbox
+    return inbox.send(sender, recipient, body, msg_type='TASK', priority='high')
+
+
+def _wake(session_id: str, line: str) -> str:
+    """Type ONE line into this exact session through the harness's own post-spawn mechanism.
+
+    `_deliver_prompt` types the nudge once, confirms the turn by the seat's hook stamp, and
+    retries with Enter only. There is no brief file for a resumed seat, so the path never exists.
+    """
+    from . import cli
+    started = time.time()
+
+    def write(text: str) -> None:
+        reply = cli._bridge_request('POST', '/pty/write', {'session_id': session_id, 'data': text + '\r'})
+        if not isinstance(reply, dict) or not reply.get('ok'):
+            raise RuntimeError('pty/write refused')
+    return cli._deliver_prompt(write, lambda: cli._turn_seen_since('canvas_session_id', session_id, started),
+                               Path(os.devnull).parent / 'no-brief-for-a-resumed-seat', line, line, 0)
 
 
 def _read_registry(agent_id: str) -> dict | None:
@@ -299,6 +324,7 @@ class Restorer:
         self.errors: dict[str, list[Blocker]] = {}
         self.evidence: dict[str, list[Receipt]] = {}
         self.restored_panes: list[str] = []
+        self.reattached: set[str] = set()
 
     def report(self, state: str, *, final: bool = False) -> Result:
         rows = [seat_result(e.agent_id, self.states.get(e.agent_id, 'preparing'),
@@ -361,19 +387,21 @@ class Restorer:
 
     def launch(self, seat: Seat, excluded: set[str]) -> str:
         env = self.env
-        if self.env.liveness(seat.agent_id) != 'dead':  # re-check: it may have come up meanwhile
-            return 'ready-idle' if self.env.liveness(seat.agent_id) == 'live' and not self._note_reattach(seat) \
-                else 'unknown'
+        state = env.liveness(seat.agent_id)  # re-check: it may have come up since the plan
+        if state == 'live':
+            self.reattached.add(seat.agent_id)
+            return self.ready_state(seat)
+        if state != 'dead':
+            return 'unknown'
         pane = choose_pane(env, seat, excluded, self.restored_panes)
         started = env.now()
         self.journal('launch-intent', seat.agent_id, self.report('running'))
         child_env = {**os.environ, 'LITEHARNESS_AGENT_ID': self.params.coordinator_id,
                      'LITEHARNESS_EXCLUDE_PANES': ','.join(sorted(excluded))}
         outcome = env.spawn(self.argv(seat, pane, prompt=True), child_env, env.spawn_timeout)
-        if outcome.returncode not in (None, 0) and PROMPT_REFUSAL in outcome.tail:
+        slot_path = outcome.returncode not in (None, 0) and PROMPT_REFUSAL in outcome.tail
+        if slot_path:
             # A reserved slot takes no prompt and refuses BEFORE launching: safe to retry bare.
-            self.errors.setdefault(seat.agent_id, []).append(Blocker(
-                'pointer-not-delivered', seat.agent_id, 'Slot recovery takes no prompt; message the seat by inbox'))
             outcome = env.spawn(self.argv(seat, pane, prompt=False), child_env, env.spawn_timeout)
         if outcome.returncode is None:
             return 'unknown'
@@ -390,7 +418,42 @@ class Restorer:
         if outcome.returncode != 0:
             self.errors.setdefault(seat.agent_id, []).append(Blocker(
                 'spawn-exit-nonzero', seat.agent_id, 'Spawn exited non-zero but the seat registered live'))
+        if slot_path:
+            self.deliver_pointer(seat, row.get('canvas_session_id'))
         return self.ready_state(seat)
+
+    def deliver_pointer(self, seat: Seat, session_id: str | None) -> None:
+        """A slot-recovered seat took no --prompt: its pointer goes by inbox, then ONE fixed wake line.
+
+        All content rides the inbox from the coordinator BEFORE the wake (a durable record); the wake
+        is one fixed line typed once into the exact new session. Nothing else is ever typed, and never
+        into any other session.
+        """
+        cid = self.manifest.checkpoint_id
+        body = (self.prompt_for(seat)
+                + f' When saved you were: {seat.disposition}. Next: {seat.first_recovery_action}.')
+        failure = None
+        try:
+            mail_id = self.env.send_mail(self.params.coordinator_id, seat.agent_id, body)
+            self.journal('pointer-mailed', seat.agent_id, None)
+        except Exception as exc:
+            mail_id, failure = None, f'inbox send failed ({type(exc).__name__}); no wake was typed'
+        status = ''
+        if failure is None and not session_id:
+            failure = 'the new session id is unknown; no wake was typed'
+        if failure is None:
+            status = self.env.wake(session_id, WAKE_LINE)
+            self.journal('pointer-wake', seat.agent_id, None)
+            if 'turn confirmed' not in status:
+                failure = 'the wake was typed but no turn was confirmed; message the seat'
+        if failure:
+            self.errors.setdefault(seat.agent_id, []).append(Blocker('pointer-not-delivered', seat.agent_id, failure))
+            return
+        path, digest = evidence(self.store, cid, seat.agent_id, f'pointer-{self.operation_id}',
+                                {'pointer': 'delivered', 'mail_id': mail_id, 'session_id': session_id, 'wake': status})
+        self.evidence.setdefault(seat.agent_id, []).append(Receipt(
+            str(uuid4()), cid, seat.agent_id, 'readiness', seat.source_revision, str(path), digest, True,
+            'cooperative', self.env.now().isoformat()))
 
     def run(self) -> Result:
         params, env = self.params, self.env
@@ -428,10 +491,11 @@ class Restorer:
             self.states[row.seat_id] = 'starting'
             outcome = self.launch(seat, excluded)
             self.states[row.seat_id] = outcome
+            stage = 'reattached' if row.seat_id in self.reattached else 'seat-result'
             if outcome == 'failed':
                 self.errors.setdefault(row.seat_id, []).append(
                     Blocker('launch-failed', row.seat_id, 'Spawn failed; reconcile, then retry this seat'))
-            self.journal('seat-result', row.seat_id, self.report('running'))
+            self.journal(stage, row.seat_id, self.report('running'))
         if not params.keep_shells and not self.cancelled():
             self.cleanup_shells(excluded)
         state = 'canceled' if self.cancelled() else 'complete'
