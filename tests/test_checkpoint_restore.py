@@ -63,6 +63,7 @@ class Box:
         self.state, self.registry, self.script = {}, {}, {}
         self.ptys, self.panes, self.calls, self.closed = [], [], [], []
         self.leaves_by_pane, self.children = {}, {}
+        self.proc_names = {}
         self.events, self.wake_status, self.mail_error = [], 'nudge; turn confirmed on attempt 1 (hook stamp)', None
         self.registry[COORD] = {'agent_id': COORD, 'name': 'Seat-1', 'registered_at': T0.isoformat(),
                                 'canvas_session_id': 'pty-coord', 'pane_id': 'pane-coord'}
@@ -74,7 +75,7 @@ class Box:
                           pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
                           close_leaf=lambda leaf: self.closed.append(leaf) or True,
                           has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
-                          send_mail=self.mail, wake=self.wake,
+                          send_mail=self.mail, wake=self.wake, process_name=lambda pid: self.proc_names.get(pid, 'powershell.exe'),
                           verify_timeout=5, poll_interval=1, **kw)
 
     def make_live(self, agent_id):
@@ -421,7 +422,7 @@ def test_dry_run_launches_nothing_journals_nothing_and_lists_shells(tmp_path, bo
     s2 = seat(2, root=tmp_path)
     box.panes.append({'id': 'pane-a', 'leafCount': 2, 'leaves': []})
     box.leaves_by_pane['pane-a'] = [{'leafId': 'l1', 'sessionIds': ['sh1']}, {'leafId': 'l2', 'sessionIds': ['sh2']}]
-    box.ptys += [{'id': 'sh1', 'pid': 11}, {'id': 'sh2', 'pid': 12}]
+    box.ptys += [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}]
     box.children = {11: False, 12: False}
     store, params, _ = start(tmp_path, manifest(tmp_path, [s2]), dry_run=True)
     result = run_restore(store, None, params, box.env())
@@ -440,7 +441,7 @@ def test_bare_shell_cleanup_closes_only_childless_shells_and_keeps_one_leaf_per_
     box.panes.append({'id': 'pane-c', 'leafCount': 2, 'leaves': []})
     box.leaves_by_pane['pane-c'] = [{'leafId': 'l7', 'sessionIds': ['sh6']}, {'leafId': 'l8', 'sessionIds': ['sh7']}]
     box.leaves_by_pane['pane-coord'] = [{'leafId': 'l5', 'sessionIds': ['sh5']}, {'leafId': 'l6', 'sessionIds': ['pty-coord']}]
-    box.ptys += [{'id': f'sh{n}', 'pid': 10 + n} for n in range(1, 8)]
+    box.ptys += [{'id': f'sh{n}', 'pid': 10 + n, 'cwd': str(tmp_path)} for n in range(1, 8)]
     box.children = {11: False, 12: True, 13: False, 14: False, 15: False, 16: False, 17: False}
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     run_restore(store, op, params, box.env())
@@ -448,14 +449,14 @@ def test_bare_shell_cleanup_closes_only_childless_shells_and_keeps_one_leaf_per_
     # childless shells; the coordinator's pane is untouched.
     assert box.closed == ['l1', 'l3', 'l7']
     stages = [e.stage for e in OperationLog(store, op).operation().events]
-    assert stages.count('shell-closed') == 3
+    assert len([st for st in stages if st.startswith('shell-closed ')]) == 3
 
 
 def test_keep_shells_and_unreadable_children_close_nothing(tmp_path, box):
     s2 = seat(2, root=tmp_path)
     box.panes.append({'id': 'pane-a', 'leafCount': 2, 'leaves': []})
     box.leaves_by_pane['pane-a'] = [{'leafId': 'l1', 'sessionIds': ['sh1']}, {'leafId': 'l2', 'sessionIds': ['sh2']}]
-    box.ptys += [{'id': 'sh1', 'pid': 11}, {'id': 'sh2', 'pid': 12}]
+    box.ptys += [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}]
     box.children = {11: None, 12: None}
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     run_restore(store, op, params, box.env())
@@ -564,3 +565,67 @@ def test_default_liveness_branches(tmp_path, monkeypatch, case, expected):
     elif case.startswith('no-row'):
         row, ptys = None, (hosted if case == 'no-row-hosted' else None if case == 'no-row-pty-unreadable' else [])
     assert default_world(tmp_path, monkeypatch, row, ptys) == expected
+
+
+# -- critic round: H3 bare-shell cleanup -------------------------------------------------------------------
+
+def shell_world(box, tmp_path, ptys, leaves):
+    box.panes.append({'id': 'pane-a', 'leafCount': len(leaves), 'leaves': []})
+    box.leaves_by_pane['pane-a'] = leaves
+    box.ptys += ptys
+    box.children = {p['pid']: False for p in ptys if 'pid' in p}
+
+
+def two_leaves(a, b):
+    return [{'leafId': 'l1', 'sessionIds': [a]}, {'leafId': 'l2', 'sessionIds': [b]}]
+
+
+def test_a_childless_process_that_is_not_a_shell_is_never_closed(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}],
+                two_leaves('sh1', 'sh2'))
+    box.proc_names = {11: 'python.exe', 12: 'powershell.exe'}  # sh1 is a server that happens to have no children
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    assert box.closed == ['l2'], 'only the shell is closable; the leaf of the python process stays'
+
+
+def test_a_shell_whose_cwd_is_not_a_saved_seat_cwd_or_is_unreadable_is_kept(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path / 'elsewhere')}, {'id': 'sh2', 'pid': 12}],
+                two_leaves('sh1', 'sh2'))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    assert box.closed == []
+
+
+def test_cwd_match_ignores_case_and_slash_style(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    odd = str(tmp_path).upper().replace(chr(92), '/')
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': odd}, {'id': 'sh2', 'pid': 12, 'cwd': odd}],
+                two_leaves('sh1', 'sh2'))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    assert box.closed == ['l1']
+
+
+def test_malformed_rows_are_skipped_never_raised(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    box.panes.append({'leafCount': 2})  # a pane with no id
+    box.panes.append({'id': 'pane-b', 'leafCount': 3, 'leaves': []})
+    box.leaves_by_pane['pane-b'] = [{'sessionIds': ['sh1']}, {'leafId': 'l2', 'sessionIds': 'sh2'}, 'garbage',
+                                    {'leafId': 'l4', 'sessionIds': ['sh4']}]
+    box.ptys += [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, 'junk', {'id': 'sh4', 'pid': 'x', 'cwd': str(tmp_path)}]
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env())
+    assert box.closed == [] and result.state == 'complete'
+
+
+def test_the_journal_names_what_was_closed(tmp_path, box):
+    s2 = seat(2, root=tmp_path)
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}],
+                two_leaves('sh1', 'sh2'))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    closed = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('shell-closed')]
+    assert closed == ['shell-closed pane=pane-a leaf=l1 session=sh1 shell=powershell.exe']

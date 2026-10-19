@@ -100,6 +100,23 @@ def _has_children(pid: int) -> bool | None:
         return None
 
 
+SHELLS = frozenset({'powershell.exe', 'pwsh.exe', 'cmd.exe', 'bash.exe', 'sh.exe'})
+
+
+def _process_name(pid: int) -> str | None:
+    try:
+        import psutil
+        return psutil.Process(pid).name().lower()
+    except Exception:
+        return None
+
+
+def _same_dir(a: object, b: object) -> bool:
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+        return False
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
+
+
 def default_liveness(agent_id: str) -> str:
     """'live' | 'dead' | 'unknown' from the CURRENT registry row and process creation identity.
 
@@ -152,6 +169,7 @@ class RestoreEnv:
     leaves: Callable[[str], list[dict] | None] = _leaves
     close_leaf: Callable[[str], bool] = _close_leaf
     has_children: Callable[[int], bool | None] = _has_children
+    process_name: Callable[[int], str | None] = _process_name
     spawn_timeout: float = SPAWN_TIMEOUT
     verify_timeout: float = VERIFY_TIMEOUT
     poll_interval: float = 1.0
@@ -424,7 +442,7 @@ class Restorer:
             except ValueError:
                 return False
         sessions = self.env.pty_list()
-        return bool(sessions) and any(s.get('harnessAgentId') == seat.agent_id
+        return bool(sessions) and any(isinstance(s, dict) and s.get('harnessAgentId') == seat.agent_id
                                       and s.get('id') == row.get('canvas_session_id') for s in sessions)
 
     def launch(self, seat: Seat, excluded: set[str]) -> str:
@@ -527,7 +545,7 @@ class Restorer:
             return result
         if params.dry_run:
             shells = [Blocker('would-close-shell', None, f'pane {pane} leaf {leaf}')
-                      for pane, leaf, _ in ([] if params.keep_shells else self.shell_candidates(excluded))]
+                      for pane, leaf, _, _ in ([] if params.keep_shells else self.shell_candidates(excluded))]
             planned = self.report('accepted' if not any(s == 'blocked' for s in self.states.values()) else 'incomplete')
             return make_result(None, planned.checkpoint_id, planned.state, planned.seats, shells)
         self.journal('plan', None, self.report('running'))
@@ -591,40 +609,52 @@ class Restorer:
         return True
 
     # -- bare shells ---------------------------------------------------------------------------
-    def shell_candidates(self, excluded: set[str]) -> list[tuple[str, str, str]]:
-        """(pane, leaf, session) of PTYs that are bare shells: no child process, no seat."""
+    def shell_candidates(self, excluded: set[str]) -> list[tuple[str, str, str, str]]:
+        """(pane, leaf, session, shell) of PTYs that look like what LiteSuite leaves after a restart.
+
+        All of: the PTY's root process is a known shell, it has NO child process, it is not a seat,
+        and its cwd equals a saved seat's cwd (the placeholder fingerprint). Anything unreadable or
+        malformed is kept. At least one leaf per pane stays.
+        """
         env = self.env
-        sessions = env.pty_list()
-        panes = env.context()
+        sessions, panes = env.pty_list(), env.context()
         if sessions is None or panes is None:
             return []
-        seat_sessions = {s.get('canvas_session_id') for e in self.manifest.expected
-                         if (s := env.registry(e.agent_id))}
+        seat_sessions = {s.get('canvas_session_id') for e in self.manifest.expected if (s := env.registry(e.agent_id))}
+        seat_cwds = [s.cwd for s in self.manifest.seats]
+        by_id = {s.get('id'): s for s in sessions if isinstance(s, dict)}
         out = []
-        by_id = {s.get('id'): s for s in sessions}
         for pane in panes:
-            if pane.get('id') in excluded:
+            pane_id = pane.get('id') if isinstance(pane, dict) else None
+            if not isinstance(pane_id, str) or pane_id in excluded:
                 continue
-            leaves = env.leaves(pane['id'])
-            if not leaves:
+            leaves = env.leaves(pane_id)
+            if not isinstance(leaves, list):
                 continue
             closable = []
             for leaf in leaves:
-                ids = leaf.get('sessionIds') or []
-                if len(ids) != 1 or ids[0] in seat_sessions:
+                if not isinstance(leaf, dict) or not isinstance(leaf.get('leafId'), str):
+                    continue
+                ids = leaf.get('sessionIds')
+                if not isinstance(ids, list) or len(ids) != 1 or ids[0] in seat_sessions:
                     continue
                 pty = by_id.get(ids[0])
-                if (pty is None or pty.get('harnessAgentId') or not isinstance(pty.get('pid'), int)
-                        or env.has_children(pty['pid']) is not False):
-                    continue  # a shell with a child, an unreadable one, or a seat: never touched
-                closable.append((pane['id'], leaf['leafId'], ids[0]))
+                pid = pty.get('pid') if pty else None
+                if pty is None or pty.get('harnessAgentId') or not isinstance(pid, int):
+                    continue
+                name = env.process_name(pid)
+                if (name not in SHELLS or env.has_children(pid) is not False
+                        or not any(_same_dir(pty.get('cwd'), cwd) for cwd in seat_cwds)):
+                    continue  # a server, a busy shell, an unreadable one, or someone's own terminal
+                closable.append((pane_id, leaf['leafId'], ids[0], name))
             out.extend(closable[:max(0, len(leaves) - 1)])  # keep at least one leaf per pane
         return out
 
     def cleanup_shells(self, excluded: set[str]) -> None:
-        for pane, leaf, session in self.shell_candidates(excluded):
+        for pane, leaf, session, shell in self.shell_candidates(excluded):
             closed = self.env.close_leaf(leaf)
-            self.journal('shell-closed' if closed else 'shell-close-failed', None, None)
+            self.journal(f"{'shell-closed' if closed else 'shell-close-failed'} pane={pane} leaf={leaf} "
+                         f"session={session} shell={shell}", None, None)
 
 
 def run_restore(store: CheckpointStore, operation_id: str | None, params: RestoreParams, env: RestoreEnv) -> Result:
