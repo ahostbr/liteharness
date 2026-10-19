@@ -175,6 +175,10 @@ class RestoreEnv:
     close_leaf: Callable[[str], bool] = _close_leaf
     has_children: Callable[[int], bool | None] = _has_children
     process_name: Callable[[int], str | None] = _process_name
+    # Whether another operation's worker is still running, and how long since it last wrote its
+    # journal. None = the real answer (the service's worker record, the journal file's mtime).
+    operation_active: Callable | None = None
+    journal_age: Callable | None = None
     spawn_timeout: float = SPAWN_TIMEOUT
     verify_timeout: float = VERIFY_TIMEOUT
     poll_interval: float = 1.0
@@ -423,8 +427,33 @@ class Restorer:
                 elif event.result is not None:
                     seen[event.seat_id] = next((x.state for x in event.result.seats if x.seat_id == event.seat_id),
                                                seen.get(event.seat_id, ''))
-            unknown |= {seat for seat, state in seen.items() if state == 'unknown'}
+            stuck = {seat for seat, state in seen.items() if state == 'unknown'}
+            if stuck and self.expired(other):
+                stuck = {seat for seat in stuck if self.env.liveness(seat) != 'dead'}
+            unknown |= stuck
         return unknown
+
+    def expired(self, other) -> bool:
+        """An operation that is not active and has not written for longer than a launch can take.
+
+        Its unknown seats are then judged by current identity alone: provably dead means the old
+        attempt is over and the seat may be launched; anything else stays unknown. There is no
+        action verb for this by design (the Action literal is card A's).
+        """
+        env = self.env
+        if env.operation_active is not None:
+            active = env.operation_active(other)
+        else:
+            from .checkpoint_service import ACTIVE, Service
+            active = Service(self.store, self.store.root.parents[1]).status_of(other).state in ACTIVE
+        if active:
+            return False
+        if env.journal_age is not None:
+            age = env.journal_age(other)
+        else:
+            path = self.store.root / 'operations' / f'{other.request.request_id}.json'
+            age = time.time() - path.stat().st_mtime
+        return age > env.spawn_timeout + env.verify_timeout
 
     def cancelled(self) -> bool:
         return self.log is not None and any(e.stage == 'cancel-requested' for e in self.log.operation().events)

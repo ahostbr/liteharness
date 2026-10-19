@@ -711,3 +711,36 @@ def test_default_liveness_joins_by_the_registered_canvas_session_when_the_proces
     row = {'agent_id': uid(2), 'session_pid': 4_000_000, 'session_process_started_at': born, 'canvas_session_id': 'pty-7'}
     assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7'}]) == 'unknown'
     assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-8'}]) == 'dead'
+
+
+# -- critic round 2: N3 an unknown from another operation is not forever ------------------------------------
+
+def left_unknown_by_a_dead_operation(tmp_path, box):
+    s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, s3]))
+    box.script[s2.agent_id] = 'crash'
+    with pytest.raises(Crash):
+        run_restore(store, op, params, box.env())
+    box.calls.clear()
+    box.script[s2.agent_id] = 'ok'
+    return store, params, s2, s3
+
+
+def second_restore(store, params, box, **kw):
+    operation = store.submit(Request(1, 'restore', uid(701), CID, None, [], False), actor_id=COORD)
+    return run_restore(store, operation.operation_id, params, box.env(**kw))
+
+
+@pytest.mark.parametrize('age,active,liveness,relaunched', [
+    (10_000, False, 'dead', True),     # old, nobody writing it, identity says dead: the unknown expires
+    (10, False, 'dead', False),        # young: the launch may still be in flight
+    (10_000, True, 'dead', False),     # its operation is still ACTIVE
+    (10_000, False, 'unknown', False), # liveness cannot say dead
+])
+def test_an_old_launch_intent_without_result_expires_only_when_it_is_provably_dead(tmp_path, box, age, active, liveness, relaunched):
+    store, params, s2, s3 = left_unknown_by_a_dead_operation(tmp_path, box)
+    env_kw = dict(journal_age=lambda op: age, operation_active=lambda op: active)
+    if liveness != 'dead':
+        box.state[s2.agent_id] = liveness
+    second_restore(store, params, box, **env_kw)
+    assert (s2.agent_id in launched(box)) is relaunched
