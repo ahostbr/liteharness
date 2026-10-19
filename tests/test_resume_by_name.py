@@ -417,7 +417,9 @@ def claude_world(world, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("backend", ["claude", "claude/claude-opus"])
-def test_claude_resume_uses_index_session_and_original_cwd(claude_world, backend):
+def test_claude_resume_uses_index_session_and_original_cwd(claude_world, monkeypatch, backend):
+    from liteharness import recovered_destination
+    monkeypatch.setattr(recovered_destination, "recover_if_reserved", lambda *a, **k: False)  # no reserved slot
     root, project, spawn, launches = claude_world
     agent_names.record_name(NAME, AID, CID, str(project), backend=backend, model="claude-opus")
     before = (root / "names.json").read_bytes()
@@ -480,6 +482,8 @@ def test_transcript_identity_keeps_launch_cwd_through_later_cwd_drift(tmp_path, 
 
 
 def test_live_claude_resume_points_to_inbox_without_relaunch(claude_world, monkeypatch, capsys):
+    from liteharness import recovered_destination
+    monkeypatch.setattr(recovered_destination, "recover_if_reserved", lambda *a, **k: False)  # no reserved slot
     root, project, spawn, launches = claude_world
     monkeypatch.setattr(cli, "_live_owner_pid", lambda row: 4242)
     with pytest.raises(SystemExit) as exc:

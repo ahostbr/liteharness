@@ -201,7 +201,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
         except StoreError:
             skipped.append((agent_id, 'unnamed-row'))
             continue
-        # The coordinator is never excluded. A seat nobody spawned (Ryan started it himself) is not ours
+        # The coordinator is never excluded. A seat nobody spawned (the user started it themselves) is not ours
         # to hand off or compact unless it was named explicitly; that default needs a known coordinator.
         reason = None
         if agent_id != coordinator_id:

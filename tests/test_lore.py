@@ -1,6 +1,6 @@
 """T0583-C: the lore file is printed at SessionStart (boot and after a compaction).
 
-Contract (Ryan: LiteHarness ships only the reader and an empty default):
+Contract (the user: LiteHarness ships only the reader and an empty default):
   1. path: env LITEHARNESS_LORE_FILE > config `lore_file` > <harness root>/lore.md
   2. a missing or blank file prints nothing at all: no header, no warning
   3. cap 2,400 chars, cut on a line boundary, with one note naming the file and size

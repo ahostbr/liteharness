@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import agent_names, config
 
-ANSWER_MODEL = "claude-sonnet-5-5"   # Ryan 2026-10-17: Sonnet answers, not Haiku
+ANSWER_MODEL = "claude-sonnet-5-5"   # The user, 2026-10-17: Sonnet answers, not Haiku
 EXCERPT_TOKEN_CAP = 30_000           # the whole excerpt, handoff included
 CHARS_PER_TOKEN = 4
 EXCERPT_CHAR_CAP = EXCERPT_TOKEN_CAP * CHARS_PER_TOKEN

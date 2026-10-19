@@ -131,13 +131,13 @@ def test_derived_model_never_carries_a_guessed_context_suffix(tmp_path, monkeypa
     assert '[' not in w.discover().candidates[0].seat.execution.model
 
 
-# -- seats Ryan started himself are not ours to hand off or compact (Sentinel, 2026-10-19) ----------
+# -- seats the user started themselves are not ours to hand off or compact (2026-10-19) ----------
 
 def test_a_seat_started_directly_is_excluded_with_its_reason_and_the_coordinator_never_is(tmp_path, monkeypatch):
     w = World(tmp_path, monkeypatch)
     coordinator = w.claude(1, role='orchestrator')            # top-level too (spawned_by absent)
     child = w.claude(2, parent=coordinator)
-    direct = w.claude(3)                                       # Ryan started it by hand: no spawned_by
+    direct = w.claude(3)                                       # the user started it by hand: no spawned_by
     found = w.discover(coordinator_id=coordinator)
     assert [c.expected.agent_id for c in found.candidates] == [coordinator, child]
     assert [(e.agent_id, e.reason) for e in found.excluded] == [(direct, 'started-directly')]
