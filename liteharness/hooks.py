@@ -1844,7 +1844,18 @@ def register_presence() -> None:
                     _cog_previous = None
                 # Legacy 'printed' and unknown process identity cannot suppress
                 # delivery. Do not erase the prior marker to manufacture green.
-                if _cog_event is None or _cog_previous != _cog_event:
+                # Two SessionStart hook processes can read the same prior
+                # marker. Reuse the existing exclusive-create arbitration,
+                # keyed by this verified event, BEFORE either emits the body.
+                # The event key already includes native birth/body: it must
+                # not expire and re-emit later in the same native event.
+                _cog_emit = _cog_event is None or (
+                    _cog_previous != _cog_event and _first_to_print(
+                        'cognitive-' + hashlib.sha256((agent_id + '\n' + _cog_event).encode('utf-8')).hexdigest(),
+                        window=float('inf'),
+                    )
+                )
+                if _cog_emit:
                     print(
                         f"## Cognitive Architecture — {_cog_file.stem} (METHOD, not tier)\n"
                         f"Adopt the reasoning architecture below as your ACTUAL reasoning\n"
