@@ -199,6 +199,8 @@ class CompactionWatch:
 
     def poll(self) -> dict | None:
         try:
+            if self.path.stat().st_size < self.offset:
+                self.offset = 0  # rewritten or truncated: the old position means nothing
             with self.path.open('rb') as stream:
                 stream.seek(self.offset)
                 data = stream.read()
@@ -379,12 +381,15 @@ class Saver:
                   '{handoff}': str(handoff) if handoff else ''}
         resolved = [self.fill(a, values) for a in argv]
         deadline = self.env.now().timestamp() + self.env.compact_timeout
-        try:
-            returncode = self.env.run(resolved, self.env.compact_timeout)
-        except (OSError, subprocess.SubprocessError):
-            returncode = None
         marker = None
         timed_out = False
+        # Cancel is not checked while env.run blocks (up to compact_timeout); it is checked in the poll below.
+        try:
+            returncode = self.env.run(resolved, self.env.compact_timeout)
+        except subprocess.TimeoutExpired:
+            returncode, timed_out = None, True  # hung: counts toward the abandon streak
+        except (OSError, subprocess.SubprocessError):
+            returncode = None
         while returncode == 0 and watch:
             marker = watch.poll()
             if marker or self.cancelled():
@@ -401,7 +406,7 @@ class Saver:
         out.receipts.append(_receipt(cid, seat, 'compact', revision, path, digest, durable=ok,
                                      assurance='cooperative' if ok else 'unsupported', at=self.tick()))
         if not ok:
-            out.blockers.append(Blocker('compact-failed' if returncode != 0 else 'compact-unobserved', seat.agent_id,
+            out.blockers.append(Blocker('compact-unobserved' if (returncode == 0 or timed_out) else 'compact-failed', seat.agent_id,
                                         'Compact command did not produce an observed compaction boundary'))
         stat = transcript.stat() if transcript and transcript.exists() else None
         boundary = {'kind': 'boundary', 'transcript': str(transcript) if transcript else None,

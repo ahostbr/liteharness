@@ -530,3 +530,34 @@ def test_the_watch_reads_only_new_bytes_and_survives_a_split_line(tmp_path):
         stream.write(fresh[30:] + chr(10))
     assert watch.poll()['uuid'] == 'new'
     assert watch.offset > len(old), 'it advanced past what it already read'
+
+
+# -- round 7 self-review ---------------------------------------------------------------------------------------------
+
+def test_a_hung_compactor_counts_toward_the_abandon_streak(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peers = [w.claude(n, parent=coord) for n in (2, 3, 4, 5, 6)]
+    compacted(w, coord, handoff)
+
+    def hangs(argv, timeout):
+        w.fleet.ran.append(argv)
+        w.clock.sleep(timeout)  # the OS killed it at the timeout
+        raise subprocess.TimeoutExpired(argv, timeout)
+    w.fleet.run = hangs
+    store, params, result, _ = save(w, coord, handoff, compact_timeout=60)
+    codes = {b.seat_id: b.code for b in store.read_manifest(params.checkpoint_id).blockers}
+    assert len(w.fleet.ran) == 3, 'a compactor that never returns is abandoned after three, like a silent one'
+    assert [codes[p] for p in peers[:3]] == ['compact-unobserved'] * 3
+    assert [codes[p] for p in peers[3:]] == ['compaction-abandoned'] * 2
+
+
+def test_the_watch_restarts_from_the_top_when_the_transcript_shrinks(tmp_path):
+    from liteharness.checkpoint_save import CompactionWatch
+    log = tmp_path / 't.jsonl'
+    log.write_text('{"type":"user"}' + chr(10) * 1 + 'x' * 500 + chr(10), encoding='utf-8')
+    watch = CompactionWatch(log, datetime(2019, 1, 1, tzinfo=timezone.utc))
+    assert watch.offset > 400
+    fresh = json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'n', 'timestamp': '2026-10-19T12:00:00+00:00'})
+    log.write_text(fresh + chr(10), encoding='utf-8')  # replaced by a shorter, rewritten file
+    assert watch.poll()['uuid'] == 'n'
