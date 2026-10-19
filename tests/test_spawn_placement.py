@@ -377,3 +377,49 @@ def test_no_exclusion_leaves_ordinary_placement_unchanged(world, monkeypatch):
     monkeypatch.delenv("LITEHARNESS_EXCLUDE_PANES", raising=False)
     spawn(world)
     assert placements(world)[0][1]["paneId"] == "own"
+
+
+def zen(n, count=1, **extra):
+    return {**pane(f"zen-term-{n}", count), "mirrorId": f"canvas-pane-{n}", **extra}
+
+
+def test_explicit_canvas_pane_resolves_to_its_active_zen_mirror(world):
+    world["panes"] = [zen(1), zen(2), pane("own", 8)]
+    spawn(world, split_pane="canvas-pane-2")
+    assert placements(world)[0][1]["paneId"] == "zen-term-2"
+
+
+def test_explicit_sync_form_resolves_and_the_active_id_is_what_the_bridge_gets(world):
+    world["panes"] = [zen(1, syncId="sync-canvas-pane-1"), pane("own", 8)]
+    spawn(world, split_pane="sync-canvas-pane-1")
+    assert placements(world)[0][1]["paneId"] == "zen-term-1"
+
+
+def test_hidden_pane_resolves_an_alias_but_never_receives_a_split(world):
+    world["panes"] = [pane("own", 8), {**pane("zen-term-3"), "syncId": "s3"}]
+    world["context"] = {"activePanes": world["panes"], "hiddenPanes": [
+        {**pane("canvas-pane-3"), "syncId": "s3"}, pane("lonely-hidden")]}
+    spawn(world, split_pane="canvas-pane-3")
+    assert placements(world)[0][1]["paneId"] == "zen-term-3"
+    world["calls"].clear()
+    spawn(world, split_pane="lonely-hidden")
+    assert placements(world)[0][1]["paneId"] != "lonely-hidden"
+
+
+def test_truly_missing_pane_still_falls_through_with_the_message(world, capsys):
+    spawn(world, split_pane="canvas-pane-99")
+    assert placements(world)[0][1]["paneId"] == "own"
+    assert "requested pane canvas-pane-99 is full, missing or has no terminals" in capsys.readouterr().out
+
+
+def test_canvas_mode_explicit_pane_is_unchanged(world):
+    world["panes"] = [pane("canvas-pane-1"), pane("canvas-pane-2"), pane("own", 8)]
+    spawn(world, split_pane="canvas-pane-2")
+    assert placements(world)[0][1]["paneId"] == "canvas-pane-2"
+
+
+def test_excluded_canvas_alias_bars_its_zen_mirror(world, monkeypatch):
+    world["panes"] = [zen(1), pane("own", 8)]
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "canvas-pane-1")
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]

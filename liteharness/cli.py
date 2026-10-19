@@ -103,6 +103,8 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
         except (OSError, ValueError):
             continue  # Presence is a preference, never proof of a live pane.
 
+    hidden: list[dict] = []
+
     def context_panes():
         try:
             context = _bridge_request("GET", context_path)
@@ -119,6 +121,7 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
                     not isinstance(leaf, dict) or not isinstance(leaf.get("sessionIds", []), list)
                     for leaf in leaves):
                 return None
+        hidden[:] = [h for h in context.get("hiddenPanes") or [] if isinstance(h, dict)]
         return context["activePanes"]
 
     def session_pane(panes, session):
@@ -143,23 +146,48 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
 
     excluded = {p for p in (*exclude_panes, *os.environ.get("LITEHARNESS_EXCLUDE_PANES", "").split(",")) if p}
 
+    def alias_map(panes):
+        """Every id/syncId/mirrorId a pane is known by -> its ACTIVE pane id.
+
+        Zen mode shows `zen-term-N` (mirrorId `canvas-pane-N`) while presence, callers and the
+        grid_full 409 say `canvas-pane-N` or `sync-canvas-pane-N`. Hidden panes only help resolve
+        an alias to its active mirror; a group with no single active pane maps nothing.
+        """
+        groups: list[tuple[set, set]] = []
+        for row, active in [*((p, True) for p in panes), *((h, False) for h in hidden)]:
+            names = {v for k in ("id", "syncId", "mirrorId") if isinstance(v := row.get(k), str) and v}
+            actives = {row["id"]} if active else set()
+            for group in [g for g in groups if g[0] & names]:
+                groups.remove(group)
+                names |= group[0]
+                actives |= group[1]
+            groups.append((names, actives))
+        return {name: next(iter(actives)) for names, actives in groups if len(actives) == 1 for name in names}
+
     def candidates(panes):
-        own = agent_pane(panes, agent_id)
+        alias = alias_map(panes)
+
+        def resolve(ident):
+            return alias.get(ident, ident) if isinstance(ident, str) else ident
+        own = resolve(agent_pane(panes, agent_id))
         explicit = pane
         if pane == "self":
             explicit = own
         elif pane and pane.startswith("self:"):
             explicit = agent_pane(panes, pane[5:])
+        explicit = resolve(explicit)
         parent = agents.get(agent_id, {}).get("spawned_by") or os.environ.get("LITEHARNESS_SPAWNED_BY")
         fleet = [agent_pane(panes, parent)] if parent else []
         if parent:
             fleet.extend(agent_pane(panes, ident) for ident, record in agents.items()
                          if ident != agent_id and record.get("spawned_by") == parent)
+        fleet = [resolve(ident) for ident in fleet]
+        barred = {resolve(ident) for ident in excluded}
         by_id = {p["id"]: p for p in panes}
         ordered = []
         for ident in [explicit, own, *fleet, *by_id]:
             p = by_id.get(ident) if isinstance(ident, str) else None
-            if not p or ident in ordered or ident in excluded:
+            if not p or ident in ordered or ident in barred:
                 continue
             count = p.get("leafCount", 0)
             if isinstance(count, int) and 0 < count < 8:
