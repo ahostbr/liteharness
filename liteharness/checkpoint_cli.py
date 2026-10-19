@@ -177,7 +177,38 @@ def not_ready_canceled(result: Result) -> bool:
     return result.state == 'canceled' and result.counts.ready < result.counts.expected
 
 
-def render(result: Result) -> str:
+def seat_labels(result: Result, store: CheckpointStore, root: Path) -> dict[str, str]:
+    """`name  role  cli  model  pane` per seat id: from the manifest when the result names one,
+    else from the registry (current, then retired). Display only; the Result is untouched."""
+    labels: dict[str, str] = {}
+    if result.checkpoint_id:
+        try:
+            manifest = store.read_manifest(result.checkpoint_id)
+        except ContractError:
+            manifest = None
+        if manifest:
+            seats = {s.agent_id: s for s in manifest.seats}
+            for e in manifest.expected:
+                s = seats.get(e.agent_id)
+                labels[e.agent_id] = (f'{s.name}  {s.role}  {s.cli}  {s.execution.model}  '
+                                      f'{s.slot.pane if s.slot else "-"}' if s else f'{e.name}  (unresolved)')
+    for seat in result.seats:
+        if seat.seat_id in labels:
+            continue
+        for folder in ('agents', 'retired-agents'):
+            try:
+                row = json.loads((root / folder / f'{seat.seat_id}.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if isinstance(row, dict) and row.get('name'):
+                labels[seat.seat_id] = (f"{row['name']}  {row.get('role') or row.get('tier') or '-'}  "
+                                        f"{row.get('cli') or '-'}  {row.get('model') or '-'}  {row.get('pane_id') or '-'}")
+                break
+    return labels
+
+
+def render(result: Result, labels: dict[str, str] | None = None) -> str:
+    labels = labels or {}
     c = result.counts
     lines = [f'{result.state.upper()}'
              + (f' operation {result.operation_id}' if result.operation_id else '')
@@ -185,7 +216,7 @@ def render(result: Result) -> str:
              f'  expected {c.expected}  ready {c.ready}  held {c.held}  failed/blocked {c.failed}  unknown {c.unknown}']
     for seat in result.seats:
         detail = '; '.join(f'{e.code}: {e.remedy}' for e in seat.errors)
-        lines.append(f'  {seat.seat_id}  {seat.state}' + (f'  ({detail})' if detail else ''))
+        lines.append(f'  {labels.get(seat.seat_id, seat.seat_id)}  {seat.state}' + (f'  ({detail})' if detail else ''))
     lines += [f'  ! {b.code}: {b.remedy}' for b in result.blockers]
     if result.state in ('incomplete', 'rejected', 'unknown') or not_ready_canceled(result):
         lines.append('REFUSED' if result.state == 'rejected' else 'NOT READY')
@@ -197,5 +228,9 @@ def render(result: Result) -> str:
 def main(argv: list[str] | None = None, **kwargs) -> int:
     args = build_parser().parse_args(argv)
     result = run(args, **kwargs)
-    print(json.dumps(wire(result)) if args.json else render(result))
+    if args.json:
+        print(json.dumps(wire(result)))
+    else:
+        root = Path(args.harness_root) if args.harness_root else config.get_root()
+        print(render(result, seat_labels(result, CheckpointStore(root), root)))
     return 0 if result.state in OK_STATES and not not_ready_canceled(result) else 2

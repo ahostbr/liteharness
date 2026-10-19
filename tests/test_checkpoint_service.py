@@ -525,3 +525,45 @@ def test_a_sequence_collision_is_retried_because_the_sequence_is_reread_each_att
     OperationLog(svc.store, first.operation_id, sleep=lambda s: None).event('plan', None, None)
     stages = [e.stage for e in svc.store.operation(first.operation_id).events]
     assert stages == ['other-writer', 'plan'] and seen == [0, 1]
+
+
+# -- round 5: F4 an operator reads names, not ids ---------------------------------------------------------------
+
+def test_human_output_names_each_seat_with_role_cli_model_and_pane_while_json_is_unchanged(svc, capsys):
+    code = checkpoint_cli.main(['restore', '--checkpoint-id', CID, '--dry-run', '--actor-id', COORD,
+                                '--harness-root', str(svc.harness_root)])
+    text = capsys.readouterr().out
+    row = next(line for line in text.splitlines() if 'Seat-2' in line)
+    assert 'builder' in row and 'claude' in row and 'claude-x' in row and ('preparing' in row or 'starting' in row)
+    assert uid(2) not in row, 'the id is not the label'
+    capsys.readouterr()
+    checkpoint_cli.main(['restore', '--checkpoint-id', CID, '--dry-run', '--actor-id', COORD, '--json',
+                         '--harness-root', str(svc.harness_root)])
+    printed = json.loads(capsys.readouterr().out)
+    assert 'Seat-2' not in json.dumps(printed) and printed['seats'][0]['seat_id']
+
+
+def test_the_label_includes_the_saved_pane_and_the_blocker_text(tmp_path, capsys):
+    root = tmp_path / 'harness'
+    root.mkdir()
+    store = CheckpointStore(root)
+    store.publish(manifest(tmp_path, [seat(2, root=tmp_path, pane='pane-9')], unresolved=[7]), authorized_reference_roots=[tmp_path])
+    checkpoint_cli.main(['restore', '--checkpoint-id', CID, '--dry-run', '--actor-id', COORD, '--harness-root', str(root)])
+    text = capsys.readouterr().out
+    assert 'pane-9' in next(line for line in text.splitlines() if 'Seat-2' in line)
+    unresolved = next(line for line in text.splitlines() if 'Seat-7' in line)
+    assert 'unresolved-in-checkpoint' in unresolved
+
+
+def test_a_save_dry_run_labels_seats_from_the_registry(tmp_path, monkeypatch, capsys):
+    from liteharness import config
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    from checkpoint_world import World
+    w = World(tmp_path, monkeypatch)
+    w.harness = tmp_path
+    agent = w.claude(5, role='builder')
+    monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
+    checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
+    text = capsys.readouterr().out
+    row = next(line for line in text.splitlines() if 'Claude-5' in line)
+    assert 'pane-5' in row and 'claude' in row
