@@ -1,9 +1,10 @@
-"""Explicit HTTP/bridge fence for isolated T0589 Python contracts.
-Block HTTP before connect, plus default bridge/non-loopback socket attempts.
-Windows asyncio's INTERNAL loopback socketpair is permitted (not HTTP). The
-REAL composed desktop lab HTTP pipeline is NOT replaced by this plugin.
+"""Explicit TEST-ONLY bridge-entry/HTTP fence for isolated T0589 contracts.
+Missing URL refuses before the real adapter's production fallback dispatch.
+Production defaults and the REAL composed desktop lab HTTP remain unchanged.
+Windows asyncio's internal non-HTTP loopback socketpair is permitted.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+from functools import wraps
 import http.client
 import json
 import os
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 
 @contextmanager
-def network_fence():
+def network_fence(*, guard_bridge=True):
     attempts = []
     real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
 
@@ -34,10 +35,23 @@ def network_fence():
     def http_connect(connection):
         return blocked((connection.host, connection.port))
 
+    bridge_patch = nullcontext()
+    if guard_bridge:
+        from liteharness import cli
+        real_bridge = cli._bridge_request
+
+        @wraps(real_bridge)
+        def isolated_bridge(*args, **kwargs):
+            if not os.environ.get('LITESUITE_BRIDGE_URL', '').strip():
+                raise ValueError('T0589 TEST isolation requires explicit LITESUITE_BRIDGE_URL; no default bridge dispatch')
+            return real_bridge(*args, **kwargs)
+
+        bridge_patch = patch.object(cli, '_bridge_request', isolated_bridge)
+
     with patch.object(socket.socket, 'connect', socket_connect), \
          patch.object(socket.socket, 'connect_ex', socket_connect_ex), \
          patch.object(http.client.HTTPConnection, 'connect', http_connect), \
-         patch.object(http.client.HTTPSConnection, 'connect', http_connect):
+         patch.object(http.client.HTTPSConnection, 'connect', http_connect), bridge_patch:
         yield attempts
 
 
@@ -56,9 +70,10 @@ def pytest_sessionfinish(session, exitstatus):
     if _attempts:
         session.exitstatus = 1
     result = {'scope': 'selected isolated OSS HTTP contracts ONLY; desktop lab HTTP unchanged',
+              'missing_url': 'TEST-only real adapter entry guard refuses locally before Request/default dispatch',
               'allowed': 'non-HTTP loopback socketpair for Windows asyncio internals',
               'attempts': _attempts, 'attempt_count': len(_attempts), 'pytest_exit': int(session.exitstatus),
-              'consumer_children': 'same fence explicitly entered in _owner_resume_consumer.py',
+              'consumer_children': 'same HTTP/socket fence; no CLI bridge entry (LITETUI_NO_HARNESS)',
               'issuer_children': 'actual issuer action only; no bridge/client path invoked'}
     path = os.environ.get('T0589_TRANSPORT_RECEIPT')
     if path:

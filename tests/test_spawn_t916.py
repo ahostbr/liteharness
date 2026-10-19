@@ -531,6 +531,7 @@ def test_a_name_claimed_during_launch_cannot_be_restored_from_presence(split, ca
 @pytest.fixture
 def bridge_http(monkeypatch, tmp_path):
     """urlopen fake: accepts only `state['good']`; records every token sent."""
+    monkeypatch.setenv('LITESUITE_BRIDGE_URL', 'http://t0589-token-peer.invalid')
     import io
     import urllib.error
     (tmp_path / ".litesuite").mkdir()

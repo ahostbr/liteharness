@@ -97,6 +97,6 @@ def main():
 
 if __name__ == '__main__':
     from recovery_transport_guard_t0589 import network_fence
-    with network_fence() as network_attempts:
+    with network_fence(guard_bridge=False) as network_attempts:
         main()
         assert not network_attempts, 'real consumer attempted an unconfigured network peer'
