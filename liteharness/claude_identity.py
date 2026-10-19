@@ -37,9 +37,6 @@ def transcript_identity(row: dict, *, native_id: str | None = None,
     path = _unlinked(candidates[0])
     if reference and path != Path(reference):
         raise ValueError('Claude transcript reference does not match native conversation')
-    expected_cwd = cwd or row.get('cwd')
-    if cwd and row.get('cwd') and Path(cwd).resolve() != Path(row['cwd']).resolve():
-        raise ValueError('Claude registry cwd contradicts its saved name')
     found_cwd = None
     observed = False
     try:
@@ -59,18 +56,17 @@ def transcript_identity(row: dict, *, native_id: str | None = None,
                 if directory is not None:
                     if not isinstance(directory, str) or not Path(directory).is_absolute():
                         raise ValueError('Invalid Claude transcript cwd')
-                    if found_cwd is not None and Path(directory).resolve() != Path(found_cwd).resolve():
-                        raise ValueError('Contradictory Claude transcript cwd')
-                    found_cwd = directory
+                    if found_cwd is None:
+                        found_cwd = directory
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError('Claude transcript is unreadable or malformed') from exc
     if not observed or not found_cwd:
         raise ValueError('Claude transcript lacks native session/cwd evidence')
-    if expected_cwd and Path(expected_cwd).resolve() != Path(found_cwd).resolve():
+    if cwd and Path(cwd).resolve() != Path(found_cwd).resolve():
         raise ValueError('Claude original cwd disagrees with native transcript')
     if not Path(found_cwd).is_dir():
         raise ValueError('Claude original cwd no longer exists')
-    return native_id, expected_cwd or found_cwd, path
+    return native_id, found_cwd, path
 
 
 def record_registered_name(presence: dict) -> None:

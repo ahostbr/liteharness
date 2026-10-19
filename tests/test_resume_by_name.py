@@ -462,6 +462,23 @@ def test_claude_resume_refuses_conflicting_overrides(claude_world, capsys, overr
     assert expected in capsys.readouterr().out and launches == []
 
 
+def test_transcript_identity_keeps_launch_cwd_through_later_cwd_drift(tmp_path, monkeypatch):
+    from liteharness.claude_identity import transcript_identity
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    launch = tmp_path / "LiteSuite"
+    drifted = launch / ".worktrees" / "T0570"
+    drifted.mkdir(parents=True)
+    transcript = tmp_path / ".claude" / "projects" / "fixture-project" / f"{CID}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(
+        json.dumps({"type": "user", "sessionId": CID, "cwd": str(launch)}) + "\n"
+        + json.dumps({"type": "user", "sessionId": CID, "cwd": str(drifted)}) + "\n", encoding="utf-8")
+    row = {"native_session_id": CID, "transcript_path": str(transcript), "cwd": str(drifted)}
+    assert transcript_identity(row)[:2] == (CID, str(launch))
+    with pytest.raises(ValueError, match="original cwd disagrees"):
+        transcript_identity(row, cwd=str(drifted))
+
+
 def test_live_claude_resume_points_to_inbox_without_relaunch(claude_world, monkeypatch, capsys):
     root, project, spawn, launches = claude_world
     monkeypatch.setattr(cli, "_live_owner_pid", lambda row: 4242)
