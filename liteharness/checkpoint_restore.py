@@ -84,6 +84,12 @@ def _context() -> list[dict] | None:
     return panes if isinstance(panes, list) and all(isinstance(p, dict) for p in panes) else None
 
 
+def _hidden_panes() -> list[dict]:
+    result = _bridge('GET', '/context')
+    panes = result.get('hiddenPanes') if isinstance(result, dict) else None
+    return [p for p in panes if isinstance(p, dict)] if isinstance(panes, list) else []
+
+
 def _leaves(pane_id: str) -> list[dict] | None:
     from urllib.parse import quote
     result = _bridge('GET', f'/canvas/leaves?paneId={quote(pane_id)}')
@@ -176,6 +182,7 @@ class RestoreEnv:
     send_mail: Callable[[str, str, str], str] = lambda sender, to, body: _send_mail(sender, to, body)
     wake: Callable[[str, str], str] = lambda session_id, line: _wake(session_id, line)
     context: Callable[[], list[dict] | None] = _context
+    hidden_panes: Callable[[], list[dict]] = _hidden_panes
     pty_list: Callable[[], list[dict] | None] = _pty_list
     leaves: Callable[[str], list[dict] | None] = _leaves
     close_leaf: Callable[[str], bool] = _close_leaf
@@ -345,7 +352,9 @@ def coordinator_panes(env: RestoreEnv, coordinator_id: str) -> set[str]:
     """Every pane id the coordinator occupies: restore never places a seat there."""
     row = env.registry(coordinator_id) or {}
     panes = env.context() or []
-    found = {row['pane_id']} if isinstance(row.get('pane_id'), str) else set()
+    from . import cli
+    aliases = cli._pane_aliases(panes, env.hidden_panes())
+    found = {aliases.get(row['pane_id'], row['pane_id'])} if isinstance(row.get('pane_id'), str) else set()
     session = row.get('canvas_session_id')
     for pane in panes:
         if session and any(session in leaf.get('sessionIds', []) for leaf in pane.get('leaves', [])
@@ -357,14 +366,21 @@ def coordinator_panes(env: RestoreEnv, coordinator_id: str) -> set[str]:
 def choose_pane(env: RestoreEnv, seat: Seat, excluded: set[str], restored_panes: list[str]) -> str | None:
     """Saved pane if it exists with room and is not excluded; else a pane already holding
     restored seats; else None, letting the placement hierarchy (and finally a new pane) decide."""
-    panes = {p['id']: p for p in env.context() or [] if isinstance(p.get('id'), str)}
+    from . import cli
+    active = [p for p in env.context() or [] if isinstance(p, dict)]
+    panes = {p['id']: p for p in active if isinstance(p.get('id'), str)}
+    # The saved id may be an alias (canvas-pane-N for zen-term-N and back): resolve it, and the
+    # exclusions, through the same map spawn placement uses; the ACTIVE id is what gets passed.
+    aliases = cli._pane_aliases(active, env.hidden_panes())
+    barred = {aliases.get(e, e) for e in excluded}
 
     def room(pane_id: str) -> bool:
         pane = panes.get(pane_id)
         count = pane.get('leafCount', 0) if pane else 0
-        return pane is not None and pane_id not in excluded and isinstance(count, int) and 0 < count < MAX_LEAVES
-    if seat.slot and room(seat.slot.pane):
-        return seat.slot.pane
+        return pane is not None and pane_id not in barred and isinstance(count, int) and 0 < count < MAX_LEAVES
+    saved = aliases.get(seat.slot.pane, seat.slot.pane) if seat.slot else None
+    if saved and room(saved):
+        return saved
     return next((p for p in restored_panes if room(p)), None)
 
 

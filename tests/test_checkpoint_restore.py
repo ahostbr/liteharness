@@ -64,6 +64,7 @@ class Box:
         self.ptys, self.panes, self.calls, self.closed = [], [], [], []
         self.leaves_by_pane, self.children = {}, {}
         self.proc_names = {}
+        self.hidden = []
         self.events, self.wake_status, self.mail_error = [], 'nudge; turn confirmed on attempt 1 (hook stamp)', None
         self.registry[COORD] = {'agent_id': COORD, 'name': 'Seat-1', 'registered_at': T0.isoformat(),
                                 'canvas_session_id': 'pty-coord', 'pane_id': 'pane-coord'}
@@ -75,7 +76,7 @@ class Box:
                     pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
                     close_leaf=lambda leaf: self.closed.append(leaf) or True,
                     has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
-                    send_mail=self.mail, wake=self.wake, model_known=lambda a: True,
+                    send_mail=self.mail, wake=self.wake, model_known=lambda a: True, hidden_panes=lambda: self.hidden,
                     process_name=lambda pid: self.proc_names.get(pid, 'powershell.exe'),
                     verify_timeout=5, poll_interval=1)
         return RestoreEnv(**{**base, **kw})
@@ -863,3 +864,48 @@ def test_restore_never_passes_model_and_notes_a_seat_whose_model_is_unconfirmed(
     notes = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('model-unconfirmed')]
     assert notes == [f'model-unconfirmed seat={s2.agent_id}: resumed without --model']
     assert result.state == 'complete', 'a non-blocking note never changes the outcome'
+
+
+# -- round 5: F5 a saved pane id may be an alias of an active pane ------------------------------------------------
+
+def test_a_saved_canvas_pane_id_resolves_to_its_active_zen_mirror(tmp_path, box):
+    s2 = seat(2, root=tmp_path, pane='canvas-pane-3')
+    box.panes.append({'id': 'zen-term-3', 'mirrorId': 'canvas-pane-3', 'leafCount': 2, 'leaves': []})
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    argv = box.calls[0][0]
+    assert argv[argv.index('--pane') + 1] == 'zen-term-3', 'the ACTIVE id is what the placement receives'
+
+
+def test_a_saved_zen_pane_id_resolves_when_the_context_lists_the_canvas_form(tmp_path, box):
+    s2 = seat(2, root=tmp_path, pane='zen-term-4')
+    box.panes.append({'id': 'canvas-pane-4', 'syncId': 'sync-canvas-pane-4', 'mirrorId': 'zen-term-4', 'leafCount': 1, 'leaves': []})
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    argv = box.calls[0][0]
+    assert argv[argv.index('--pane') + 1] == 'canvas-pane-4'
+
+
+def test_a_hidden_pane_only_helps_resolve_it_never_receives_the_seat(tmp_path, box):
+    s2 = seat(2, root=tmp_path, pane='canvas-pane-5')
+    box.panes.append({'id': 'zen-term-5', 'syncId': 's5', 'leafCount': 1, 'leaves': []})
+    box.hidden = [{'id': 'canvas-pane-5', 'syncId': 's5', 'leafCount': 1, 'leaves': []}, {'id': 'lonely', 'leafCount': 1}]
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    argv = box.calls[0][0]
+    assert argv[argv.index('--pane') + 1] == 'zen-term-5'
+    s3 = seat(3, root=tmp_path, pane='lonely')
+    store, params, op = start(tmp_path, manifest(tmp_path, [s3], checkpoint_id=uid(903)), op=703)
+    box.calls.clear()
+    run_restore(store, op, params, box.env())
+    assert '--pane' not in box.calls[0][0], 'a hidden pane with no active mirror is not a destination'
+
+
+def test_the_coordinators_pane_is_excluded_under_any_of_its_aliases(tmp_path, box):
+    s2 = seat(2, root=tmp_path, pane='canvas-pane-9')
+    box.panes[:] = [{'id': 'zen-term-9', 'mirrorId': 'canvas-pane-9', 'leafCount': 2,
+                     'leaves': [{'id': 'lc', 'sessionIds': ['pty-coord']}]}]
+    box.registry[COORD]['pane_id'] = 'canvas-pane-9'  # presence says the canvas form, /context the zen one
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    run_restore(store, op, params, box.env())
+    assert '--pane' not in box.calls[0][0], 'the saved pane IS the coordinator pane under another name'
