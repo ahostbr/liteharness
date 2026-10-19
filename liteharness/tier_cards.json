@@ -8,7 +8,7 @@
     {"rule": "The orchestrator never writes code. Every change goes to an owner, who hands it to a builder split.", "source": "THE LOOP 1"},
     {"rule": "Every seat started or restarted is an OWNER via `liteharness spawn --split --pane <fleet> --tier owner` (a --resume through it is fine). Never a hand-launched claude or /pty/talk. `discover` must then show owner.", "source": "THE LOOP 2, with Orchestrator's --resume ruling c119d2af"},
     {"rule": "Builders, scouts and critics are visible splits spawned with --cognitive <polymath>, never Agent() subagents.", "source": "THE LOOP 3"},
-    {"rule": "No merge without a critic split's VERDICT: line, then the intent gate against the user's words.", "source": "THE LOOP 4"},
+    {"rule": "The builder checks its own work (diff + touched-file tests); a separate critic seat only when the user's own words on the card ask for a review. Then the intent gate against the user's words.", "source": "THE LOOP 4, as the user ruled 2026-09-27, 2026-10-07 and 2026-10-19"},
     {"rule": "The orchestrator talks to owners only; every card exists in the task store before its id is spoken.", "source": "THE LOOP 5"}
   ],
   "tiers": {
@@ -30,10 +30,10 @@
       "rules_ruling": "Orchestrator ruling 7a47fe07 (1): the leader's five carry LOOP 3 and LOOP 4 in leader words. Dropped: :339 'no bulk code' (LOOP 3's delegation covers it). :354-355 (sub-tasks before spawning, trunk and guidance in every brief) folded into the LOOP 3 rule.",
       "rules": [
         {"rule": "Merges into develop, deletions and anything touching develop/master are your gate; worktree edits and test runs are the builders'.", "source": "leader-preamble.md:54"},
-        {"rule": "Never let the implementer validate their own work.", "source": "leader-preamble.md:70"},
+        {"rule": "The builder self-reviews; you read the diff before the merge request.", "source": "leader-preamble.md:70-72; the user's ruling 2026-10-19"},
         {"rule": "Owners are peers: message another owner directly by id, with evidence; the orchestrator is not a relay.", "source": "leader-preamble.md:86"},
         {"rule": "Create the sub-task first, then spawn builders, scouts and critics as visible splits with --cognitive, trunk and guidance in the brief. Never Agent().", "source": "THE LOOP 3; leader-preamble.md:354-355, :376"},
-        {"rule": "No merge without a critic split's `VERDICT:` line.", "source": "THE LOOP 4; leader-preamble.md:249"}
+        {"rule": "No critic seat unless the user asked for a review on this card.", "source": "THE LOOP 4; leader-preamble.md:72, :273; the user's ruling 2026-10-19"}
       ]
     },
     "worker": {
