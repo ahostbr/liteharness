@@ -431,3 +431,17 @@ def test_a_launcher_that_cannot_start_the_worker_says_so(svc):
     svc.launcher = broken
     result = svc.submit(restore_request(), actor_id=COORD, params=params(svc.harness_root))
     assert result.state == 'unknown' and result.blockers[0].code == 'worker-not-started'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows console flag')
+def test_child_processes_of_the_worker_are_started_without_a_console_window(monkeypatch):
+    from liteharness import checkpoint_restore, checkpoint_save
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(argv, 0, '', '')
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    checkpoint_restore._spawn(['x'], {}, 5)
+    checkpoint_save._run(['y'], 5)
+    assert [k.get('creationflags') for k in seen] == [subprocess.CREATE_NO_WINDOW] * 2

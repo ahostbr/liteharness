@@ -85,7 +85,12 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
 
     `exclude_panes` (plus the comma-separated LITEHARNESS_EXCLUDE_PANES, which a restore
     sets on its spawn subprocesses) names panes that never receive this split, not even
-    when explicitly requested. Default empty: ordinary spawns are unchanged.
+    when explicitly requested. Default empty: spawns that name none are unchanged.
+
+    Pane ids resolve through id/syncId/mirrorId aliases to the ACTIVE pane. One placement rule
+    changes for ordinary spawns: a caller whose registry role is orchestrator never falls into its
+    own pane as a default (it lands in an explicit pane, a fleet pane, another pane, or a new one);
+    an explicit request for its own pane is still honoured.
 
     Context is a snapshot, so only the bridge's pre-creation refusals permit
     another attempt. An unknown/malformed creation result must never duplicate
@@ -4750,6 +4755,9 @@ def cmd_spawn(
             raise ValueError("Harness resume identity requires an exact Claude native session")
         transcript_identity(_registry(resume_harness_id), native_id=native_id)
     context_env["LITEHARNESS_AGENT_ID"] = resume_harness_id or ""
+    # A restore sets this for ITS placement only; the seat it launches must not inherit it.
+    if os.environ.get("LITEHARNESS_EXCLUDE_PANES"):
+        context_env["LITEHARNESS_EXCLUDE_PANES"] = ""
 
     # `--name` used to reach the agent only as an instruction inside the typed
     # bootstrap ("register with --name X") — which vanished whenever the

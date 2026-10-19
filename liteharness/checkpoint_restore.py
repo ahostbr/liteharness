@@ -50,10 +50,15 @@ class PlanRow:
     reason: str = ''
 
 
+def _no_window() -> dict:
+    """No console flash for a child of a worker that has none (Windows only)."""
+    return {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
+
+
 def _spawn(argv: list[str], env: dict, timeout: float) -> SpawnOutcome:
     try:
         done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout,
-                              cwd=str(config.get_root()))
+                              cwd=str(config.get_root()), **_no_window())
     except subprocess.TimeoutExpired:
         return SpawnOutcome(None, 'timed out')
     return SpawnOutcome(done.returncode, ((done.stderr or '') + (done.stdout or ''))[-400:])

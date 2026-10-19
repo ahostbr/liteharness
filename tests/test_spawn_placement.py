@@ -463,3 +463,10 @@ def test_non_orchestrator_caller_keeps_its_own_pane_first(world):
     path.write_text(json.dumps({**json.loads(path.read_text()), "role": "builder"}))
     spawn(world)
     assert placements(world)[0][1]["paneId"] == "own"
+
+
+def test_placement_exclusion_never_reaches_the_new_seats_environment(world, monkeypatch):
+    monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "own")
+    spawn(world, split_pane="fleet")
+    typed = " ".join(str(body.get("data", "")) for _, path, body in world["calls"] if path == "/pty/write")
+    assert "EXCLUDE_PANES" not in typed and "'own'" not in typed, "the seat's terminal never sees the exclusion"

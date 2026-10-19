@@ -54,8 +54,13 @@ def _inbox_poll(mailbox: str) -> list[dict]:
     return inbox.read_and_claim(mailbox)
 
 
+def _no_window() -> dict:
+    """No console flash for a child of a worker that has none (Windows only)."""
+    return {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
+
+
 def _run(argv: list[str], timeout: float) -> int:
-    return subprocess.run(argv, timeout=timeout, capture_output=True).returncode
+    return subprocess.run(argv, timeout=timeout, capture_output=True, **_no_window()).returncode
 
 
 def _litetui(agent_id: str, command: dict) -> dict:
