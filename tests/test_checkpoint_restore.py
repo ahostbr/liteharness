@@ -718,7 +718,8 @@ def test_a_crashed_seats_shell_husk_joined_only_by_session_id_reads_dead_not_unk
     monkeypatch.setattr(mod, '_has_children', lambda pid: True)
     assert default_world(tmp_path, monkeypatch, row, husk) == 'unknown', 'the PTY still runs something'
     monkeypatch.setattr(mod, '_has_children', lambda pid: None)
-    assert default_world(tmp_path, monkeypatch, row, husk) == 'dead'
+    assert default_world(tmp_path, monkeypatch, row, husk) == 'unknown', 'an unreadable shell may host a live seat'
+    assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7'}]) == 'unknown', 'a husk with no pid cannot be inspected'
     assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7', 'pid': 55, 'harnessAgentId': uid(2)}]) == 'unknown'
     assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-8'}]) == 'dead'
 
@@ -815,3 +816,38 @@ def test_dry_run_carries_the_same_summary_line_as_a_note(tmp_path, box):
     result = run_restore(store, None, params, box.env())
     notes = [b for b in result.blockers if b.code == 'shell-summary']
     assert len(notes) == 1 and notes[0].remedy == '2 bare shells found, 0 matched a saved leaf, 0 would close'
+
+
+# -- critic approval follow-ups: S1 fail-open, S2 exited row --------------------------------------------------
+
+def test_has_children_distinguishes_a_missing_pid_from_an_unreadable_one(monkeypatch):
+    import psutil
+    from liteharness import checkpoint_restore as mod
+
+    def gone(pid):
+        raise psutil.NoSuchProcess(pid)
+
+    def denied(pid):
+        raise psutil.AccessDenied(pid)
+    monkeypatch.setattr(psutil, 'Process', gone)
+    assert mod._has_children(55) is False
+    monkeypatch.setattr(psutil, 'Process', denied)
+    assert mod._has_children(55) is None
+
+
+def test_a_husk_whose_shell_pid_no_longer_exists_still_reads_dead(tmp_path, monkeypatch):
+    from liteharness import checkpoint_restore as mod
+    pid, born = mine()
+    row = {'agent_id': uid(2), 'session_pid': 4_000_000, 'session_process_started_at': born, 'canvas_session_id': 'pty-7'}
+    monkeypatch.undo()
+    assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7', 'pid': 4_000_001}]) == 'dead'
+
+
+@pytest.mark.parametrize('children,expected', [(False, 'dead'), (True, 'unknown'), (None, 'unknown')])
+def test_an_exited_row_whose_shell_now_runs_something_is_not_dead(tmp_path, monkeypatch, children, expected):
+    from liteharness import checkpoint_restore as mod
+    pid, born = mine()
+    row = {'agent_id': uid(2), 'session_pid': 4_000_000, 'session_process_started_at': born,
+           'canvas_session_id': 'pty-7', 'exited_at': '2026-10-19T00:00:00+00:00'}
+    monkeypatch.setattr(mod, '_has_children', lambda pid: children)
+    assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7', 'pid': 55}]) == expected

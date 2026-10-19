@@ -97,10 +97,13 @@ def _close_leaf(leaf_id: str) -> bool:
 
 
 def _has_children(pid: int) -> bool | None:
-    """True/False for a shell pid, None when it cannot be inspected (then: never touch it)."""
+    """True/False for a shell pid; a pid that no longer exists has no children (False); None only
+    when it cannot be inspected (AccessDenied, any other failure), and then: never touch it."""
     try:
         import psutil
         return bool(psutil.Process(pid).children())
+    except psutil.NoSuchProcess:
+        return False
     except Exception:
         return None
 
@@ -140,8 +143,10 @@ def default_liveness(agent_id: str) -> str:
     named = any(isinstance(s, dict) and s.get('harnessAgentId') == agent_id for s in ptys)
     husk = next((s for s in ptys if isinstance(s, dict) and session and s.get('id') == session
                  and s.get('harnessAgentId') in (None, agent_id)), None)
+    # An unreadable husk (or one with no pid) may host a live seat: only a readable, empty shell is dead.
+    busy = husk is not None and (not isinstance(husk.get('pid'), int) or _has_children(husk['pid']) is not False)
     if not isinstance(row, dict) or row.get('exited_at'):
-        return 'unknown' if named else 'dead'
+        return 'unknown' if named or busy else 'dead'
     pid, born = row.get('session_pid'), row.get('session_process_started_at')
     try:
         pid, born = int(pid), float(born)
@@ -152,8 +157,7 @@ def default_liveness(agent_id: str) -> str:
     try:
         alive = psutil.Process(pid).create_time() * 1000
     except psutil.NoSuchProcess:
-        # Gone. Unknown only if the PTY is named for this seat, or its shell still runs something.
-        busy = bool(husk) and isinstance(husk.get('pid'), int) and _has_children(husk['pid']) is True
+        # Gone. Unknown only if the PTY is named for this seat, or its shell may still run something.
         return 'unknown' if named or busy else 'dead'
     except psutil.Error:
         return 'unknown'
