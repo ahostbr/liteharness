@@ -193,6 +193,7 @@ class RestoreEnv:
     # False when the seat's registry model is unknown: it is then resumed WITHOUT --model. Real
     # answer by default (current row, else the retired one).
     model_known: Callable[[str], bool] = lambda agent_id: _model_known(agent_id)
+    default_model: Callable[[], str | None] = lambda: _default_model()
     operation_active: Callable | None = None
     journal_age: Callable | None = None
     spawn_timeout: float = SPAWN_TIMEOUT
@@ -223,6 +224,20 @@ def _wake(session_id: str, line: str) -> str:
                                Path(os.devnull).parent / 'no-brief-for-a-resumed-seat', line, line, 0)
 
 
+def _default_model() -> str | None:
+    """The model a `claude --resume` without --model lands on: the harness's configured spawn default.
+    None when none is configured (claude would then boot its own settings.json model, which is unreadable here)."""
+    from . import cli
+    try:
+        return cli._spawn_defaults()[0]
+    except SystemExit:
+        return None
+
+
+def _base_model(model: str | None) -> str | None:
+    return model.split('[', 1)[0].strip() if isinstance(model, str) and model.strip() else None
+
+
 def _model_known(agent_id: str) -> bool:
     from .claude_identity import real_model
     from .resume_seat import _registry
@@ -246,6 +261,7 @@ class RestoreParams:
     dry_run: bool = False
     seat_ids: list[str] | None = None  # retry: only these (reconciled failed) rows
     retry_of: str | None = None  # retry: the operation whose other rows are reported as they were
+    allow_default_model: bool = False  # launch an unknown-model seat on the harness default anyway
 
     def wire(self) -> dict:
         return dict(self.__dict__)
@@ -433,6 +449,33 @@ class Restorer:
                 self.errors[row.seat_id] = list(row.errors)
                 self.evidence[row.seat_id] = list(row.evidence)
 
+    def gate_unknown_models(self, rows: list[PlanRow], seats: dict[str, Seat]) -> None:
+        """A seat whose registry model is unknown resumes with no --model, i.e. on the harness default.
+        If the model it was observed running on (base, no context suffix) is not that default, it
+        would silently change model: block it, unless the operator allowed the default."""
+        env = self.env
+        default = _base_model(env.default_model())
+        for row in rows:
+            seat = seats.get(row.seat_id)
+            if row.action != 'launch' or seat is None or env.model_known(row.seat_id):
+                continue
+            if self.states.get(row.seat_id) not in ('preparing', 'starting'):
+                continue
+            observed = _base_model(seat.execution.model)
+            if observed and observed == default:
+                continue  # same model either way: only the non-blocking note applies
+            detail = (f'registry model unknown; transcript says {observed or "nothing"}, harness default is '
+                      f'{default or "not configured"}')
+            if self.params.allow_default_model:
+                self.errors.setdefault(row.seat_id, []).append(Blocker(
+                    'model-defaulted', row.seat_id, f'{detail}; launched on the default as allowed'))
+                continue
+            prefix = 'would block: ' if self.params.dry_run else ''
+            self.states[row.seat_id] = 'blocked'
+            self.errors.setdefault(row.seat_id, []).append(Blocker(
+                'model-mismatch', row.seat_id,
+                f'{prefix}{detail}; resume by hand with --model, or pass --allow-default-model'))
+
     def foreign_unknown(self) -> set[str]:
         """Seats another operation on this checkpoint started (intent) without ever reporting."""
         if self.log is None:
@@ -615,6 +658,7 @@ class Restorer:
                 self.errors[row.seat_id] = [Blocker(row.reason, row.seat_id, 'Reconcile this seat, then restore it')]
         if params.retry_of and params.seat_ids is not None and self.log is not None:
             self.adopt_prior_states(params.retry_of, set(params.seat_ids))
+        self.gate_unknown_models(full, seats)
         for seat_id in foreign:
             if self.states.get(seat_id) in ('preparing', 'starting'):
                 self.states[seat_id] = 'unknown'
@@ -636,7 +680,8 @@ class Restorer:
         self.journal('plan', None, self.report('running'))
         for row in rows:
             seat = seats.get(row.seat_id)
-            if row.action != 'launch' or seat is None or row.seat_id in prior or row.seat_id in foreign:
+            if (row.action != 'launch' or seat is None or row.seat_id in prior or row.seat_id in foreign
+                    or self.states.get(row.seat_id) == 'blocked'):
                 if row.action == 'reattach' and seat is not None:
                     self.journal('reattached', row.seat_id, self.report('running'))
                 continue

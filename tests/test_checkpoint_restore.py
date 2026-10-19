@@ -22,10 +22,10 @@ class Crash(BaseException):
     """A process death between two journal writes."""
 
 
-def seat(n, *, role='builder', parent=COORD, disposition='idle', pane=None, root=None, leaf=None):
+def seat(n, *, role='builder', parent=COORD, disposition='idle', pane=None, root=None, leaf=None, model='claude-x'):
     slot = Slot('ws', 'th', pane or 'pane-saved', leaf or f'leaf-{n}', None, 'rev-1') if (pane or leaf) else None
     profile = OwnerProfile(f'Seat-{n}', str(root)) if role == 'owner' else None
-    return Seat(f'Seat-{n}', uid(n), uid(n + 100), 'claude', Execution('claude', 'claude-x', 'unrecorded'),
+    return Seat(f'Seat-{n}', uid(n), uid(n + 100), 'claude', Execution('claude', model, 'unrecorded'),
                 str(root), str(root), role, 'tesla', parent, profile, 'selected-current', disposition,
                 'Read your handoff', 'rev-1', slot)
 
@@ -76,7 +76,7 @@ class Box:
                     pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
                     close_leaf=lambda leaf: self.closed.append(leaf) or True,
                     has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
-                    send_mail=self.mail, wake=self.wake, model_known=lambda a: True, hidden_panes=lambda: self.hidden,
+                    send_mail=self.mail, wake=self.wake, model_known=lambda a: True, default_model=lambda: None, hidden_panes=lambda: self.hidden,
                     process_name=lambda pid: self.proc_names.get(pid, 'powershell.exe'),
                     verify_timeout=5, poll_interval=1)
         return RestoreEnv(**{**base, **kw})
@@ -859,7 +859,8 @@ def test_an_exited_row_whose_shell_now_runs_something_is_not_dead(tmp_path, monk
 def test_restore_never_passes_model_and_notes_a_seat_whose_model_is_unconfirmed(tmp_path, box):
     s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
     store, params, op = start(tmp_path, manifest(tmp_path, [s2, s3]))
-    result = run_restore(store, op, params, box.env(model_known=lambda agent_id: agent_id != s2.agent_id))
+    result = run_restore(store, op, params, box.env(model_known=lambda agent_id: agent_id != s2.agent_id,
+                                                    default_model=lambda: 'claude-x[1m]'))
     assert all('--model' not in argv and 'unknown' not in ' '.join(argv) for argv, _ in box.calls)
     notes = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('model-unconfirmed')]
     assert notes == [f'model-unconfirmed seat={s2.agent_id}: resumed without --model']
@@ -909,3 +910,66 @@ def test_the_coordinators_pane_is_excluded_under_any_of_its_aliases(tmp_path, bo
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     run_restore(store, op, params, box.env())
     assert '--pane' not in box.calls[0][0], 'the saved pane IS the coordinator pane under another name'
+
+
+# -- round 6: M-A an unknown-registry seat is never silently moved to another model ---------------------------------
+
+OPUS, SONNET = 'claude-opus-5-5', 'claude-sonnet-5-5'
+
+
+def unknown_model_world(box, tmp_path, observed, default, **params):
+    s2 = seat(2, root=tmp_path, model=observed)
+    child = seat(3, root=tmp_path, parent=s2.agent_id)
+    store, p, op = start(tmp_path, manifest(tmp_path, [s2, child]), **params)
+    env = box.env(model_known=lambda a: a not in (s2.agent_id,), default_model=lambda: default)
+    return s2, child, store, p, op, env
+
+
+def test_opus_transcript_and_sonnet_default_is_blocked_and_nothing_is_launched(tmp_path, box):
+    s2, child, store, p, op, env = unknown_model_world(box, tmp_path, OPUS, SONNET)
+    result = run_restore(store, op, p, env)
+    assert box.calls == []
+    row = next(r for r in result.seats if r.seat_id == s2.agent_id)
+    assert row.state == 'blocked' and [e.code for e in row.errors] == ['model-mismatch']
+    assert OPUS in row.errors[0].remedy and SONNET in row.errors[0].remedy and '--allow-default-model' in row.errors[0].remedy
+    assert next(r for r in result.seats if r.seat_id == child.agent_id).state == 'blocked', 'its subtree waits'
+    assert result.state == 'incomplete'
+
+
+def test_a_matching_base_model_launches_and_a_context_suffix_does_not_count(tmp_path, box):
+    s2, child, store, p, op, env = unknown_model_world(box, tmp_path, SONNET, SONNET + '[1m]')
+    result = run_restore(store, op, p, env)
+    assert launched(box) == [s2.agent_id, child.agent_id] and result.state == 'complete'
+    stages = [e.stage for e in OperationLog(store, op).operation().events]
+    assert any(st.startswith('model-unconfirmed') for st in stages), 'the non-blocking note stays'
+
+
+def test_an_unreadable_default_blocks_too(tmp_path, box):
+    s2, child, store, p, op, env = unknown_model_world(box, tmp_path, SONNET, None)
+    result = run_restore(store, op, p, env)
+    assert box.calls == [] and next(r for r in result.seats if r.seat_id == s2.agent_id).errors[0].code == 'model-mismatch'
+
+
+def test_allow_default_model_launches_on_the_default_and_says_so_on_the_row(tmp_path, box):
+    s2, child, store, p, op, env = unknown_model_world(box, tmp_path, OPUS, SONNET, allow_default_model=True)
+    result = run_restore(store, op, p, env)
+    assert launched(box) == [s2.agent_id, child.agent_id]
+    assert all('--model' not in argv for argv, _ in box.calls), 'the transcript model is never passed (no [1m])'
+    row = next(r for r in result.seats if r.seat_id == s2.agent_id)
+    assert row.state == 'ready-idle' and [e.code for e in row.errors] == ['model-defaulted']
+    assert result.state == 'incomplete'
+
+
+def test_a_seat_with_a_real_registry_model_is_never_gated(tmp_path, box):
+    s2 = seat(2, root=tmp_path, model=OPUS)
+    store, p, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, p, box.env(default_model=lambda: SONNET))
+    assert launched(box) == [s2.agent_id] and result.state == 'complete'
+
+
+def test_dry_run_lists_would_block_per_seat(tmp_path, box):
+    s2, child, store, p, op, env = unknown_model_world(box, tmp_path, OPUS, SONNET, dry_run=True)
+    result = run_restore(store, None, p, env)
+    row = next(r for r in result.seats if r.seat_id == s2.agent_id)
+    assert row.state == 'blocked' and row.errors[0].code == 'model-mismatch' and row.errors[0].remedy.startswith('would block: ')
+    assert box.calls == []

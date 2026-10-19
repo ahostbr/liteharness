@@ -529,7 +529,8 @@ def test_a_sequence_collision_is_retried_because_the_sequence_is_reread_each_att
 
 # -- round 5: F4 an operator reads names, not ids ---------------------------------------------------------------
 
-def test_human_output_names_each_seat_with_role_cli_model_and_pane_while_json_is_unchanged(svc, capsys):
+def test_human_output_names_each_seat_with_role_cli_model_and_pane_while_json_is_unchanged(svc, capsys, monkeypatch):
+    monkeypatch.setattr('liteharness.checkpoint_restore._model_known', lambda agent_id: True)
     code = checkpoint_cli.main(['restore', '--checkpoint-id', CID, '--dry-run', '--actor-id', COORD,
                                 '--harness-root', str(svc.harness_root)])
     text = capsys.readouterr().out
@@ -543,7 +544,8 @@ def test_human_output_names_each_seat_with_role_cli_model_and_pane_while_json_is
     assert 'Seat-2' not in json.dumps(printed) and printed['seats'][0]['seat_id']
 
 
-def test_the_label_includes_the_saved_pane_and_the_blocker_text(tmp_path, capsys):
+def test_the_label_includes_the_saved_pane_and_the_blocker_text(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr('liteharness.checkpoint_restore._model_known', lambda agent_id: True)
     root = tmp_path / 'harness'
     root.mkdir()
     store = CheckpointStore(root)
@@ -567,3 +569,22 @@ def test_a_save_dry_run_labels_seats_from_the_registry(tmp_path, monkeypatch, ca
     text = capsys.readouterr().out
     row = next(line for line in text.splitlines() if 'Claude-5' in line)
     assert 'pane-5' in row and 'claude' in row
+
+
+def test_allow_default_model_is_restore_only_and_never_a_dry_run_flag(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
+    for argv in (['save', '--allow-default-model', '--coordinator-handoff', str(svc.harness_root / 'h.md')],
+                 ['status', '--allow-default-model'],
+                 ['restore', '--checkpoint-id', CID, '--dry-run', '--allow-default-model']):
+        result = checkpoint_cli.run(cli_args(*argv, '--actor-id', COORD, root=svc.harness_root),
+                                    authorize=lambda a, l, r: a, service=svc)
+        assert result.state == 'rejected' and result.blockers[0].code == 'invalid-request'
+        assert 'allow-default-model' in result.blockers[0].remedy
+
+
+def test_allow_default_model_reaches_the_restore_params(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
+    args = cli_args('restore', '--checkpoint-id', CID, '--allow-default-model', '--request-id', uid(750),
+                    '--actor-id', COORD, root=svc.harness_root)
+    result = checkpoint_cli.run(args, authorize=lambda a, l, r: a, service=svc)
+    assert result.state == 'accepted' and read_params(svc.store, result.operation_id)['allow_default_model'] is True

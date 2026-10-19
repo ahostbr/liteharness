@@ -66,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--coordinator-handoff', help='save: absolute path of the coordinator (caller) handoff')
     p.add_argument('--include-offline', action='append', default=[], help='save: an offline seat id to include')
     p.add_argument('--keep-shells', action='store_true', help='restore: do not close bare shells afterwards')
+    p.add_argument('--allow-default-model', action='store_true',
+                   help='restore: launch seats whose registry model is unknown on the harness default model')
     p.add_argument('--wait', type=float, default=0, help='poll up to N seconds for a terminal state')
     p.add_argument('--harness-root', help=argparse.SUPPRESS)
     return p
@@ -74,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _request(args, store: CheckpointStore) -> Request:
     if args.dry_run and args.action not in ('save', 'restore'):
         raise ContractError(f'--dry-run applies only to save and restore, not {args.action}')
+    if args.allow_default_model and (args.action != 'restore' or args.dry_run):
+        raise ContractError('--allow-default-model applies only to a real restore, not to save, status, cancel, retry or --dry-run')
     rid = args.request_id or str(uuid4())
     if args.action == 'save':
         return Request(1, 'save', rid, None, None, [], args.dry_run)
@@ -155,7 +159,8 @@ def run(args, *, authorize: Callable = authorize_orchestrator, service: Service 
             return rejected('invalid-request', str(exc))
         result = service.submit(request, actor_id=actor, params=params)
     elif request.action == 'restore':
-        params = RestoreParams(str(root), actor, request.checkpoint_id, keep_shells=args.keep_shells).wire()
+        params = RestoreParams(str(root), actor, request.checkpoint_id, keep_shells=args.keep_shells,
+                               allow_default_model=args.allow_default_model).wire()
         result = service.submit(request, actor_id=actor, params=params)
     elif request.action == 'cancel':
         result = service.cancel(request)
