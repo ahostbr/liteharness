@@ -5,7 +5,7 @@
 (`checkpoint-contract.md`); legacy `sessions save/restore/list/status` are untouched.
 
 ```
-liteharness sessions checkpoint save    --coordinator-handoff <abs path> [--include-offline ID ...] [--wait N]
+liteharness sessions checkpoint save    --coordinator-handoff <abs path> [--include-offline ID ...] [--exclude NAME|ID ...] [--wait N]
 liteharness sessions checkpoint restore --checkpoint-id <id|latest> [--dry-run] [--keep-shells] [--wait N]
 liteharness sessions checkpoint status  [--operation-id ID | --request-id ID | --checkpoint-id ID]
 liteharness sessions checkpoint cancel  --operation-id ID
@@ -39,6 +39,13 @@ token is the real fix and is out of this card.
    native transcript (Claude) or the owned home (LiteTUI). Unresolvable seats stay in the
    denominator as blocked rows. The caller is the manifest coordinator: never auto-launched,
    closed or compacted.
+   **Seats the user started himself are left out.** A seat nobody spawned (empty `spawned_by`) that is not
+   the coordinator is not ours to hand off or compact: it is recorded in the manifest's `exclusions` with
+   reason `started-directly`, never asked, never compacted, never restored. `--exclude NAME|ID` (repeatable)
+   leaves out any other seat (`excluded-by-request`); `--include-offline ID` names a seat explicitly and
+   wins over the default. The coordinator is never excluded. A caller that is not itself a live seat
+   excludes nothing by default (save refuses such a caller anyway). `save --dry-run` prints an
+   `excluded:` line with each name and reason.
 2. An `incomplete` manifest is published BEFORE any seat is asked for anything.
 3. Per seat: a cooperative inbox request (`CHECKPOINT-HANDOFF <path> <idle|waiting|held>`);
    `checkpoint.compact_command` (argv list, `{agent_id}`/`{name}` placeholders, no shell) for

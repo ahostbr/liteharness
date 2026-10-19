@@ -129,3 +129,52 @@ def test_derived_model_never_carries_a_guessed_context_suffix(tmp_path, monkeypa
     a = w.claude(1)
     rewrite_model(w, a, 'unknown', [assistant('claude-opus-5-5')])
     assert '[' not in w.discover().candidates[0].seat.execution.model
+
+
+# -- seats Ryan started himself are not ours to hand off or compact (Sentinel, 2026-10-19) ----------
+
+def test_a_seat_started_directly_is_excluded_with_its_reason_and_the_coordinator_never_is(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    coordinator = w.claude(1, role='orchestrator')            # top-level too (spawned_by absent)
+    child = w.claude(2, parent=coordinator)
+    direct = w.claude(3)                                       # Ryan started it by hand: no spawned_by
+    found = w.discover(coordinator_id=coordinator)
+    assert [c.expected.agent_id for c in found.candidates] == [coordinator, child]
+    assert [(e.agent_id, e.reason) for e in found.excluded] == [(direct, 'started-directly')]
+    result = roster_census(found, harness_root=w.harness, cwd_roots=[tmp_path])
+    assert [e.agent_id for e in result.exclusions] == [direct] and result.expected_count == 2
+
+
+def test_without_a_known_coordinator_nothing_is_excluded_by_default(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    w.claude(1)
+    w.claude(2)
+    found = w.discover()
+    assert len(found.candidates) == 2 and found.excluded == []
+
+
+def test_an_explicit_include_beats_the_started_directly_default(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    coordinator = w.claude(1, role='orchestrator')
+    direct = w.claude(2)
+    found = w.discover(coordinator_id=coordinator, include_offline=[direct])
+    assert direct in [c.expected.agent_id for c in found.candidates] and found.excluded == []
+
+
+def test_exclude_takes_an_id_or_a_name_and_records_why(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    coordinator = w.claude(1, role='orchestrator')
+    a = w.claude(2, parent=coordinator)
+    b = w.claude(3, parent=coordinator)
+    c = w.claude(4, parent=coordinator)
+    found = w.discover(coordinator_id=coordinator, exclude_ids=[a, 'claude-3'])  # an id and a name (any case)
+    assert [x.expected.agent_id for x in found.candidates] == [coordinator, c]
+    assert {(e.agent_id, e.reason) for e in found.excluded} == {(a, 'excluded-by-request'), (b, 'excluded-by-request')}
+    roster_census(found, harness_root=w.harness, cwd_roots=[tmp_path])  # the manifest contract accepts them
+
+
+def test_excluding_the_coordinator_is_refused_by_ignoring_it(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    coordinator = w.claude(1, role='orchestrator')
+    found = w.discover(coordinator_id=coordinator, exclude_ids=[coordinator, 'Claude-1'])
+    assert [c.expected.agent_id for c in found.candidates] == [coordinator] and found.excluded == []

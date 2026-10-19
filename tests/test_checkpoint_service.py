@@ -610,3 +610,24 @@ def test_save_dry_run_shows_the_resolved_model_and_its_source_not_the_registry_v
     assert 'claude-opus-5-5 (transcript)' in next(line for line in text.splitlines() if 'Claude-5' in line)
     six = next(line for line in text.splitlines() if 'Claude-6' in line)
     assert 'claude-x (registry)' in six and 'claude  unknown' not in text
+
+
+def test_save_dry_run_names_the_seats_it_leaves_out_and_why(tmp_path, monkeypatch, capsys):
+    from liteharness import config
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    from checkpoint_world import World
+    w = World(tmp_path, monkeypatch)
+    w.harness = tmp_path
+    boss = w.claude(1, role='orchestrator')
+    w.claude(2, parent=boss)
+    w.claude(3)                          # started by hand
+    monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
+    monkeypatch.setenv('LITEHARNESS_AGENT_ID', boss)
+    monkeypatch.setattr(config, 'get_agent_id', lambda: boss)
+    checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
+    text = capsys.readouterr().out
+    assert 'Claude-2' in text and 'Claude-1' in text
+    assert not any(line.strip().startswith('Claude-3') for line in text.splitlines())
+    assert 'excluded: Claude-3 (started-directly)' in text
+    checkpoint_cli.main(['save', '--dry-run', '--exclude', 'Claude-2', '--harness-root', str(tmp_path)])
+    assert 'Claude-2 (excluded-by-request)' in capsys.readouterr().out

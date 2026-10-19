@@ -65,6 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--require-leaf', action='store_true', help='refuse unless --leaf-id matches (tool path)')
     p.add_argument('--coordinator-handoff', help='save: absolute path of the coordinator (caller) handoff')
     p.add_argument('--include-offline', action='append', default=[], help='save: an offline seat id to include')
+    p.add_argument('--exclude', action='append', default=[],
+                   help='save: a seat name or id to leave out (repeatable); seats nobody spawned '
+                        '(started directly by the user) are left out by default')
     p.add_argument('--keep-shells', action='store_true', help='restore: do not close bare shells afterwards')
     p.add_argument('--allow-default-model', action='store_true',
                    help='restore: launch seats whose registry model is unknown on the harness default model')
@@ -94,8 +97,11 @@ def _request(args, store: CheckpointStore) -> Request:
 def _preview_save(root: Path, store: CheckpointStore, actor: str, args, labels_out: dict | None = None) -> Result:
     """Roster that WOULD be frozen; nothing is written, asked or compacted."""
     from .checkpoint_roster import discover_current, roster_census
-    discovery = discover_current(harness_root=root, include_offline=args.include_offline)
+    discovery = discover_current(harness_root=root, include_offline=args.include_offline,
+                                 exclude_ids=args.exclude, coordinator_id=actor)
     census = roster_census(discovery, harness_root=root)
+    if labels_out is not None and census.exclusions:  # left out on purpose, not forgotten
+        labels_out[EXCLUDED_KEY] = ', '.join(f'{e.name} ({e.reason})' for e in census.exclusions)
     rows = [seat_result(r.expected.agent_id, 'blocked' if r.seat is None else 'preparing', errors=r.blockers)
             for r in census.rows]
     if labels_out is not None:  # the model discovery RESOLVED, with where it came from, not the registry's value
@@ -115,7 +121,7 @@ def _save_params(args, root: Path, actor: str) -> dict:
     if not handoff.is_absolute() or not handoff.is_file():
         raise ContractError('save needs --coordinator-handoff: the absolute path of your own handoff file')
     cfg = config.load().get('checkpoint') or {}
-    return SaveParams(str(root), actor, str(handoff), str(uuid4()), include_offline=list(args.include_offline),
+    return SaveParams(str(root), actor, str(handoff), str(uuid4()), include_offline=list(args.include_offline), exclude_ids=list(args.exclude),
                       cwd_roots=cfg.get('cwd_roots'), litetui_root=cfg.get('litetui_root')).wire()
 
 
@@ -218,8 +224,12 @@ def seat_labels(result: Result, store: CheckpointStore, root: Path) -> dict[str,
     return labels
 
 
+EXCLUDED_KEY = '\0excluded'  # reserved label key: the seats a save leaves out, and why
+
+
 def render(result: Result, labels: dict[str, str] | None = None) -> str:
-    labels = labels or {}
+    labels = dict(labels or {})
+    excluded = labels.pop(EXCLUDED_KEY, None)
     c = result.counts
     lines = [f'{result.state.upper()}'
              + (f' operation {result.operation_id}' if result.operation_id else '')
@@ -229,6 +239,8 @@ def render(result: Result, labels: dict[str, str] | None = None) -> str:
         detail = '; '.join(f'{e.code}: {e.remedy}' for e in seat.errors)
         lines.append(f'  {labels.get(seat.seat_id, seat.seat_id)}  {seat.state}' + (f'  ({detail})' if detail else ''))
     lines += [f'  ! {b.code}: {b.remedy}' for b in result.blockers]
+    if excluded:
+        lines.append(f'  excluded: {excluded}')
     if result.state in ('incomplete', 'rejected', 'unknown') or not_ready_canceled(result):
         lines.append('REFUSED' if result.state == 'rejected' else 'NOT READY')
     if result.allowed_next_actions:

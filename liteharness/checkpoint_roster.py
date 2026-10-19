@@ -38,6 +38,7 @@ class Discovery:
     candidates: list[Candidate]
     skipped: list[tuple[str, str]]  # (registry stem, why): never a seat, never silently shrunk
     model_sources: dict[str, str] = field(default_factory=dict)  # agent id -> 'registry' | 'transcript'
+    excluded: list[Exclusion] = field(default_factory=list)  # named seats left out, each with its reason
 
 
 def claude_projects_root() -> Path:
@@ -159,13 +160,17 @@ def _registry_rows(harness: Path, include_offline: list[str],
 
 
 def discover_current(*, harness_root: Path | str, include_offline: list[str] = (),
-                     exclude_ids: list[str] = (), litetui_root: Path | str | None = None,
+                     exclude_ids: list[str] = (), coordinator_id: str | None = None,
+                     litetui_root: Path | str | None = None,
                      layout_revision: str = UNOBSERVED_LAYOUT,
                      live: Callable[[dict], bool] | None = None) -> Discovery:
     """Name every live seat, plus `include_offline`, in a stable order.
 
     The caller (the coordinator) is a seat like any other here; the manifest's
     coordinator record, not this list, keeps restore from ever launching it.
+    `exclude_ids` takes agent ids or seat names; with a known `coordinator_id`, a seat nobody
+    spawned (started directly by the user) is also left out. Every seat left out is returned in
+    `Discovery.excluded` with its reason, never dropped silently.
     """
     harness = checked_path(harness_root)
     rows, skipped = _registry_rows(harness, list(include_offline), live or _live)
@@ -183,16 +188,30 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
             root = owned_launch.data_root()
         except Exception:  # RootUnknown / StoreError: LiteTUI rows block, Claude rows do not
             root = None
-    excluded = set(exclude_ids)
+    requested = {str(v).casefold() for v in exclude_ids}  # an agent id or a seat name
+    explicit = set(include_offline)
+    # A caller that is not itself a live seat excludes nothing by default (save refuses such a caller anyway).
+    coordinator_known = coordinator_id in {agent_id for agent_id, _, _ in rows}
     candidates = []
     sources: dict[str, str] = {}
+    left_out: list[Exclusion] = []
     for agent_id, row, selection in rows:
-        if agent_id in excluded:
-            continue
         try:
             name = valid_name(row.get('name'))
         except StoreError:
             skipped.append((agent_id, 'unnamed-row'))
+            continue
+        # The coordinator is never excluded. A seat nobody spawned (Ryan started it himself) is not ours
+        # to hand off or compact unless it was named explicitly; that default needs a known coordinator.
+        reason = None
+        if agent_id != coordinator_id:
+            if agent_id.casefold() in requested or name.casefold() in requested:
+                reason = 'excluded-by-request'
+            elif coordinator_known and agent_id not in explicit and _parent(row, agent_id) is None:
+                reason = 'started-directly'
+        if reason:
+            if name.casefold() not in {e.name.casefold() for e in left_out}:  # the manifest wants unique names
+                left_out.append(Exclusion(name, agent_id, reason))
             continue
         expected = ExpectedSeat(agent_id, name, selection)
         role = roles.row_role(row)
@@ -219,7 +238,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
             candidates.append(Candidate(expected, None, Blocker('seat-unresolved', agent_id,
                                                                 f'{detail}; reconcile source evidence')))
     candidates.sort(key=lambda c: c.expected.name.casefold())
-    return Discovery(candidates, skipped, sources)
+    return Discovery(candidates, skipped, sources, left_out)
 
 
 def default_cwd_roots(seats: list[Seat]) -> list[Path]:
@@ -237,7 +256,11 @@ def default_cwd_roots(seats: list[Seat]) -> list[Path]:
 def roster_census(discovery: Discovery, *, harness_root: Path | str,
                   cwd_roots: list[Path | str] | None = None,
                   exclusions: list[Exclusion] = ()) -> Census:
-    """Census every resolved candidate; unresolved ones keep their row and blocker."""
+    """Census every resolved candidate; unresolved ones keep their row and blocker.
+
+    `exclusions` defaults to the seats discovery left out, so the manifest records who was skipped and why.
+    """
+    exclusions = list(exclusions) or list(discovery.excluded)
     seats = [c.seat for c in discovery.candidates if c.seat is not None]
     data_roots = sorted({Path(s.data_root) for s in seats})
     result = census(seats, harness_root=harness_root, authorized_data_roots=data_roots,
