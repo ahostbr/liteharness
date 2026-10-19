@@ -98,7 +98,7 @@ def test_a_top_level_seat_with_an_empty_spawned_by_is_not_blocked(tmp_path, monk
     row.update({'spawned_by': '', 'cognitive': '', 'role': 'orchestrator', 'model': s.execution.model})
     row.pop('thinking_level', None)
     path.write_text(json.dumps(row))
-    result = run(replace(s, role='orchestrator', parent_id=None), harness)
+    result = run(replace(s, role='orchestrator', parent_id=None, owner_profile=None), harness)
     assert not result.blockers, result.blockers
 
 
