@@ -133,15 +133,15 @@ def default_liveness(agent_id: str) -> str:
     ptys = _pty_list()
     if ptys is None:
         return 'unknown'
-    # An ordinary split-launched Claude PTY carries no harnessAgentId, so the join is the registered
-    # canvas session id; harnessAgentId (slot recovery, LiteTUI) is an optional extra and, when
-    # present, must name this seat.
+    # An ordinary split-launched Claude PTY carries no harnessAgentId. A harnessAgentId that names this
+    # seat means "something may still be starting for it" (unknown). The registered canvas session joins
+    # a PTY to the seat but says nothing about its PROCESS: a crashed seat leaves a shell husk there.
     session = row.get('canvas_session_id') if isinstance(row, dict) else None
-    hosted = any(isinstance(s, dict) and (s.get('harnessAgentId') == agent_id
-                                          or (session and s.get('id') == session and s.get('harnessAgentId') in (None, agent_id)))
-                 for s in ptys)
+    named = any(isinstance(s, dict) and s.get('harnessAgentId') == agent_id for s in ptys)
+    husk = next((s for s in ptys if isinstance(s, dict) and session and s.get('id') == session
+                 and s.get('harnessAgentId') in (None, agent_id)), None)
     if not isinstance(row, dict) or row.get('exited_at'):
-        return 'unknown' if hosted else 'dead'
+        return 'unknown' if named else 'dead'
     pid, born = row.get('session_pid'), row.get('session_process_started_at')
     try:
         pid, born = int(pid), float(born)
@@ -152,7 +152,9 @@ def default_liveness(agent_id: str) -> str:
     try:
         alive = psutil.Process(pid).create_time() * 1000
     except psutil.NoSuchProcess:
-        return 'unknown' if hosted else 'dead'
+        # Gone. Unknown only if the PTY is named for this seat, or its shell still runs something.
+        busy = bool(husk) and isinstance(husk.get('pid'), int) and _has_children(husk['pid']) is True
+        return 'unknown' if named or busy else 'dead'
     except psutil.Error:
         return 'unknown'
     # A recycled pid has a different creation time: that is a dead seat, not a live one.

@@ -70,13 +70,15 @@ class Box:
         self.panes.append({'id': 'pane-coord', 'leafCount': 2, 'leaves': [{'id': 'lc', 'sessionIds': ['pty-coord']}]})
 
     def env(self, **kw):
-        return RestoreEnv(now=self.clock.now, sleep=self.clock.sleep, liveness=lambda a: self.state.get(a, 'dead'),
-                          spawn=self.spawn, registry=lambda a: self.registry.get(a), context=lambda: self.panes,
-                          pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
-                          close_leaf=lambda leaf: self.closed.append(leaf) or True,
-                          has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
-                          send_mail=self.mail, wake=self.wake, process_name=lambda pid: self.proc_names.get(pid, 'powershell.exe'),
-                          verify_timeout=5, poll_interval=1, **kw)
+        base = dict(now=self.clock.now, sleep=self.clock.sleep, liveness=lambda a: self.state.get(a, 'dead'),
+                    spawn=self.spawn, registry=lambda a: self.registry.get(a), context=lambda: self.panes,
+                    pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
+                    close_leaf=lambda leaf: self.closed.append(leaf) or True,
+                    has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
+                    send_mail=self.mail, wake=self.wake,
+                    process_name=lambda pid: self.proc_names.get(pid, 'powershell.exe'),
+                    verify_timeout=5, poll_interval=1)
+        return RestoreEnv(**{**base, **kw})
 
     def make_live(self, agent_id):
         session = f'pty-{agent_id[-3:]}'
@@ -706,11 +708,39 @@ def test_a_seat_that_came_up_at_the_recheck_must_verify_or_it_is_unknown(tmp_pat
     assert box.calls == [] and {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'unknown'
 
 
-def test_default_liveness_joins_by_the_registered_canvas_session_when_the_process_is_gone(tmp_path, monkeypatch):
+def test_a_crashed_seats_shell_husk_joined_only_by_session_id_reads_dead_not_unknown(tmp_path, monkeypatch):
+    from liteharness import checkpoint_restore as mod
     pid, born = mine()
     row = {'agent_id': uid(2), 'session_pid': 4_000_000, 'session_process_started_at': born, 'canvas_session_id': 'pty-7'}
-    assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7'}]) == 'unknown'
+    husk = [{'id': 'pty-7', 'pid': 55}]
+    monkeypatch.setattr(mod, '_has_children', lambda pid: False)
+    assert default_world(tmp_path, monkeypatch, row, husk) == 'dead', 'a session-id join says nothing about the process'
+    monkeypatch.setattr(mod, '_has_children', lambda pid: True)
+    assert default_world(tmp_path, monkeypatch, row, husk) == 'unknown', 'the PTY still runs something'
+    monkeypatch.setattr(mod, '_has_children', lambda pid: None)
+    assert default_world(tmp_path, monkeypatch, row, husk) == 'dead'
+    assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7', 'pid': 55, 'harnessAgentId': uid(2)}]) == 'unknown'
     assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-8'}]) == 'dead'
+
+
+def test_a_husk_seat_is_launchable_end_to_end_and_retry_accepts_it_as_reconciled(tmp_path, box, monkeypatch):
+    """The plan, the N3 expiry and the retry gate all read the same real liveness."""
+    from liteharness import checkpoint_restore as mod
+    s2 = seat(2, root=tmp_path)
+    pid, born = mine()
+    row = {'agent_id': s2.agent_id, 'session_pid': 4_000_000, 'session_process_started_at': born, 'canvas_session_id': 'pty-7'}
+    (tmp_path / 'agents').mkdir(exist_ok=True)
+    (tmp_path / 'agents' / f'{s2.agent_id}.json').write_text(json.dumps(row))
+    from liteharness import config
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    monkeypatch.setattr(mod, '_pty_list', lambda: [{'id': 'pty-7', 'pid': 55}])
+    monkeypatch.setattr(mod, '_has_children', lambda pid: False)
+    assert mod.default_liveness(s2.agent_id) == 'dead'  # what retry's reconciled() asks
+    box.registry.pop(s2.agent_id, None)
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, params, box.env(liveness=lambda a: mod.default_liveness(a) if not box.calls else box.state.get(a, 'dead')))
+    assert launched(box) == [s2.agent_id] and {s.seat_id: s.state for s in result.seats}[s2.agent_id] == 'ready-idle'
+
 
 
 # -- critic round 2: N3 an unknown from another operation is not forever ------------------------------------
