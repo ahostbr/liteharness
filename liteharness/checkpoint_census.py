@@ -103,7 +103,12 @@ def _claude_corroborated(registry: dict, index_entry: dict | None, candidate: Se
             raise ContractError('Claude original cwd disagrees with native transcript')
     if candidate.execution.backend != 'claude':
         raise ContractError('Native execution conflicts with its CLI')
-    models = [m for m in (registry.get('model'), (index_entry or {}).get('model')) if m is not None]
+    from .claude_identity import real_model, transcript_model
+    models = [m for m in (real_model(registry.get('model')), real_model((index_entry or {}).get('model'))) if m]
+    if not models:  # registry/index say 'unknown': the native transcript is the only evidence left
+        reference = registry.get('transcript_path')
+        found = transcript_model(Path(reference)) if isinstance(reference, str) else None
+        models = [found] if found else []
     if not models or any(m != candidate.execution.model for m in models):
         raise ContractError('Native model is absent or conflicts with registry/name index')
     if index_entry is not None and index_entry.get('backend', '').split('/', 1)[0] != 'claude':
@@ -179,6 +184,8 @@ def census(selected: list[Seat], *, harness_root: str | Path,
                     recorded = registry.get(key)
                     if key == 'cli' and recorded == 'claude-code':
                         recorded = 'claude'
+                    if key == 'spawned_by':  # a top-level seat records '' or nothing: both mean no parent
+                        recorded, value = recorded or None, value or None
                     if key in registry and recorded != value:
                         raise ContractError('Registry conflicts with selected context')
                 saved_role = registry.get('role') or registry.get('tier')

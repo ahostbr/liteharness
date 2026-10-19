@@ -1,4 +1,8 @@
 """Roster discovery against a synthetic harness root: mixed Claude/LiteTUI rows."""
+import json
+
+import pytest
+
 from liteharness.checkpoint_roster import discover_current, roster_census
 from checkpoint_fixtures import put, uid
 from checkpoint_world import World
@@ -83,3 +87,45 @@ def test_excluded_ids_are_dropped_and_discovery_writes_nothing(tmp_path, monkeyp
     found = w.discover(exclude_ids=[uid(2)])
     assert [c.expected.agent_id for c in found.candidates] == [uid(1)]
     assert snapshot() == before
+
+
+def assistant(model, n=1):
+    return json.dumps({'type': 'assistant', 'uuid': f'u{n}', 'message': {'model': model, 'role': 'assistant'}})
+
+
+def rewrite_model(w, agent_id, registry_model, records):
+    path = w.harness / 'agents' / f'{agent_id}.json'
+    row = json.loads(path.read_text())
+    row['model'] = registry_model
+    path.write_text(json.dumps(row))
+    transcript = next(w.projects.glob(f'*/{agent_id}.jsonl'))
+    with transcript.open('a', encoding='utf-8') as stream:
+        stream.write(chr(10).join(records) + chr(10))
+
+
+def test_unknown_registry_model_is_derived_from_the_newest_real_assistant_record(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    a, b = w.claude(1), w.claude(2)
+    rewrite_model(w, a, 'unknown', [assistant('claude-sonnet-5-5', 1), assistant('claude-opus-5-5', 2), assistant('<synthetic>', 3)])
+    found = w.discover()
+    seats = {c.expected.agent_id: c.seat for c in found.candidates}
+    assert seats[a].execution.model == 'claude-opus-5-5' and found.model_sources[a] == 'transcript'
+    assert seats[b].execution.model == 'claude-x' and found.model_sources[b] == 'registry', 'a real registry value is kept'
+    result = roster_census(found, harness_root=w.harness, cwd_roots=[tmp_path])
+    assert not result.blockers
+
+
+@pytest.mark.parametrize('registry_model', ['unknown', '', None])
+def test_a_model_nobody_can_name_blocks_the_row_instead_of_inventing_one(tmp_path, monkeypatch, registry_model):
+    w = World(tmp_path, monkeypatch)
+    a = w.claude(1)
+    rewrite_model(w, a, registry_model, [assistant('<synthetic>')])
+    found = w.discover()
+    assert found.candidates[0].seat is None and 'model' in found.candidates[0].blocker.remedy.lower()
+
+
+def test_derived_model_never_carries_a_guessed_context_suffix(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    a = w.claude(1)
+    rewrite_model(w, a, 'unknown', [assistant('claude-opus-5-5')])
+    assert '[' not in w.discover().candidates[0].seat.execution.model

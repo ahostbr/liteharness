@@ -66,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--coordinator-handoff', help='save: absolute path of the coordinator (caller) handoff')
     p.add_argument('--include-offline', action='append', default=[], help='save: an offline seat id to include')
     p.add_argument('--keep-shells', action='store_true', help='restore: do not close bare shells afterwards')
+    p.add_argument('--allow-default-model', action='store_true',
+                   help='restore: launch seats whose registry model is unknown on the harness default model')
     p.add_argument('--wait', type=float, default=0, help='poll up to N seconds for a terminal state')
     p.add_argument('--harness-root', help=argparse.SUPPRESS)
     return p
@@ -74,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _request(args, store: CheckpointStore) -> Request:
     if args.dry_run and args.action not in ('save', 'restore'):
         raise ContractError(f'--dry-run applies only to save and restore, not {args.action}')
+    if args.allow_default_model and (args.action != 'restore' or args.dry_run):
+        raise ContractError('--allow-default-model applies only to a real restore, not to save, status, cancel, retry or --dry-run')
     rid = args.request_id or str(uuid4())
     if args.action == 'save':
         return Request(1, 'save', rid, None, None, [], args.dry_run)
@@ -87,13 +91,19 @@ def _request(args, store: CheckpointStore) -> Request:
     return Request(1, 'retry', rid, None, args.operation_id, list(args.seat_id), False)
 
 
-def _preview_save(root: Path, store: CheckpointStore, actor: str, args) -> Result:
+def _preview_save(root: Path, store: CheckpointStore, actor: str, args, labels_out: dict | None = None) -> Result:
     """Roster that WOULD be frozen; nothing is written, asked or compacted."""
     from .checkpoint_roster import discover_current, roster_census
     discovery = discover_current(harness_root=root, include_offline=args.include_offline)
     census = roster_census(discovery, harness_root=root)
     rows = [seat_result(r.expected.agent_id, 'blocked' if r.seat is None else 'preparing', errors=r.blockers)
             for r in census.rows]
+    if labels_out is not None:  # the model discovery RESOLVED, with where it came from, not the registry's value
+        for r in census.rows:
+            if r.seat is not None:
+                s = r.seat
+                labels_out[s.agent_id] = (f'{s.name}  {s.role}  {s.cli}  {s.execution.model} '
+                                          f'({discovery.model_sources.get(s.agent_id, "registry")})  {s.slot.pane if s.slot else "-"}')
     missing = [] if actor in {r.expected.agent_id for r in census.rows} else [
         Blocker('coordinator-missing', None, 'The caller is not a live seat in the registry')]
     return make_result(None, None, 'accepted' if not any(r.state == 'blocked' for r in rows) and not missing
@@ -124,7 +134,7 @@ def resolve_actor(args) -> tuple[str, str | None, bool]:
 
 
 def run(args, *, authorize: Callable = authorize_orchestrator, service: Service | None = None,
-        sleep: Callable[[float], None] = time.sleep) -> Result:
+        sleep: Callable[[float], None] = time.sleep, labels_out: dict | None = None) -> Result:
     root = Path(args.harness_root) if args.harness_root else config.get_root()
     store = CheckpointStore(root)
     service = service or Service(store, root)
@@ -141,7 +151,7 @@ def run(args, *, authorize: Callable = authorize_orchestrator, service: Service 
         return rejected('unauthorized', str(exc))
     if request.dry_run:
         if request.action == 'save':
-            return _preview_save(root, store, actor, args)
+            return _preview_save(root, store, actor, args, labels_out)
         return run_restore(store, None, RestoreParams(str(root), actor, request.checkpoint_id, keep_shells=args.keep_shells,
                                                       dry_run=True), RestoreEnv())
     try:
@@ -155,7 +165,8 @@ def run(args, *, authorize: Callable = authorize_orchestrator, service: Service 
             return rejected('invalid-request', str(exc))
         result = service.submit(request, actor_id=actor, params=params)
     elif request.action == 'restore':
-        params = RestoreParams(str(root), actor, request.checkpoint_id, keep_shells=args.keep_shells).wire()
+        params = RestoreParams(str(root), actor, request.checkpoint_id, keep_shells=args.keep_shells,
+                               allow_default_model=args.allow_default_model).wire()
         result = service.submit(request, actor_id=actor, params=params)
     elif request.action == 'cancel':
         result = service.cancel(request)
@@ -177,7 +188,38 @@ def not_ready_canceled(result: Result) -> bool:
     return result.state == 'canceled' and result.counts.ready < result.counts.expected
 
 
-def render(result: Result) -> str:
+def seat_labels(result: Result, store: CheckpointStore, root: Path) -> dict[str, str]:
+    """`name  role  cli  model  pane` per seat id: from the manifest when the result names one,
+    else from the registry (current, then retired). Display only; the Result is untouched."""
+    labels: dict[str, str] = {}
+    if result.checkpoint_id:
+        try:
+            manifest = store.read_manifest(result.checkpoint_id)
+        except ContractError:
+            manifest = None
+        if manifest:
+            seats = {s.agent_id: s for s in manifest.seats}
+            for e in manifest.expected:
+                s = seats.get(e.agent_id)
+                labels[e.agent_id] = (f'{s.name}  {s.role}  {s.cli}  {s.execution.model}  '
+                                      f'{s.slot.pane if s.slot else "-"}' if s else f'{e.name}  (unresolved)')
+    for seat in result.seats:
+        if seat.seat_id in labels:
+            continue
+        for folder in ('agents', 'retired-agents'):
+            try:
+                row = json.loads((root / folder / f'{seat.seat_id}.json').read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            if isinstance(row, dict) and row.get('name'):
+                labels[seat.seat_id] = (f"{row['name']}  {row.get('role') or row.get('tier') or '-'}  "
+                                        f"{row.get('cli') or '-'}  {row.get('model') or '-'}  {row.get('pane_id') or '-'}")
+                break
+    return labels
+
+
+def render(result: Result, labels: dict[str, str] | None = None) -> str:
+    labels = labels or {}
     c = result.counts
     lines = [f'{result.state.upper()}'
              + (f' operation {result.operation_id}' if result.operation_id else '')
@@ -185,7 +227,7 @@ def render(result: Result) -> str:
              f'  expected {c.expected}  ready {c.ready}  held {c.held}  failed/blocked {c.failed}  unknown {c.unknown}']
     for seat in result.seats:
         detail = '; '.join(f'{e.code}: {e.remedy}' for e in seat.errors)
-        lines.append(f'  {seat.seat_id}  {seat.state}' + (f'  ({detail})' if detail else ''))
+        lines.append(f'  {labels.get(seat.seat_id, seat.seat_id)}  {seat.state}' + (f'  ({detail})' if detail else ''))
     lines += [f'  ! {b.code}: {b.remedy}' for b in result.blockers]
     if result.state in ('incomplete', 'rejected', 'unknown') or not_ready_canceled(result):
         lines.append('REFUSED' if result.state == 'rejected' else 'NOT READY')
@@ -196,6 +238,11 @@ def render(result: Result) -> str:
 
 def main(argv: list[str] | None = None, **kwargs) -> int:
     args = build_parser().parse_args(argv)
-    result = run(args, **kwargs)
-    print(json.dumps(wire(result)) if args.json else render(result))
+    labels: dict[str, str] = {}
+    result = run(args, labels_out=labels, **kwargs)
+    if args.json:
+        print(json.dumps(wire(result)))
+    else:
+        root = Path(args.harness_root) if args.harness_root else config.get_root()
+        print(render(result, {**seat_labels(result, CheckpointStore(root), root), **labels}))
     return 0 if result.state in OK_STATES and not not_ready_canceled(result) else 2

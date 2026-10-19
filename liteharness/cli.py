@@ -79,6 +79,27 @@ def _split_request_body(pane: str | None, agent_id: str, direction: str | None) 
     return body
 
 
+def _pane_aliases(panes: list, hidden: list = ()) -> dict[str, str]:
+    """Every id/syncId/mirrorId a pane is known by -> its ACTIVE pane id.
+
+    Zen mode shows `zen-term-N` (mirrorId `canvas-pane-N`) while presence, callers and the
+    grid_full 409 say `canvas-pane-N` or `sync-canvas-pane-N`. Hidden panes only help resolve
+    an alias to its active mirror; a group with no single active pane maps nothing.
+    """
+    groups: list[tuple[set, set]] = []
+    for row, active in [*((p, True) for p in panes), *((h, False) for h in hidden)]:
+        if not isinstance(row, dict):
+            continue
+        names = {v for k in ("id", "syncId", "mirrorId") if isinstance(v := row.get(k), str) and v}
+        actives = {row["id"]} if active and isinstance(row.get("id"), str) else set()
+        for group in [g for g in groups if g[0] & names]:
+            groups.remove(group)
+            names |= group[0]
+            actives |= group[1]
+        groups.append((names, actives))
+    return {name: next(iter(actives)) for names, actives in groups if len(actives) == 1 for name in names}
+
+
 def _place_split(pane: str | None, agent_id: str, direction: str | None,
                  *, cwd: str, launch: dict | None = None, exclude_panes=()) -> dict:
     """Place one --split launch, not one per backend.
@@ -152,22 +173,7 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
     excluded = {p for p in (*exclude_panes, *os.environ.get("LITEHARNESS_EXCLUDE_PANES", "").split(",")) if p}
 
     def alias_map(panes):
-        """Every id/syncId/mirrorId a pane is known by -> its ACTIVE pane id.
-
-        Zen mode shows `zen-term-N` (mirrorId `canvas-pane-N`) while presence, callers and the
-        grid_full 409 say `canvas-pane-N` or `sync-canvas-pane-N`. Hidden panes only help resolve
-        an alias to its active mirror; a group with no single active pane maps nothing.
-        """
-        groups: list[tuple[set, set]] = []
-        for row, active in [*((p, True) for p in panes), *((h, False) for h in hidden)]:
-            names = {v for k in ("id", "syncId", "mirrorId") if isinstance(v := row.get(k), str) and v}
-            actives = {row["id"]} if active else set()
-            for group in [g for g in groups if g[0] & names]:
-                groups.remove(group)
-                names |= group[0]
-                actives |= group[1]
-            groups.append((names, actives))
-        return {name: next(iter(actives)) for names, actives in groups if len(actives) == 1 for name in names}
+        return _pane_aliases(panes, hidden)
 
     def candidates(panes):
         alias = alias_map(panes)

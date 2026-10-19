@@ -82,3 +82,35 @@ def record_registered_name(presence: dict) -> None:
     native_id, cwd, _ = transcript_identity(presence)
     agent_names.record_name(presence['name'], presence['agent_id'], native_id, cwd,
                             backend='claude', model=presence.get('model'))
+
+
+def real_model(value) -> str | None:
+    """A registry/index model that names a model: None for missing, empty or the literal 'unknown'."""
+    if not isinstance(value, str) or not value.strip() or value.strip().lower() == 'unknown':
+        return None
+    return value.strip()
+
+
+def transcript_model(path: Path) -> str | None:
+    """The newest assistant record's message.model, skipping '<synthetic>'.
+
+    Base model only: the transcript carries no context-window suffix and nothing here guesses one.
+    """
+    found = None
+    try:
+        with Path(path).open(encoding='utf-8') as stream:
+            for line in stream:
+                if '"assistant"' not in line or '"model"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict) or event.get('type') != 'assistant':
+                    continue
+                model = (event.get('message') or {}).get('model')
+                if isinstance(model, str) and model and model != '<synthetic>':
+                    found = model
+    except (OSError, UnicodeError):
+        return None
+    return found

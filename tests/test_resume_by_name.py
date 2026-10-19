@@ -531,3 +531,14 @@ def _index_diagnostic(project, **kw):
         str(project.resolve()), 'codex', 'gpt-6-sol', kw.get('takeover', False),
         data_root=resolution.get('liteTuiDataRoot'))
     print('33333333-3333-4333-8333-333333333333')
+
+
+@pytest.mark.parametrize("recorded", ["unknown", "", None])
+def test_claude_resume_never_passes_an_unknown_model(claude_world, monkeypatch, recorded):
+    """11 of 25 live Claude registry rows say model 'unknown'; --model unknown is not a model."""
+    from liteharness import recovered_destination
+    monkeypatch.setattr(recovered_destination, "recover_if_reserved", lambda *a, **k: False)  # no reserved slot
+    root, project, spawn, launches = claude_world
+    agent_names.record_name(NAME, AID, CID, str(project), backend="claude", model=recorded)
+    spawn(split_mode=True, resume_agent_id=NAME.lower(), tier="worker", spawned_by="leader-1")
+    assert launches[0]["model"] is None

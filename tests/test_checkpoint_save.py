@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -18,6 +19,7 @@ T0 = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
 class Clock:
     def __init__(self):
         self.t = T0
+        self.on_sleep = None
 
     def now(self):
         self.t += timedelta(seconds=1)
@@ -25,6 +27,8 @@ class Clock:
 
     def sleep(self, seconds):
         self.t += timedelta(seconds=seconds)
+        if self.on_sleep:
+            self.on_sleep()
 
 
 class Fleet:
@@ -36,6 +40,17 @@ class Fleet:
         self.silent, self.bad_path, self.compact_rc = set(), set(), 0
         self.handoffs, self.disposition = {}, {}
         self.litetui_calls = []
+        self.compact_delay = 0  # seconds until an ASYNC compactor's boundary lands; 0 = inside run()
+        self.pending = {}
+
+    def flush_due(self):
+        for agent_id, due in list(self.pending.items()):
+            if self.clock.t >= due:
+                del self.pending[agent_id]
+                transcript = next(self.w.projects.glob(f'*/{agent_id}.jsonl'))
+                with transcript.open('a', encoding='utf-8') as stream:
+                    stream.write(json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': uid(9100),
+                                             'timestamp': self.clock.t.isoformat()}) + chr(10))
 
     def handoff_for(self, agent_id):
         path = self.w.tmp / f'handoff-{agent_id[-4:]}.md'
@@ -58,6 +73,9 @@ class Fleet:
     def run(self, argv, timeout):
         self.ran.append(argv)
         agent_id = argv[-1]
+        if self.compact_delay and self.compact_rc == 0:
+            self.pending[agent_id] = self.clock.t + timedelta(seconds=self.compact_delay)  # returns at once, like self_compact
+            return 0
         transcript = next(self.w.projects.glob(f'*/{agent_id}.jsonl'))
         with transcript.open('a', encoding='utf-8') as stream:
             stream.write(json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': uid(9000),
@@ -80,6 +98,7 @@ def world(tmp_path, monkeypatch):
     w = World(tmp_path, monkeypatch)
     w.clock = Clock()
     w.fleet = Fleet(w, w.clock)
+    w.clock.on_sleep = w.fleet.flush_due
     return w
 
 
@@ -98,7 +117,8 @@ def compacted(w, agent_id, handoff):
                                  'timestamp': (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()}) + '\n')
 
 
-def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=800, layout='present'):
+def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=800, layout='present',
+         compact_command=None, compact_timeout=900.0):
     put(w.harness / 'names.json', w.names)
     store = CheckpointStore(w.harness)
     request = Request(1, 'save', uid(op), None, None, [], False)
@@ -110,8 +130,8 @@ def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=8
         layout_value = ('rev-1', leaves)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=fleet.send, poll=fleet.poll, run=fleet.run,
                   litetui=fleet.litetui, layout=lambda: layout_value, live=lambda row: row['agent_id'] in w.live,
-                  handoff_timeout=30, poll_interval=1,
-                  compact_command=['compact-tool', '{name}', '{agent_id}'] if compact else None)
+                  handoff_timeout=30, poll_interval=1, compact_timeout=compact_timeout,
+                  compact_command=(compact_command or ['compact-tool', '{name}', '{agent_id}']) if compact else None)
     params = SaveParams(str(w.harness), coord, str(handoff), uid(850 + op - 800),
                         include_offline=list(include_offline), litetui_root=str(w.owned_root), cwd_roots=[str(w.tmp)])
     result = run_save(store, operation.operation_id, params, env, only=only)
@@ -343,3 +363,201 @@ def test_missing_coordinator_or_handoff_is_refused_before_anything_is_written(wo
     with pytest.raises(Exception, match='Coordinator is not a live seat'):
         save(w, uid(404), handoff)
     assert not (w.harness / 'sessions' / 'checkpoints' / uid(850)).exists()
+
+
+def test_a_model_derived_from_the_transcript_is_labelled_in_the_journal(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    row_path = w.harness / 'agents' / f'{peer}.json'
+    row = json.loads(row_path.read_text())
+    row['model'] = 'unknown'
+    row_path.write_text(json.dumps(row))
+    transcript = next(w.projects.glob(f'*/{peer}.jsonl'))
+    with transcript.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'type': 'assistant', 'message': {'model': 'claude-opus-5-5'}}) + chr(10))
+    compacted(w, coord, handoff)
+    store, params, result, op = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert next(s for s in manifest.seats if s.agent_id == peer).execution.model == 'claude-opus-5-5'
+    stages = [e.stage for e in store.operation(op.operation_id).events]
+    assert f'model-source seat={peer} source=transcript model=claude-opus-5-5' in stages
+    assert not any(st.startswith('model-source') and coord in st for st in stages), 'registry-sourced models are not noted'
+
+
+# -- round 5: F3 the only real compactor is asynchronous ----------------------------------------------------------
+
+def test_an_async_compactor_is_polled_until_the_boundary_lands(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    w.fleet.compact_delay = 45
+    compacted(w, coord, handoff)
+    started = w.clock.t
+    store, params, result, _ = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert manifest.state == 'complete' and not manifest.blockers
+    assert len(w.fleet.ran) == 1, 'the compactor ran once; the save polled for its effect'
+    assert (w.clock.t - started).total_seconds() >= 45
+
+
+def test_an_async_compactor_that_never_lands_is_compact_unobserved_after_the_timeout(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    w.fleet.compact_delay = 100_000
+    compacted(w, coord, handoff)
+    started = w.clock.t
+    store, params, result, _ = save(w, coord, handoff, compact_timeout=60)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert [(b.seat_id, b.code) for b in manifest.blockers] == [(peer, 'compact-unobserved')]
+    assert 60 <= (w.clock.t - started).total_seconds() < 400
+
+
+def test_a_failing_compactor_stops_at_once_without_polling(world):
+    w = world
+    coord, handoff = coordinator(w)
+    w.claude(2, parent=coord)
+    w.fleet.compact_rc = 3
+    compacted(w, coord, handoff)
+    slept = []
+    w.clock.on_sleep = lambda: slept.append(1)
+    store, params, result, _ = save(w, coord, handoff)
+    assert [b.code for b in store.read_manifest(params.checkpoint_id).blockers] == ['compact-failed']
+    assert slept == [] or len(slept) < 40, 'only the handoff wait sleeps; no compaction polling'
+
+
+def test_compact_command_placeholders_include_the_checkpoint_and_the_seats_handoff(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    compacted(w, coord, handoff)
+    store, params, result, _ = save(w, coord, handoff,
+                                    compact_command=['compactor', '--pointer', 'read {handoff} for {checkpoint_id}', '--name', '{name}', '{agent_id}'])
+    argv = w.fleet.ran[0]
+    assert argv[2] == f'read {w.tmp / ("handoff-" + peer[-4:] + ".md")} for {params.checkpoint_id}'
+    assert argv[-1] == peer
+
+
+# -- round 6: L-A cancel in the poll, L-B devnull, abandonment, tail-only reads ------------------------------------
+
+def test_cancel_is_honoured_inside_the_compaction_poll(world):
+    w = world
+    coord, handoff = coordinator(w)
+    w.claude(2, parent=coord)
+    w.fleet.compact_delay = 100_000
+    compacted(w, coord, handoff)
+    put(w.harness / 'names.json', w.names)
+    store = CheckpointStore(w.harness)
+    operation = store.submit(Request(1, 'save', uid(803), None, None, [], False), actor_id=coord)
+    env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
+                  layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}), live=lambda row: row['agent_id'] in w.live,
+                  handoff_timeout=30, poll_interval=1, compact_timeout=900, compact_command=['compact-tool', '{name}', '{agent_id}'])
+    params = SaveParams(str(w.harness), coord, str(handoff), uid(853), litetui_root=str(w.owned_root), cwd_roots=[str(w.tmp)])
+    flag = {'cancel': False}
+    started = w.clock.t
+
+    def sleeper():
+        if (w.clock.t - started).total_seconds() > 100:
+            flag['cancel'] = True
+    w.clock.on_sleep = sleeper
+
+    class Cancelling(Saver):
+        def cancelled(self):
+            return flag['cancel']
+    result = Cancelling(store, params, env, operation.operation_id).run()
+    assert result.state == 'canceled'
+    assert (w.clock.t - started).total_seconds() < 300, 'it did not wait out the 900 s timeout'
+
+
+def test_the_compactor_runs_with_stdio_detached_and_nothing_captured(monkeypatch):
+    from liteharness import checkpoint_save
+    seen = {}
+
+    def fake(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(subprocess, 'run', fake)
+    checkpoint_save._run(['compactor'], 5)
+    assert seen['stdin'] == seen['stdout'] == seen['stderr'] == subprocess.DEVNULL and not seen.get('capture_output')
+
+
+def test_three_consecutive_seat_timeouts_abandon_the_rest_of_the_compaction_phase(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peers = [w.claude(n, parent=coord) for n in (2, 3, 4, 5, 6)]
+    w.fleet.compact_delay = 100_000
+    compacted(w, coord, handoff)
+    started = w.clock.t
+    store, params, result, _ = save(w, coord, handoff, compact_timeout=60)
+    manifest = store.read_manifest(params.checkpoint_id)
+    codes = {b.seat_id: b.code for b in manifest.blockers}
+    assert len(w.fleet.ran) == 3, 'the compactor stopped being called after three timeouts in a row'
+    assert [codes[p] for p in peers[:3]] == ['compact-unobserved'] * 3
+    assert [codes[p] for p in peers[3:]] == ['compaction-abandoned'] * 2
+    assert (w.clock.t - started).total_seconds() < 5 * 60 + 100
+
+
+def test_a_landed_boundary_resets_the_timeout_streak(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peers = [w.claude(n, parent=coord) for n in (2, 3, 4, 5, 6)]
+    compacted(w, coord, handoff)
+    order = iter([100_000, 100_000, 0, 100_000, 100_000])  # t, t, ok, t, t: never three in a row
+    real_run = w.fleet.run
+
+    def run(argv, timeout):
+        w.fleet.compact_delay = next(order)
+        return real_run(argv, timeout)
+    w.fleet.run = run
+    store, params, result, _ = save(w, coord, handoff, compact_timeout=30)
+    assert len(w.fleet.ran) == 5
+    assert 'compaction-abandoned' not in [b.code for b in store.read_manifest(params.checkpoint_id).blockers]
+
+
+def test_the_watch_reads_only_new_bytes_and_survives_a_split_line(tmp_path):
+    from liteharness.checkpoint_save import CompactionWatch
+    log = tmp_path / 't.jsonl'
+    old = json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'old', 'timestamp': '2020-01-01T00:00:00+00:00'})
+    log.write_text(old + chr(10) + '{"type":"user"}' + chr(10), encoding='utf-8')
+    watch = CompactionWatch(log, datetime(2019, 1, 1, tzinfo=timezone.utc))
+    assert watch.poll() is None, 'a boundary written before the compactor ran is not its boundary'
+    fresh = json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'new', 'timestamp': '2026-10-19T12:00:00+00:00'})
+    with log.open('a', encoding='utf-8') as stream:
+        stream.write(fresh[:30])
+        stream.flush()
+        assert watch.poll() is None, 'half a record is not a record'
+        stream.write(fresh[30:] + chr(10))
+    assert watch.poll()['uuid'] == 'new'
+    assert watch.offset > len(old), 'it advanced past what it already read'
+
+
+# -- round 7 self-review ---------------------------------------------------------------------------------------------
+
+def test_a_hung_compactor_counts_toward_the_abandon_streak(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peers = [w.claude(n, parent=coord) for n in (2, 3, 4, 5, 6)]
+    compacted(w, coord, handoff)
+
+    def hangs(argv, timeout):
+        w.fleet.ran.append(argv)
+        w.clock.sleep(timeout)  # the OS killed it at the timeout
+        raise subprocess.TimeoutExpired(argv, timeout)
+    w.fleet.run = hangs
+    store, params, result, _ = save(w, coord, handoff, compact_timeout=60)
+    codes = {b.seat_id: b.code for b in store.read_manifest(params.checkpoint_id).blockers}
+    assert len(w.fleet.ran) == 3, 'a compactor that never returns is abandoned after three, like a silent one'
+    assert [codes[p] for p in peers[:3]] == ['compact-unobserved'] * 3
+    assert [codes[p] for p in peers[3:]] == ['compaction-abandoned'] * 2
+
+
+def test_the_watch_restarts_from_the_top_when_the_transcript_shrinks(tmp_path):
+    from liteharness.checkpoint_save import CompactionWatch
+    log = tmp_path / 't.jsonl'
+    log.write_text('{"type":"user"}' + chr(10) * 1 + 'x' * 500 + chr(10), encoding='utf-8')
+    watch = CompactionWatch(log, datetime(2019, 1, 1, tzinfo=timezone.utc))
+    assert watch.offset > 400
+    fresh = json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'n', 'timestamp': '2026-10-19T12:00:00+00:00'})
+    log.write_text(fresh + chr(10), encoding='utf-8')  # replaced by a shorter, rewritten file
+    assert watch.poll()['uuid'] == 'n'

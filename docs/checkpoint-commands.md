@@ -91,3 +91,10 @@ the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
 - The shell summary (`N bare shells found, M matched a saved leaf, K closed`) is a journal line on a real
   run (stage `shell-summary`) and an informational `shell-summary` blocker on a dry run; the Result
   contract has no note field, so a final result cannot carry it without turning `complete` into `incomplete`.
+- Model gating (`model-mismatch`) compares BASE models only. A seat that was on a 1M window while the harness
+  default is the same base model at 200k is not caught, and neither is a different default `--effort`.
+- A registry model that is real but stale (the user switched models with `/model` after registering) is resumed
+  on the registry model, not on what the transcript last ran.
+- Cancel is not checked while a compact command is executing (up to `compact_timeout`); it is checked in the
+  poll that follows, and between seats. A compactor that never returns counts as a timeout and, three in a
+  row, abandons the compaction phase.

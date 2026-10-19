@@ -525,3 +525,88 @@ def test_a_sequence_collision_is_retried_because_the_sequence_is_reread_each_att
     OperationLog(svc.store, first.operation_id, sleep=lambda s: None).event('plan', None, None)
     stages = [e.stage for e in svc.store.operation(first.operation_id).events]
     assert stages == ['other-writer', 'plan'] and seen == [0, 1]
+
+
+# -- round 5: F4 an operator reads names, not ids ---------------------------------------------------------------
+
+def test_human_output_names_each_seat_with_role_cli_model_and_pane_while_json_is_unchanged(svc, capsys, monkeypatch):
+    monkeypatch.setattr('liteharness.checkpoint_restore._model_known', lambda agent_id: True)
+    code = checkpoint_cli.main(['restore', '--checkpoint-id', CID, '--dry-run', '--actor-id', COORD,
+                                '--harness-root', str(svc.harness_root)])
+    text = capsys.readouterr().out
+    row = next(line for line in text.splitlines() if 'Seat-2' in line)
+    assert 'builder' in row and 'claude' in row and 'claude-x' in row and ('preparing' in row or 'starting' in row)
+    assert uid(2) not in row, 'the id is not the label'
+    capsys.readouterr()
+    checkpoint_cli.main(['restore', '--checkpoint-id', CID, '--dry-run', '--actor-id', COORD, '--json',
+                         '--harness-root', str(svc.harness_root)])
+    printed = json.loads(capsys.readouterr().out)
+    assert 'Seat-2' not in json.dumps(printed) and printed['seats'][0]['seat_id']
+
+
+def test_the_label_includes_the_saved_pane_and_the_blocker_text(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr('liteharness.checkpoint_restore._model_known', lambda agent_id: True)
+    root = tmp_path / 'harness'
+    root.mkdir()
+    store = CheckpointStore(root)
+    store.publish(manifest(tmp_path, [seat(2, root=tmp_path, pane='pane-9')], unresolved=[7]), authorized_reference_roots=[tmp_path])
+    checkpoint_cli.main(['restore', '--checkpoint-id', CID, '--dry-run', '--actor-id', COORD, '--harness-root', str(root)])
+    text = capsys.readouterr().out
+    assert 'pane-9' in next(line for line in text.splitlines() if 'Seat-2' in line)
+    unresolved = next(line for line in text.splitlines() if 'Seat-7' in line)
+    assert 'unresolved-in-checkpoint' in unresolved
+
+
+def test_a_save_dry_run_labels_seats_from_the_registry(tmp_path, monkeypatch, capsys):
+    from liteharness import config
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    from checkpoint_world import World
+    w = World(tmp_path, monkeypatch)
+    w.harness = tmp_path
+    agent = w.claude(5, role='builder')
+    monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
+    checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
+    text = capsys.readouterr().out
+    row = next(line for line in text.splitlines() if 'Claude-5' in line)
+    assert 'pane-5' in row and 'claude' in row
+
+
+def test_allow_default_model_is_restore_only_and_never_a_dry_run_flag(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
+    for argv in (['save', '--allow-default-model', '--coordinator-handoff', str(svc.harness_root / 'h.md')],
+                 ['status', '--allow-default-model'],
+                 ['restore', '--checkpoint-id', CID, '--dry-run', '--allow-default-model']):
+        result = checkpoint_cli.run(cli_args(*argv, '--actor-id', COORD, root=svc.harness_root),
+                                    authorize=lambda a, l, r: a, service=svc)
+        assert result.state == 'rejected' and result.blockers[0].code == 'invalid-request'
+        assert 'allow-default-model' in result.blockers[0].remedy
+
+
+def test_allow_default_model_reaches_the_restore_params(svc, monkeypatch):
+    monkeypatch.setenv('LITESUITE_LEAF_ID', 'leaf-1')
+    args = cli_args('restore', '--checkpoint-id', CID, '--allow-default-model', '--request-id', uid(750),
+                    '--actor-id', COORD, root=svc.harness_root)
+    result = checkpoint_cli.run(args, authorize=lambda a, l, r: a, service=svc)
+    assert result.state == 'accepted' and read_params(svc.store, result.operation_id)['allow_default_model'] is True
+
+
+def test_save_dry_run_shows_the_resolved_model_and_its_source_not_the_registry_value(tmp_path, monkeypatch, capsys):
+    from liteharness import config
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    from checkpoint_world import World
+    w = World(tmp_path, monkeypatch)
+    w.harness = tmp_path
+    unknown, real = w.claude(5), w.claude(6)
+    row_path = tmp_path / 'agents' / f'{unknown}.json'
+    row = json.loads(row_path.read_text())
+    row['model'] = 'unknown'
+    row_path.write_text(json.dumps(row))
+    transcript = next(w.projects.glob(f'*/{unknown}.jsonl'))
+    with transcript.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'type': 'assistant', 'message': {'model': 'claude-opus-5-5'}}) + chr(10))
+    monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
+    checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
+    text = capsys.readouterr().out
+    assert 'claude-opus-5-5 (transcript)' in next(line for line in text.splitlines() if 'Claude-5' in line)
+    six = next(line for line in text.splitlines() if 'Claude-6' in line)
+    assert 'claude-x (registry)' in six and 'claude  unknown' not in text
