@@ -58,3 +58,5 @@ liteharness/catalog/skills/ls-arch-opus/
 # ls-arch-gen is public and is NOT excluded here (see PUBLIC_SKILLS).
 liteharness/catalog/skills/ls-arch/
 liteharness/catalog/skills/ls-arch-fable/
+# paste_history hook state (written into each seat's cwd; blocks git worktree remove)
+.litesuite/theater/pastes/
