@@ -75,7 +75,7 @@ class Box:
                     pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
                     close_leaf=lambda leaf: self.closed.append(leaf) or True,
                     has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
-                    send_mail=self.mail, wake=self.wake,
+                    send_mail=self.mail, wake=self.wake, model_known=lambda a: True,
                     process_name=lambda pid: self.proc_names.get(pid, 'powershell.exe'),
                     verify_timeout=5, poll_interval=1)
         return RestoreEnv(**{**base, **kw})
@@ -851,3 +851,15 @@ def test_an_exited_row_whose_shell_now_runs_something_is_not_dead(tmp_path, monk
            'canvas_session_id': 'pty-7', 'exited_at': '2026-10-19T00:00:00+00:00'}
     monkeypatch.setattr(mod, '_has_children', lambda pid: children)
     assert default_world(tmp_path, monkeypatch, row, [{'id': 'pty-7', 'pid': 55}]) == expected
+
+
+# -- round 5: F2 restore never passes an unknown model ----------------------------------------------------------
+
+def test_restore_never_passes_model_and_notes_a_seat_whose_model_is_unconfirmed(tmp_path, box):
+    s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, s3]))
+    result = run_restore(store, op, params, box.env(model_known=lambda agent_id: agent_id != s2.agent_id))
+    assert all('--model' not in argv and 'unknown' not in ' '.join(argv) for argv, _ in box.calls)
+    notes = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('model-unconfirmed')]
+    assert notes == [f'model-unconfirmed seat={s2.agent_id}: resumed without --model']
+    assert result.state == 'complete', 'a non-blocking note never changes the outcome'

@@ -195,6 +195,7 @@ class Saver:
         self.mailbox = f'checkpoint-{operation_id}'
         self._last = env.now()
         self.layout = None  # (revision, leaf ids) as frozen; None until freeze() or when unobserved
+        self.model_sources: dict[str, str] = {}  # agent id -> 'registry' | 'transcript', from discovery
         self.prepared: list[str] = []  # LiteTUI seats THIS save put on hold: the only holds it may release
 
     def tick(self) -> datetime:
@@ -211,6 +212,7 @@ class Saver:
                                      layout_revision=self.layout[0] if self.layout else 'unobserved',
                                      live=env.live)
         census = roster_census(discovery, harness_root=params.harness_root, cwd_roots=params.cwd_roots)
+        self.model_sources = dict(discovery.model_sources)
         if params.coordinator_id not in {r.expected.agent_id for r in census.rows}:
             raise ContractError('Coordinator is not a live seat in the registry; nothing was saved')
         handoff = checked_path(params.coordinator_handoff)
@@ -419,6 +421,10 @@ class Saver:
         except ContractError:
             manifest = self.freeze()
         self.log.event('roster-frozen', None, self.report(manifest, 'running'))
+        for seat in manifest.seats:  # a model the registry could not name: say where it came from
+            if self.model_sources.get(seat.agent_id) == 'transcript':
+                self.log.event(f'model-source seat={seat.agent_id} source=transcript model={seat.execution.model}',
+                               seat.agent_id, None)
         roots = reference_roots(self.store, self.params, manifest.seats)
         todo = [s for s in manifest.seats if only is None or s.agent_id in only]
         peers = [s for s in todo if s.agent_id != manifest.coordinator.agent_id]

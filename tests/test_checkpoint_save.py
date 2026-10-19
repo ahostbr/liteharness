@@ -343,3 +343,23 @@ def test_missing_coordinator_or_handoff_is_refused_before_anything_is_written(wo
     with pytest.raises(Exception, match='Coordinator is not a live seat'):
         save(w, uid(404), handoff)
     assert not (w.harness / 'sessions' / 'checkpoints' / uid(850)).exists()
+
+
+def test_a_model_derived_from_the_transcript_is_labelled_in_the_journal(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    row_path = w.harness / 'agents' / f'{peer}.json'
+    row = json.loads(row_path.read_text())
+    row['model'] = 'unknown'
+    row_path.write_text(json.dumps(row))
+    transcript = next(w.projects.glob(f'*/{peer}.jsonl'))
+    with transcript.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'type': 'assistant', 'message': {'model': 'claude-opus-5-5'}}) + chr(10))
+    compacted(w, coord, handoff)
+    store, params, result, op = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert next(s for s in manifest.seats if s.agent_id == peer).execution.model == 'claude-opus-5-5'
+    stages = [e.stage for e in store.operation(op.operation_id).events]
+    assert f'model-source seat={peer} source=transcript model=claude-opus-5-5' in stages
+    assert not any(st.startswith('model-source') and coord in st for st in stages), 'registry-sourced models are not noted'

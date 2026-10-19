@@ -183,6 +183,9 @@ class RestoreEnv:
     process_name: Callable[[int], str | None] = _process_name
     # Whether another operation's worker is still running, and how long since it last wrote its
     # journal. None = the real answer (the service's worker record, the journal file's mtime).
+    # False when the seat's registry model is unknown: it is then resumed WITHOUT --model. Real
+    # answer by default (current row, else the retired one).
+    model_known: Callable[[str], bool] = lambda agent_id: _model_known(agent_id)
     operation_active: Callable | None = None
     journal_age: Callable | None = None
     spawn_timeout: float = SPAWN_TIMEOUT
@@ -211,6 +214,12 @@ def _wake(session_id: str, line: str) -> str:
             raise RuntimeError('pty/write refused')
     return cli._deliver_prompt(write, lambda: cli._turn_seen_since('canvas_session_id', session_id, started),
                                Path(os.devnull).parent / 'no-brief-for-a-resumed-seat', line, line, 0)
+
+
+def _model_known(agent_id: str) -> bool:
+    from .claude_identity import real_model
+    from .resume_seat import _registry
+    return real_model(_registry(agent_id).get('model')) is not None
 
 
 def _read_registry(agent_id: str) -> dict | None:
@@ -622,6 +631,8 @@ class Restorer:
                 continue
             if self.cancelled():
                 break
+            if not env.model_known(seat.agent_id):  # non-blocking: resume carries no --model for it
+                self.journal(f'model-unconfirmed seat={seat.agent_id}: resumed without --model', seat.agent_id, None)
             self.states[row.seat_id] = 'starting'
             outcome = self.launch(seat, excluded)
             self.states[row.seat_id] = outcome

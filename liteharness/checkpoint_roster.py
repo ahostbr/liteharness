@@ -7,7 +7,7 @@ whose contract cannot be built stays in the denominator as a blocked row.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 from typing import Callable
@@ -37,6 +37,7 @@ class Candidate:
 class Discovery:
     candidates: list[Candidate]
     skipped: list[tuple[str, str]]  # (registry stem, why): never a seat, never silently shrunk
+    model_sources: dict[str, str] = field(default_factory=dict)  # agent id -> 'registry' | 'transcript'
 
 
 def claude_projects_root() -> Path:
@@ -73,15 +74,20 @@ def _owner_profile(role: str, name: str, directory: Path) -> OwnerProfile | None
     return OwnerProfile(name, str(directory)) if role == 'owner' else None
 
 
-def _claude_seat(row: dict, base: dict, selection: str, layout_revision: str) -> Seat:
-    from .claude_identity import transcript_identity
+def _claude_seat(row: dict, base: dict, selection: str, layout_revision: str, sources: dict) -> Seat:
+    from .claude_identity import real_model, transcript_identity, transcript_model
     try:
         native_id, cwd, transcript = transcript_identity(row)
     except ValueError as exc:
         raise ContractError(f'Claude launch contract unresolved: {exc}') from exc
-    model = row.get('model')
-    if not isinstance(model, str) or not model.strip():
-        raise ContractError('Claude registry row has no model')
+    model = real_model(row.get('model'))
+    sources[base['agent_id']] = 'registry'
+    if model is None:  # 11 of 25 live rows said 'unknown'; the transcript knows what actually ran
+        model = transcript_model(transcript)
+        sources[base['agent_id']] = 'transcript'
+    if model is None:
+        sources.pop(base['agent_id'], None)
+        raise ContractError('Claude model is unknown in the registry and absent from the transcript')
     return Seat(
         conversation_id=native_id, cli='claude',
         execution=Execution('claude', model, row.get('thinking_level') or UNRECORDED_THINKING),
@@ -179,6 +185,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
             root = None
     excluded = set(exclude_ids)
     candidates = []
+    sources: dict[str, str] = {}
     for agent_id, row, selection in rows:
         if agent_id in excluded:
             continue
@@ -199,7 +206,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
             if roles.normalize_role(role) is None:
                 raise ContractError('Unknown seat role')
             if cli_name == 'claude':
-                seat = _claude_seat(row, base, selection, layout_revision)
+                seat = _claude_seat(row, base, selection, layout_revision, sources)
             elif cli_name == 'litetui':
                 seat = _litetui_seat(row, base, selection, layout_revision, root, index)
             else:
@@ -212,7 +219,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
             candidates.append(Candidate(expected, None, Blocker('seat-unresolved', agent_id,
                                                                 f'{detail}; reconcile source evidence')))
     candidates.sort(key=lambda c: c.expected.name.casefold())
-    return Discovery(candidates, skipped)
+    return Discovery(candidates, skipped, sources)
 
 
 def default_cwd_roots(seats: list[Seat]) -> list[Path]:

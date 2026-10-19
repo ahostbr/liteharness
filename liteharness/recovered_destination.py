@@ -14,6 +14,8 @@ import sys
 from contextlib import redirect_stdout
 from urllib.parse import urlencode
 
+from .claude_identity import real_model
+
 _active = ContextVar('recovered_destination', default=None)
 
 
@@ -132,11 +134,11 @@ def prepare(agent_id, cwd, conversation_id=None):
             raise ValueError('No owned LiteTUI or native Claude authority for target')
         from .claude_identity import transcript_identity
         native_id, original, transcript = transcript_identity(row, native_id=conversation_id, cwd=cwd)
-        if Path(original).resolve() != Path(cwd).resolve() or not row.get('name') or not row.get('model'):
-            raise ValueError('Claude original cwd/name/model authority unavailable')
+        if Path(original).resolve() != Path(cwd).resolve() or not row.get('name'):
+            raise ValueError('Claude original cwd/name authority unavailable')
         descriptor = {'cli': 'claude', 'agentId': agent_id, 'name': row['name'], 'conversationId': native_id,
                       'cwd': original, 'transcript': str(transcript), 'role': role,
-                      'backend': 'claude', 'model': row['model'], 'thinking_level': row.get('thinking_level'),
+                      'backend': 'claude', 'model': real_model(row.get('model')), 'thinking_level': row.get('thinking_level'),
                       'cognitive': row.get('cognitive')}
     descriptor['launchParent'] = row.get('spawned_by')
     descriptor['authorityFingerprint'] = hashlib.sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
@@ -210,7 +212,8 @@ def launch_native_claude(entry, role):
         except psutil.AccessDenied as exc:
             raise ValueError('Native Claude owner process is inaccessible') from exc
     result = cli._bridge_request('POST', '/harness/spawn/resolve', {
-        'cli': 'claude', 'name': entry['name'], 'tier': roles.wire_tier(role), 'cwd': entry['cwd'], 'model': entry['model'],
+        'cli': 'claude', 'name': entry['name'], 'tier': roles.wire_tier(role), 'cwd': entry['cwd'],
+        **({'model': entry['model']} if entry.get('model') else {}),
         **({'cognitive': previous['cognitive']} if previous.get('cognitive') else {}),
     })
     if not isinstance(result, dict) or result.get('ok') is not True:

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from . import config, roles
+from .claude_identity import real_model
 
 
 def _convo_root() -> Path:
@@ -181,7 +182,7 @@ def _spawn_claude_resume(entry: dict, *, convo_id: str | None, cwd: str | None,
     # Clearing the native resume fields avoids recursing back into this dispatcher.
     cli.cmd_spawn(spawn_cli="claude", split_mode=True, split_pane=pane,
                   split_direction=direction, cwd=str(working_dir), name=entry["name"],
-                  model=model or entry.get("model"), tier=tier or roles.normalize_role(registry.get("role") or registry.get("tier")),
+                  model=model or real_model(entry.get("model")), tier=tier or roles.normalize_role(registry.get("role") or registry.get("tier")),
                   spawned_by=spawned_by if spawned_by is not None else registry.get("spawned_by"),
                   prompt=prompt, cognitive=cognitive, additional_args=f"--resume {session_id}",
                   resume_harness_id=entry["agent_id"])
@@ -292,7 +293,7 @@ def spawn_resume(*, agent_id: str | None, convo_id: str | None, pane: str | None
             from .claude_identity import transcript_identity
             native_id, original_cwd, _ = transcript_identity(registry)
             entry = dict(name=registry.get('name'), agent_id=agent_id, convo_id=native_id,
-                         cwd=original_cwd, backend='claude', model=registry.get('model'))
+                         cwd=original_cwd, backend='claude', model=real_model(registry.get('model')))
             if not isinstance(entry['name'], str) or not entry['name'].strip():
                 raise ValueError('Claude registry has no resolved name')
     if entry is not None and kill_old:
