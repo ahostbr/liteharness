@@ -423,3 +423,43 @@ def test_excluded_canvas_alias_bars_its_zen_mirror(world, monkeypatch):
     monkeypatch.setenv("LITEHARNESS_EXCLUDE_PANES", "canvas-pane-1")
     spawn(world)
     assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def as_orchestrator(world):
+    path = world["root"] / "agents/caller.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "role": "orchestrator"}))
+
+
+def test_orchestrator_caller_skips_its_own_pane_for_fleet(world):
+    as_orchestrator(world)
+    spawn(world)
+    assert placements(world)[0][1]["paneId"] == "fleet"
+
+
+def test_orchestrator_with_room_only_in_its_own_pane_gets_a_new_pane(world):
+    as_orchestrator(world)
+    world["panes"] = [pane("other", 8), pane("fleet", 8), pane("own", 2)]
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def test_orchestrator_explicit_own_pane_is_still_honoured(world):
+    as_orchestrator(world)
+    spawn(world, split_pane="self")
+    assert placements(world)[0][1]["paneId"] == "own"
+
+
+def test_orchestrator_own_pane_is_resolved_through_aliases(world):
+    as_orchestrator(world)
+    world["panes"] = [pane("other", 8), pane("fleet", 8), {**pane("zen-term-9", 2, "caller-pty"), "mirrorId": "canvas-pane-9"}]
+    path = world["root"] / "agents/caller.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "pane_id": "canvas-pane-9", "canvas_session_id": "stale"}))
+    spawn(world)
+    assert [path for path, _ in placements(world)] == ["/pty/create"]
+
+
+def test_non_orchestrator_caller_keeps_its_own_pane_first(world):
+    path = world["root"] / "agents/caller.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), "role": "builder"}))
+    spawn(world)
+    assert placements(world)[0][1]["paneId"] == "own"

@@ -170,6 +170,9 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
         def resolve(ident):
             return alias.get(ident, ident) if isinstance(ident, str) else ident
         own = resolve(agent_pane(panes, agent_id))
+        # An orchestrator's own pane is its console: it never falls into it as a default
+        # (T0558: 27 restored seats landed in Sentinel's pane). An explicit request still wins.
+        keep_clear = own if _roles.row_role(agents.get(agent_id, {}), "") == "orchestrator" else None
         explicit = pane
         if pane == "self":
             explicit = own
@@ -187,7 +190,7 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
         ordered = []
         for ident in [explicit, own, *fleet, *by_id]:
             p = by_id.get(ident) if isinstance(ident, str) else None
-            if not p or ident in ordered or ident in barred:
+            if not p or ident in ordered or ident in barred or (ident == keep_clear and ident != explicit):
                 continue
             count = p.get("leafCount", 0)
             if isinstance(count, int) and 0 < count < 8:
