@@ -116,12 +116,6 @@ def _process_name(pid: int) -> str | None:
         return None
 
 
-def _same_dir(a: object, b: object) -> bool:
-    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
-        return False
-    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
-
-
 def default_liveness(agent_id: str) -> str:
     """'live' | 'dead' | 'unknown' from the CURRENT registry row and process creation identity.
 
@@ -639,8 +633,10 @@ class Restorer:
     def shell_candidates(self, excluded: set[str]) -> list[tuple[str, str, str, str]]:
         """(pane, leaf, session, shell) of PTYs that look like what LiteSuite leaves after a restart.
 
-        All of: the PTY's root process is a known shell, it has NO child process, it is not a seat,
-        and its cwd equals a saved seat's cwd (the placeholder fingerprint). Anything unreadable or
+        All of: the leaf is one a SAVED seat slot names (where LiteSuite put a placeholder back; a leaf
+        no saved slot names is never closed), the PTY's root process is a known shell, it has NO child
+        process, and it is not a seat. The PTY's cwd is deliberately not consulted: a creation cwd like
+        a shared projects root would also match a terminal the user opened themselves. Anything unreadable or
         malformed is kept. At least one leaf per pane stays.
         """
         env = self.env
@@ -648,7 +644,7 @@ class Restorer:
         if sessions is None or panes is None:
             return []
         seat_sessions = {s.get('canvas_session_id') for e in self.manifest.expected if (s := env.registry(e.agent_id))}
-        seat_cwds = [s.cwd for s in self.manifest.seats]
+        saved_leaves = {s.slot.leaf for s in self.manifest.seats if s.slot}
         by_id = {s.get('id'): s for s in sessions if isinstance(s, dict)}
         out = []
         for pane in panes:
@@ -663,16 +659,16 @@ class Restorer:
                 if not isinstance(leaf, dict) or not isinstance(leaf.get('leafId'), str):
                     continue
                 ids = leaf.get('sessionIds')
-                if not isinstance(ids, list) or len(ids) != 1 or ids[0] in seat_sessions:
+                if (not isinstance(ids, list) or len(ids) != 1 or ids[0] in seat_sessions
+                        or leaf['leafId'] not in saved_leaves):
                     continue
                 pty = by_id.get(ids[0])
                 pid = pty.get('pid') if pty else None
                 if pty is None or pty.get('harnessAgentId') or not isinstance(pid, int):
                     continue
                 name = env.process_name(pid)
-                if (name not in SHELLS or env.has_children(pid) is not False
-                        or not any(_same_dir(pty.get('cwd'), cwd) for cwd in seat_cwds)):
-                    continue  # a server, a busy shell, an unreadable one, or someone's own terminal
+                if name not in SHELLS or env.has_children(pid) is not False:
+                    continue  # a server, a busy shell, or one this cannot read
                 closable.append((pane_id, leaf['leafId'], ids[0], name))
             out.extend(closable[:max(0, len(leaves) - 1)])  # keep at least one leaf per pane
         return out

@@ -22,8 +22,8 @@ class Crash(BaseException):
     """A process death between two journal writes."""
 
 
-def seat(n, *, role='builder', parent=COORD, disposition='idle', pane=None, root=None):
-    slot = Slot('ws', 'th', pane, f'leaf-{n}', None, 'rev-1') if pane else None
+def seat(n, *, role='builder', parent=COORD, disposition='idle', pane=None, root=None, leaf=None):
+    slot = Slot('ws', 'th', pane or 'pane-saved', leaf or f'leaf-{n}', None, 'rev-1') if (pane or leaf) else None
     profile = OwnerProfile(f'Seat-{n}', str(root)) if role == 'owner' else None
     return Seat(f'Seat-{n}', uid(n), uid(n + 100), 'claude', Execution('claude', 'claude-x', 'unrecorded'),
                 str(root), str(root), role, 'tesla', parent, profile, 'selected-current', disposition,
@@ -124,6 +124,16 @@ class Box:
 @pytest.fixture
 def box(tmp_path):
     return Box(tmp_path)
+
+
+def holders(box, tmp_path, leaves):
+    """Live seats whose SAVED slot names these leaves: where LiteSuite would put placeholders back."""
+    out = []
+    for i, leaf in enumerate(leaves):
+        held = seat(40 + i, root=tmp_path, leaf=leaf)
+        box.make_live(held.agent_id)
+        out.append(held)
+    return out
 
 
 def start(tmp_path, m, op=700, **params):
@@ -426,7 +436,7 @@ def test_dry_run_launches_nothing_journals_nothing_and_lists_shells(tmp_path, bo
     box.leaves_by_pane['pane-a'] = [{'leafId': 'l1', 'sessionIds': ['sh1']}, {'leafId': 'l2', 'sessionIds': ['sh2']}]
     box.ptys += [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}]
     box.children = {11: False, 12: False}
-    store, params, _ = start(tmp_path, manifest(tmp_path, [s2]), dry_run=True)
+    store, params, _ = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])]), dry_run=True)
     result = run_restore(store, None, params, box.env())
     assert box.calls == [] and box.closed == [] and result.operation_id is None
     assert [b.code for b in result.blockers] == ['would-close-shell']
@@ -445,7 +455,7 @@ def test_bare_shell_cleanup_closes_only_childless_shells_and_keeps_one_leaf_per_
     box.leaves_by_pane['pane-coord'] = [{'leafId': 'l5', 'sessionIds': ['sh5']}, {'leafId': 'l6', 'sessionIds': ['pty-coord']}]
     box.ptys += [{'id': f'sh{n}', 'pid': 10 + n, 'cwd': str(tmp_path)} for n in range(1, 8)]
     box.children = {11: False, 12: True, 13: False, 14: False, 15: False, 16: False, 17: False}
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2', 'l3', 'l4', 'l5', 'l7', 'l8'])]))
     run_restore(store, op, params, box.env())
     # pane-a: sh2 has a child so it stays; pane-b keeps its only leaf; pane-c closes one of two
     # childless shells; the coordinator's pane is untouched.
@@ -460,11 +470,11 @@ def test_keep_shells_and_unreadable_children_close_nothing(tmp_path, box):
     box.leaves_by_pane['pane-a'] = [{'leafId': 'l1', 'sessionIds': ['sh1']}, {'leafId': 'l2', 'sessionIds': ['sh2']}]
     box.ptys += [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}]
     box.children = {11: None, 12: None}
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])]))
     run_restore(store, op, params, box.env())
     assert box.closed == []
     box.children = {11: False, 12: False}
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2], checkpoint_id=uid(901)), op=701, keep_shells=True)
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])], checkpoint_id=uid(901)), op=701, keep_shells=True)
     run_restore(store, op, params, box.env())
     assert box.closed == []
 
@@ -587,28 +597,28 @@ def test_a_childless_process_that_is_not_a_shell_is_never_closed(tmp_path, box):
     shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}],
                 two_leaves('sh1', 'sh2'))
     box.proc_names = {11: 'python.exe', 12: 'powershell.exe'}  # sh1 is a server that happens to have no children
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])]))
     run_restore(store, op, params, box.env())
     assert box.closed == ['l2'], 'only the shell is closable; the leaf of the python process stays'
 
 
-def test_a_shell_whose_cwd_is_not_a_saved_seat_cwd_or_is_unreadable_is_kept(tmp_path, box):
+def test_a_childless_shell_at_a_leaf_no_saved_slot_names_is_never_closed(tmp_path, box):
+    """Even with a cwd equal to a saved seat's cwd (a user's own terminal can sit in a shared root)."""
     s2 = seat(2, root=tmp_path)
-    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path / 'elsewhere')}, {'id': 'sh2', 'pid': 12}],
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}],
                 two_leaves('sh1', 'sh2'))
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['somewhere-else'])]))
     run_restore(store, op, params, box.env())
     assert box.closed == []
 
 
-def test_cwd_match_ignores_case_and_slash_style(tmp_path, box):
+def test_only_leaves_a_saved_slot_names_are_closable_and_the_pty_cwd_is_irrelevant(tmp_path, box):
     s2 = seat(2, root=tmp_path)
-    odd = str(tmp_path).upper().replace(chr(92), '/')
-    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': odd}, {'id': 'sh2', 'pid': 12, 'cwd': odd}],
+    shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11}, {'id': 'sh2', 'pid': 12, 'cwd': 'D:/elsewhere'}],
                 two_leaves('sh1', 'sh2'))
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])]))
     run_restore(store, op, params, box.env())
-    assert box.closed == ['l1']
+    assert box.closed == ['l1'], 'both name saved slots; one leaf per pane stays; no cwd is consulted'
 
 
 def test_malformed_rows_are_skipped_never_raised(tmp_path, box):
@@ -618,7 +628,7 @@ def test_malformed_rows_are_skipped_never_raised(tmp_path, box):
     box.leaves_by_pane['pane-b'] = [{'sessionIds': ['sh1']}, {'leafId': 'l2', 'sessionIds': 'sh2'}, 'garbage',
                                     {'leafId': 'l4', 'sessionIds': ['sh4']}]
     box.ptys += [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, 'junk', {'id': 'sh4', 'pid': 'x', 'cwd': str(tmp_path)}]
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l2', 'l4'])]))
     result = run_restore(store, op, params, box.env())
     assert box.closed == [] and result.state == 'complete'
 
@@ -627,7 +637,7 @@ def test_the_journal_names_what_was_closed(tmp_path, box):
     s2 = seat(2, root=tmp_path)
     shell_world(box, tmp_path, [{'id': 'sh1', 'pid': 11, 'cwd': str(tmp_path)}, {'id': 'sh2', 'pid': 12, 'cwd': str(tmp_path)}],
                 two_leaves('sh1', 'sh2'))
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
+    store, params, op = start(tmp_path, manifest(tmp_path, [s2, *holders(box, tmp_path, ['l1', 'l2'])]))
     run_restore(store, op, params, box.env())
     closed = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('shell-closed')]
     assert closed == ['shell-closed pane=pane-a leaf=l1 session=sh1 shell=powershell.exe']

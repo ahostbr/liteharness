@@ -72,8 +72,9 @@ the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
 - Restore refuses to launch a seat that another operation on the same checkpoint started and never
   reported on (`prior-attempt-unknown`); reconcile it first. A seat's `live` needs the registry row
   and a hosting PTY to agree, otherwise it is `unknown` and is not reattached.
-- Bare-shell cleanup closes only a PTY whose root process is a shell, with no child, not a seat, and
-  with a cwd equal to a saved seat's cwd. Anything unreadable stays.
+- Bare-shell cleanup closes only a leaf that a SAVED seat slot names (where LiteSuite put a
+  placeholder back), whose PTY root process is a shell with no child and is not a seat. A leaf no saved
+  slot names is never closed, and the PTY's cwd is not consulted. Anything unreadable stays.
 - A mid-work (`held`) seat keeps its handoff but is never compacted: `held-not-compacted`.
 - Compaction needs `checkpoint.compact_command` for Claude seats; none ships.
 - Layout receipts are observation, not a flush proof (LiteSuite has no flush endpoint).
