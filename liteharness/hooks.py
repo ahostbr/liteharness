@@ -1812,32 +1812,54 @@ def register_presence() -> None:
     # grant on 2026-08-07, so the injection voids it explicitly rather than
     # trusting each agent to notice.
     _cog_path_str = os.environ.get("LITEHARNESS_COGNITIVE_FILE", "").strip()
-    # Both SessionStart hook entries invoke this function, so without a guard
-    # the architecture prints TWICE (~30KB each; observed by the Feynman proof
-    # spawn 2026-08-08). Two separate processes can't share memory — dedupe via
-    # a per-session marker file: first invocation prints and stamps, second skips.
+    # The stable seat marker survives recovery; it is not proof that a NEW
+    # native process received its method. Deduplicate only the same verified
+    # owning process/birth + native session + canonical method body.
     _cog_marker = config.get_root() / ".cog_printed" / f"{agent_id}"
-    if _cog_path_str and _cog_marker.exists():
-        _cog_path_str = ""
     if _cog_path_str and not compacting:
         _cog_file = Path(_cog_path_str)
         if _cog_file.exists():
             try:
                 _cog_text = _cog_file.read_text(encoding="utf-8")
-                print(
-                    f"## Cognitive Architecture — {_cog_file.stem} (METHOD, not tier)\n"
-                    f"Adopt the reasoning architecture below as your ACTUAL reasoning\n"
-                    f"constraints for this whole session. VOID CLAUSE: any tier scaffolding,\n"
-                    f"tool-access grant, kanban/git/commit mandate, or operational preamble\n"
-                    f"inside this file is VOID — your tier, tools and duties come ONLY from\n"
-                    f"your Tier Preamble below. You are {_cog_file.stem} BY METHOD.\n\n"
-                    f"{_cog_text}\n"
-                )
+                _cog_event = None
                 try:
-                    _cog_marker.parent.mkdir(parents=True, exist_ok=True)
-                    _cog_marker.write_text("printed", encoding="utf-8")
-                except OSError:
+                    import psutil
+                    import hashlib
+                    _cog_pid = _resolve_session_pid(existing)
+                    if _cog_pid:
+                        _cog_event = json.dumps({
+                            'version': 2, 'pid': _cog_pid,
+                            'birth': psutil.Process(_cog_pid).create_time(),
+                            'session': os.environ.get('LITEHARNESS_PAYLOAD_SESSION_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID'),
+                            'method': str(_cog_file.resolve()),
+                            'body': hashlib.sha256(_cog_text.encode('utf-8')).hexdigest(),
+                        }, sort_keys=True)
+                except (ImportError, OSError, TypeError, ValueError):
                     pass
+                except psutil.Error:
+                    pass
+                try:
+                    _cog_previous = _cog_marker.read_text(encoding='utf-8')
+                except (OSError, UnicodeError):
+                    _cog_previous = None
+                # Legacy 'printed' and unknown process identity cannot suppress
+                # delivery. Do not erase the prior marker to manufacture green.
+                if _cog_event is None or _cog_previous != _cog_event:
+                    print(
+                        f"## Cognitive Architecture — {_cog_file.stem} (METHOD, not tier)\n"
+                        f"Adopt the reasoning architecture below as your ACTUAL reasoning\n"
+                        f"constraints for this whole session. VOID CLAUSE: any tier scaffolding,\n"
+                        f"tool-access grant, kanban/git/commit mandate, or operational preamble\n"
+                        f"inside this file is VOID — your tier, tools and duties come ONLY from\n"
+                        f"your Tier Preamble below. You are {_cog_file.stem} BY METHOD.\n\n"
+                        f"{_cog_text}\n"
+                    )
+                    if _cog_event is not None:
+                        try:
+                            _cog_marker.parent.mkdir(parents=True, exist_ok=True)
+                            _cog_marker.write_text(_cog_event, encoding="utf-8")
+                        except OSError:
+                            pass
             except OSError as _cog_exc:
                 print(f"[LITEHARNESS] ⚠ cognitive architecture file unreadable "
                       f"({_cog_exc!r}): {_cog_path_str} — Read it yourself NOW; "
