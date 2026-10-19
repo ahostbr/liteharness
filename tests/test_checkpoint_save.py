@@ -18,6 +18,7 @@ T0 = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
 class Clock:
     def __init__(self):
         self.t = T0
+        self.on_sleep = None
 
     def now(self):
         self.t += timedelta(seconds=1)
@@ -25,6 +26,8 @@ class Clock:
 
     def sleep(self, seconds):
         self.t += timedelta(seconds=seconds)
+        if self.on_sleep:
+            self.on_sleep()
 
 
 class Fleet:
@@ -36,6 +39,17 @@ class Fleet:
         self.silent, self.bad_path, self.compact_rc = set(), set(), 0
         self.handoffs, self.disposition = {}, {}
         self.litetui_calls = []
+        self.compact_delay = 0  # seconds until an ASYNC compactor's boundary lands; 0 = inside run()
+        self.pending = {}
+
+    def flush_due(self):
+        for agent_id, due in list(self.pending.items()):
+            if self.clock.t >= due:
+                del self.pending[agent_id]
+                transcript = next(self.w.projects.glob(f'*/{agent_id}.jsonl'))
+                with transcript.open('a', encoding='utf-8') as stream:
+                    stream.write(json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': uid(9100),
+                                             'timestamp': self.clock.t.isoformat()}) + chr(10))
 
     def handoff_for(self, agent_id):
         path = self.w.tmp / f'handoff-{agent_id[-4:]}.md'
@@ -58,6 +72,9 @@ class Fleet:
     def run(self, argv, timeout):
         self.ran.append(argv)
         agent_id = argv[-1]
+        if self.compact_delay and self.compact_rc == 0:
+            self.pending[agent_id] = self.clock.t + timedelta(seconds=self.compact_delay)  # returns at once, like self_compact
+            return 0
         transcript = next(self.w.projects.glob(f'*/{agent_id}.jsonl'))
         with transcript.open('a', encoding='utf-8') as stream:
             stream.write(json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'uuid': uid(9000),
@@ -80,6 +97,7 @@ def world(tmp_path, monkeypatch):
     w = World(tmp_path, monkeypatch)
     w.clock = Clock()
     w.fleet = Fleet(w, w.clock)
+    w.clock.on_sleep = w.fleet.flush_due
     return w
 
 
@@ -98,7 +116,8 @@ def compacted(w, agent_id, handoff):
                                  'timestamp': (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()}) + '\n')
 
 
-def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=800, layout='present'):
+def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=800, layout='present',
+         compact_command=None, compact_timeout=900.0):
     put(w.harness / 'names.json', w.names)
     store = CheckpointStore(w.harness)
     request = Request(1, 'save', uid(op), None, None, [], False)
@@ -110,8 +129,8 @@ def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=8
         layout_value = ('rev-1', leaves)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=fleet.send, poll=fleet.poll, run=fleet.run,
                   litetui=fleet.litetui, layout=lambda: layout_value, live=lambda row: row['agent_id'] in w.live,
-                  handoff_timeout=30, poll_interval=1,
-                  compact_command=['compact-tool', '{name}', '{agent_id}'] if compact else None)
+                  handoff_timeout=30, poll_interval=1, compact_timeout=compact_timeout,
+                  compact_command=(compact_command or ['compact-tool', '{name}', '{agent_id}']) if compact else None)
     params = SaveParams(str(w.harness), coord, str(handoff), uid(850 + op - 800),
                         include_offline=list(include_offline), litetui_root=str(w.owned_root), cwd_roots=[str(w.tmp)])
     result = run_save(store, operation.operation_id, params, env, only=only)
@@ -363,3 +382,57 @@ def test_a_model_derived_from_the_transcript_is_labelled_in_the_journal(world):
     stages = [e.stage for e in store.operation(op.operation_id).events]
     assert f'model-source seat={peer} source=transcript model=claude-opus-5-5' in stages
     assert not any(st.startswith('model-source') and coord in st for st in stages), 'registry-sourced models are not noted'
+
+
+# -- round 5: F3 the only real compactor is asynchronous ----------------------------------------------------------
+
+def test_an_async_compactor_is_polled_until_the_boundary_lands(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    w.fleet.compact_delay = 45
+    compacted(w, coord, handoff)
+    started = w.clock.t
+    store, params, result, _ = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert manifest.state == 'complete' and not manifest.blockers
+    assert len(w.fleet.ran) == 1, 'the compactor ran once; the save polled for its effect'
+    assert (w.clock.t - started).total_seconds() >= 45
+
+
+def test_an_async_compactor_that_never_lands_is_compact_unobserved_after_the_timeout(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    w.fleet.compact_delay = 100_000
+    compacted(w, coord, handoff)
+    started = w.clock.t
+    store, params, result, _ = save(w, coord, handoff, compact_timeout=60)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert [(b.seat_id, b.code) for b in manifest.blockers] == [(peer, 'compact-unobserved')]
+    assert 60 <= (w.clock.t - started).total_seconds() < 400
+
+
+def test_a_failing_compactor_stops_at_once_without_polling(world):
+    w = world
+    coord, handoff = coordinator(w)
+    w.claude(2, parent=coord)
+    w.fleet.compact_rc = 3
+    compacted(w, coord, handoff)
+    slept = []
+    w.clock.on_sleep = lambda: slept.append(1)
+    store, params, result, _ = save(w, coord, handoff)
+    assert [b.code for b in store.read_manifest(params.checkpoint_id).blockers] == ['compact-failed']
+    assert slept == [] or len(slept) < 40, 'only the handoff wait sleeps; no compaction polling'
+
+
+def test_compact_command_placeholders_include_the_checkpoint_and_the_seats_handoff(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    compacted(w, coord, handoff)
+    store, params, result, _ = save(w, coord, handoff,
+                                    compact_command=['compactor', '--pointer', 'read {handoff} for {checkpoint_id}', '--name', '{name}', '{agent_id}'])
+    argv = w.fleet.ran[0]
+    assert argv[2] == f'read {w.tmp / ("handoff-" + peer[-4:] + ".md")} for {params.checkpoint_id}'
+    assert argv[-1] == peer

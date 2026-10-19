@@ -274,12 +274,18 @@ class Saver:
                                      assurance='cooperative', at=self.tick()))
         if out.disposition == 'held':
             return self.not_compacted(out, cid, seat, revision)
-        compaction = self.compact_claude(manifest, seat, requested_at)
+        compaction = self.compact_claude(manifest, seat, requested_at, path.resolve())
         if compaction is None:
             return self.unsupported(out, cid, seat, revision)
         out.receipts.extend(compaction.receipts)
         out.blockers.extend(compaction.blockers)
         return out
+
+    @staticmethod
+    def fill(template: str, values: dict) -> str:
+        for key, value in values.items():
+            template = template.replace(key, value)
+        return template
 
     @staticmethod
     def under_roots(path: Path, roots: list[Path]) -> bool:
@@ -308,18 +314,32 @@ class Saver:
                                         'Configure checkpoint.compact_command, then retry this seat'))
         return out
 
-    def compact_claude(self, manifest: Manifest, seat: Seat, requested_at: datetime) -> Collected | None:
-        """None = no compact command configured (distinct from a failed/unobserved compaction)."""
+    def compact_claude(self, manifest: Manifest, seat: Seat, requested_at: datetime,
+                       handoff: Path | None = None) -> Collected | None:
+        """None = no compact command configured (distinct from a failed/unobserved compaction).
+
+        The real compactor is asynchronous: it returns in about a second, waits for the seat to go
+        idle, types /compact and later a pointer. So a zero exit only means it was accepted; the
+        boundary is polled for until `compact_timeout`. A non-zero exit stops at once.
+        Placeholders: {agent_id} {name} {checkpoint_id} {handoff}."""
         out, cid, argv = Collected(), manifest.checkpoint_id, self.env.compact_command
         if not argv:
             return None
-        resolved = [a.replace('{agent_id}', seat.agent_id).replace('{name}', seat.name) for a in argv]
+        values = {'{agent_id}': seat.agent_id, '{name}': seat.name, '{checkpoint_id}': cid,
+                  '{handoff}': str(handoff) if handoff else ''}
+        resolved = [self.fill(a, values) for a in argv]
+        deadline = self.env.now().timestamp() + self.env.compact_timeout
         try:
             returncode = self.env.run(resolved, self.env.compact_timeout)
         except (OSError, subprocess.SubprocessError):
             returncode = None
         transcript = self.transcript_of(seat)
-        marker = observe_compaction(transcript, requested_at) if transcript else None
+        marker = None
+        while returncode == 0 and transcript:
+            marker = observe_compaction(transcript, requested_at)
+            if marker or self.env.now().timestamp() >= deadline:
+                break
+            self.env.sleep(self.env.poll_interval)
         revision = seat.source_revision
         path, digest = evidence(self.store, cid, seat.agent_id, 'compact',
                                 {'kind': 'compact', 'returncode': returncode, 'observed': marker})
