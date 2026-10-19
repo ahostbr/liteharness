@@ -5,18 +5,64 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.7] — 2026-10-19
+
+Everything below except the Agent() item, the `ls-youtube` route and the removed tool guard
+came in as locally merged cards that the maintainer has not yet checked end to end.
 
 ### Added
 - **`ls-youtube`: a second transcript route.** When yt-dlp's subtitle route fails or
   returns no usable file, the skill tries the standalone `youtube-transcript-api` package
   through `Get-Transcript.py`. That package is optional and is never installed silently.
+- **Fleet checkpoint save and restore (T0558-A, -D, -E).** A one-call save publishes the
+  roster first and then collects receipts; a one-call restore plans, drives idempotently and
+  cleans up bare shells it can prove belong to a saved seat. A detached worker serves
+  submit, status, cancel and retry, behind the `sessions checkpoint` CLI. A save leaves out
+  seats the user started themselves and anything named with `--exclude`. A seat whose
+  unknown registry model would silently change is blocked unless `--allow-default-model` is
+  given. A mid-work seat keeps its handoff but is not compacted. `--split` placement takes
+  `exclude_panes` and resolves pane aliases, so a restore never fills the coordinator's
+  pane. A Claude seat resumes from its transcript's launch directory, not its drifting cwd.
+- **Ask-seat and the lore (T0583).** Ask a past seat one question; by default it reads that
+  seat's transcript, and `--wake` (Claude seats only, refused above a 150k cache gate, one
+  wake per seat) resumes a read-only fork on request. The lore file is printed at a seat's
+  boot and after a compaction, with a size cap and a `--check` mode.
+- **Memory lookup on the conversation lookup (T0585).** One engine, extended with owned
+  sources and a machine API, in `liteharness/memory_lookup.py`. Semantic model installation
+  is explicit and optional, and wheel approval is bound to one bounded snapshot.
+- **Per-agent prompt folders (T0338).** The leader can edit them live, and a named resume
+  carries the caller's role body and a custom SYSTEM prompt.
+
+### Changed
+- **Agent() subagents run (T0596-B).** The catalog's `agent.spawn` guard lets any model
+  through (the host passes `sonnet`, `opus`, `haiku`, `fable` or none) and no longer
+  requires an `Agent-Role` or `Agent-Tier` brief line. The cwd check stays, widened to the
+  session's own directory or anything inside it, so an `isolation: "worktree"` under the
+  repo runs; a foreign path or a sibling that only shares the prefix is refused. The
+  catalog `hooks/mods/fleet.mjs` and `hooks/register.mjs` are the same files as in
+  liteharness-plugin 1.0.24.
+- **Tier cards (T0558-E).** The builder checks its own work, and a critic seat exists only
+  when the user asks for a review on the card.
+- **Owner and restored-seat resume (T0589).** A restored seat comes back into its own slot
+  after a LiteSuite restart: original-slot resume goes through host capability redemption,
+  Claude native continuity is persisted, a contradictory registry conversation or backend is
+  refused, and an owner seat resumes without `--agent` beside `--owner`. Cognitive delivery
+  to concurrent native hooks is arbitrated atomically.
+- `.litesuite/theater/pastes/` is git-ignored.
+
+### Fixed
+- **Deny floor (T0586).** A path the floor cannot resolve (a NUL, a malformed ADS, a cwd
+  failure) is refused with an `[unresolvable-path]` reason instead of letting the error end
+  the seat.
+- **Codex Desktop mail (T0588).** App-tool calls now send `callerSource`, so inbox mail
+  reaches a Codex Desktop seat again.
 
 ### Removed
 - The native tool guard mod: its backend and front half in the catalog's `hooks/mods/`,
   its `tool.call` / `tool.check` hook-up in `hooks/register.mjs`, its test, and the policy
   hash pin in the catalog stamp. The fleet, usage, paste-history and inbox mods are
   unchanged.
+
 
 ## [0.4.6] — Unreleased
 
