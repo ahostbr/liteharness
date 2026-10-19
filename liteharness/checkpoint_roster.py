@@ -86,8 +86,8 @@ def _claude_seat(row: dict, base: dict, selection: str, layout_revision: str) ->
         conversation_id=native_id, cli='claude',
         execution=Execution('claude', model, row.get('thinking_level') or UNRECORDED_THINKING),
         data_root=str(claude_projects_root()), cwd=cwd,
-        # An owner's profile for a native seat is its session folder: Claude keeps no
-        # SOUL/DOMAIN/NOW folder; resume goes by transcript, not by this path.
+        # A LOCATOR, not a memory store: Claude keeps no SOUL/DOMAIN/NOW folder, so an owner's
+        # profile for a native seat is its session folder. Resume goes by transcript, not by this path.
         owner_profile=_owner_profile(base['role'], base['name'], transcript.parent),
         selection=selection, slot=_slot(row, layout_revision), **base)
 

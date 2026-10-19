@@ -190,6 +190,7 @@ class Saver:
         self.mailbox = f'checkpoint-{operation_id}'
         self._last = env.now()
         self.layout = None  # (revision, leaf ids) as frozen; None until freeze() or when unobserved
+        self.prepared: list[str] = []  # LiteTUI seats THIS save put on hold: the only holds it may release
 
     def tick(self) -> datetime:
         """Receipt clock: never earlier than the previous receipt of this save."""
@@ -337,6 +338,7 @@ class Saver:
         try:
             status = self.env.litetui(seat.agent_id, {'type': 'gui.checkpoint.prepare', 'checkpoint_id': cid,
                                                       'disposition': out.disposition})
+            self.prepared.append(seat.agent_id)
             digest = sha256_file(path)
             self.env.litetui(seat.agent_id, {'type': 'gui.conversations.compact', 'checkpoint_id': cid,
                                              'handoff_sha256': digest})
@@ -399,12 +401,29 @@ class Saver:
         self.request_handoffs(peers)
         replies = self.await_handoffs(peers)
         for seat in todo:
+            if self.cancelled():
+                self.release_holds()
+                result = self.report(manifest, 'canceled')
+                self.log.event('final', None, result)
+                return result
             manifest = self.collect_one(manifest, seat, replies.get(seat.agent_id), requested_at, roots)
             self.log.event('seat-collected', seat.agent_id, self.report(manifest, 'running'))
         manifest = self.finalize(manifest)
         result = self.report(manifest, manifest.state)
         self.log.event('final', None, result)
         return result
+
+    def cancelled(self) -> bool:
+        return any(e.stage == 'cancel-requested' for e in self.log.operation().events)
+
+    def release_holds(self) -> None:
+        """Cancel releases only the holds this save made; no seat is stopped, compacted or replayed."""
+        for agent_id in self.prepared:
+            try:
+                self.env.litetui(agent_id, {'type': 'gui.checkpoint.release', 'checkpoint_id': self.params.checkpoint_id,
+                                            'reconciled': True})
+            except ValueError:
+                pass  # a refused release stays held: visible, never forced
 
     def collect_one(self, manifest: Manifest, seat: Seat, reply, requested_at, roots) -> Manifest:
         if seat.agent_id == manifest.coordinator.agent_id:
@@ -472,28 +491,32 @@ class Saver:
         return candidate
 
     def report(self, manifest: Manifest, state: str) -> Result:
-        by_seat: dict[str, list[Blocker]] = {}
-        for blocker in manifest.blockers:
-            by_seat.setdefault(blocker.seat_id or '', []).append(blocker)
-        resolved = {s.agent_id: s for s in manifest.seats}
-        rows = []
-        for expected in manifest.expected:
-            errors = by_seat.get(expected.agent_id, [])
-            receipts = [r for r in manifest.receipts if r.seat_id == expected.agent_id]
-            done = {r.kind for r in receipts if r.durable and r.assurance != 'unsupported'}
-            need = {'handoff', 'compact', 'boundary'}
-            if expected.agent_id in resolved and resolved[expected.agent_id].slot:
-                need.add('layout')
-            if errors:
-                rows.append(seat_result(expected.agent_id, 'blocked', evidence=receipts, errors=errors))
-            elif need <= done or (expected.agent_id in resolved and need - {'layout'} <= done and state != 'running'):
-                rows.append(seat_result(expected.agent_id, 'saved', evidence=receipts))
-            else:
-                rows.append(seat_result(expected.agent_id, 'preparing', evidence=receipts))
-        if state == 'complete' and any(r.state != 'saved' for r in rows):
-            state = 'incomplete'
-        return make_result(self.operation_id, manifest.checkpoint_id, state, rows,
-                           [b for b in manifest.blockers if b.seat_id is None])
+        return manifest_report(manifest, self.operation_id, state)
+
+
+def manifest_report(manifest: Manifest, operation_id: str | None, state: str) -> Result:
+    by_seat: dict[str, list[Blocker]] = {}
+    for blocker in manifest.blockers:
+        by_seat.setdefault(blocker.seat_id or '', []).append(blocker)
+    resolved = {s.agent_id: s for s in manifest.seats}
+    rows = []
+    for expected in manifest.expected:
+        errors = by_seat.get(expected.agent_id, [])
+        receipts = [r for r in manifest.receipts if r.seat_id == expected.agent_id]
+        done = {r.kind for r in receipts if r.durable and r.assurance != 'unsupported'}
+        need = {'handoff', 'compact', 'boundary'}
+        if expected.agent_id in resolved and resolved[expected.agent_id].slot:
+            need.add('layout')
+        if errors:
+            rows.append(seat_result(expected.agent_id, 'blocked', evidence=receipts, errors=errors))
+        elif need <= done or (expected.agent_id in resolved and need - {'layout'} <= done and state != 'running'):
+            rows.append(seat_result(expected.agent_id, 'saved', evidence=receipts))
+        else:
+            rows.append(seat_result(expected.agent_id, 'preparing', evidence=receipts))
+    if state == 'complete' and any(r.state != 'saved' for r in rows):
+        state = 'incomplete'
+    return make_result(operation_id, manifest.checkpoint_id, state, rows,
+                       [b for b in manifest.blockers if b.seat_id is None])
 
 
 def run_save(store: CheckpointStore, operation_id: str, params: SaveParams, env: SaveEnv,

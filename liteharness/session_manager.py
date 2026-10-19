@@ -882,6 +882,9 @@ def build_parser():
 
 
 def main(argv=None):
+    if argv and argv[0] == "checkpoint":  # one-call fleet save/restore; the legacy verbs below are untouched
+        from . import checkpoint_cli
+        sys.exit(checkpoint_cli.main(argv[1:]))
     parser = build_parser()
     args = parser.parse_args(argv)
 
