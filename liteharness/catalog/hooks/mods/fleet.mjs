@@ -29,24 +29,17 @@ export function normalizedCwd(value) {
   return path.replace(/\/+$/, '') || '/'
 }
 
-// The host's Agent tool passes a short alias or a full id, with or without [1m], or no model at all
-// (CLAUDE_CODE_SUBAGENT_MODEL then picks Sonnet). Anything else is not a Claude model and is refused.
-const SPAWN_FAMILIES = ['sonnet', 'haiku', 'opus']
-export const SPAWN_MODELS = new Set(SPAWN_FAMILIES.flatMap(family => [family, 'claude-' + family + '-5-5', 'claude-' + family + '-5-5[1m]']))
-
-// Returns the refusal text, or null when the Agent() call may run.
+// Returns the refusal text, or null when the Agent() call may run. Any model runs: the host's Agent tool
+// passes only its own enum (or nothing), and which model a subagent uses is never this guard's call.
 export function spawnDenial(e, ownedCwd) {
-  // A fork inherits its parent's model, so the parent's model is checked too.
-  for (const model of [e?.model, e?.fork ? e.parentModel : undefined]) {
-    if (model !== undefined && model !== null && !SPAWN_MODELS.has(model)) {
-      return 'Agent() model must be sonnet, haiku or opus (short name or full id, with or without [1m]) or omitted; refused ' +
-        JSON.stringify(clean(model)) + '.'
-    }
-  }
-  // The host's Agent tool has no cwd input: a call without one runs in the session's own directory,
-  // which is the only directory this check allows. Never echo the requested cwd.
+  // The host's Agent tool sets no cwd for an ordinary call, which then runs in the session's own directory.
+  // isolation:"worktree" runs under the session's repo, so a cwd equal to the session's directory or inside it
+  // passes; a sibling that merely shares the prefix (C:/repo-evil beside C:/repo) does not. Never echo the requested cwd.
   const owned = normalizedCwd(ownedCwd)
   const cwd = normalizedCwd(e?.cwd || ownedCwd)
-  if (!owned || !cwd || cwd !== owned) return "Agent() cwd must be the session's own directory; a foreign or unreadable cwd is refused."
+  const prefix = owned && (owned.endsWith('/') ? owned : owned + '/')
+  if (!owned || !cwd || (cwd !== owned && !cwd.startsWith(prefix))) {
+    return "Agent() cwd must be the session's own directory or inside it; a foreign or unreadable cwd is refused."
+  }
   return null
 }
