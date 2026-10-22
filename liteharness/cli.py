@@ -3524,10 +3524,13 @@ def _owned_runtime_receipt(agent_id: str, session_id: str, since: datetime) -> s
         if len(matches) != 1 or matches[0].get('harnessAgentId') != agent_id:
             return 'Exact new native session is absent, foreign or ambiguous'
         if unlinked:
-            from .resume_seat import _ancestor_pids
+            from .process_ancestry import process_ancestry
             native_pid = matches[0].get('pid')
+            # Prove the path through this exact launcher, not its unrelated
+            # parents: an exited/inaccessible ancestor above it cannot negate
+            # an otherwise live, birth-ordered owner-to-launcher path.
             if (not isinstance(native_pid, int) or isinstance(native_pid, bool) or native_pid <= 0
-                    or native_pid not in _ancestor_pids(records[0][1].get('session_pid'))):
+                    or not process_ancestry(records[0][1].get('session_pid'), stop_at=native_pid)):
                 return 'Exact native session does not own the registered process'
         # Both transport and OS inspection can yield. Re-read registration and
         # liveness after the native read so an exit during inspection is not success.
@@ -4988,10 +4991,35 @@ def cmd_spawn(
             print(f"SPAWN INCOMPLETE: session {new_session} registered as {new_uuid}, but identity update failed: {exc}")
             sys.exit(1)
         try:
-            from .claude_identity import record_registered_name
+            from .claude_identity import ClaudeTranscriptPending, record_registered_name
             if pdata.get('cli') not in ('claude-code', 'claude'):
                 raise ValueError('Registered native CLI is not Claude')
-            record_registered_name(pdata)
+            while True:
+                try:
+                    record_registered_name(pdata)
+                    break
+                except ClaudeTranscriptPending:
+                    # SessionStart can publish presence before Claude creates
+                    # its transcript. Spend only the registration budget left;
+                    # ambiguity, contradictions and index errors never retry.
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        raise
+                    if (not _registered_since(new_uuid, spawn_t0)
+                            or not _owned_runtime_owner_live(new_uuid, pdata)):
+                        raise ValueError('Registered Claude owner is stale, exited or PID-reused')
+                    time.sleep(min(0.25, remaining))
+                    if time.time() >= deadline:
+                        raise
+                    current = json.loads(ppath.read_text(encoding='utf-8'))
+                    identity = ('agent_id', 'canvas_session_id', 'native_session_id', 'transcript_path',
+                                'session_pid', 'session_process_started_at', 'registered_at',
+                                'cli', 'name', 'cwd', 'backend', 'model')
+                    if (not isinstance(current, dict)
+                            or any(current.get(key) != pdata.get(key) for key in identity)
+                            or not _owned_runtime_owner_live(new_uuid, current)):
+                        raise ValueError('Registered Claude identity changed or owner exited while awaiting transcript')
+                    pdata = current
         except (ValueError, OSError) as exc:
             print(f"SPAWN INCOMPLETE: session {new_session} registered as {new_uuid}, but saved-name/native identity is unavailable: {exc}; inspect, do not relaunch")
             sys.exit(1)

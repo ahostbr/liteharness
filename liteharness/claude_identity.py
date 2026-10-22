@@ -10,6 +10,10 @@ import os
 from .agent_store import StoreError, _unlinked, valid_id
 
 
+class ClaudeTranscriptPending(ValueError):
+    """Exact native transcript evidence has not materialized yet; not a contradiction."""
+
+
 def transcript_identity(row: dict, *, native_id: str | None = None,
                         cwd: str | None = None) -> tuple[str, str, Path]:
     root = Path(os.environ.get('CLAUDE_CONFIG_DIR') or (Path.home() / '.claude')) / 'projects'
@@ -32,8 +36,10 @@ def transcript_identity(row: dict, *, native_id: str | None = None,
     except StoreError as exc:
         raise ValueError('Claude native conversation identity is missing or invalid') from exc
     candidates = list(root.glob(f'*/{native_id}.jsonl'))
+    if not candidates:
+        raise ClaudeTranscriptPending('Claude native transcript is missing')
     if len(candidates) != 1:
-        raise ValueError('Claude native transcript is missing or ambiguous')
+        raise ValueError('Claude native transcript is ambiguous')
     path = _unlinked(candidates[0])
     if reference and path != Path(reference):
         raise ValueError('Claude transcript reference does not match native conversation')
@@ -60,12 +66,13 @@ def transcript_identity(row: dict, *, native_id: str | None = None,
                         found_cwd = directory
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError('Claude transcript is unreadable or malformed') from exc
+    if found_cwd:
+        if cwd and Path(cwd).resolve() != Path(found_cwd).resolve():
+            raise ValueError('Claude original cwd disagrees with native transcript')
+        if not Path(found_cwd).is_dir():
+            raise ValueError('Claude original cwd no longer exists')
     if not observed or not found_cwd:
-        raise ValueError('Claude transcript lacks native session/cwd evidence')
-    if cwd and Path(cwd).resolve() != Path(found_cwd).resolve():
-        raise ValueError('Claude original cwd disagrees with native transcript')
-    if not Path(found_cwd).is_dir():
-        raise ValueError('Claude original cwd no longer exists')
+        raise ClaudeTranscriptPending('Claude transcript lacks native session/cwd evidence')
     return native_id, found_cwd, path
 
 
