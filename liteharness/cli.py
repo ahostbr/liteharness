@@ -3502,6 +3502,15 @@ def _owned_runtime_receipt(agent_id: str, session_id: str, since: datetime) -> s
                 return 'Malformed presence while inspecting exact runtime'
             if row.get('canvas_session_id') == session_id:
                 records.append((path.stem, row))
+        # Direct LiteTUI launches receive a leaf id, but the native PTY id is
+        # minted after their environment is built. Accept a missing link only
+        # with exact native process ancestry below; never replace a wrong link.
+        unlinked = False
+        if not records:
+            row = json.loads((config.get_root() / 'agents' / f'{agent_id}.json').read_text(encoding='utf-8'))
+            if row.get('agent_id') == agent_id and not row.get('canvas_session_id'):
+                records = [(agent_id, row)]
+                unlinked = True
         if len(records) != 1 or records[0][0] != agent_id or records[0][1].get('agent_id') != agent_id:
             return 'Exact session registration is absent, foreign or ambiguous'
         if not _registered_since(agent_id, since) or not _owned_runtime_owner_live(agent_id, records[0][1]):
@@ -3514,6 +3523,12 @@ def _owned_runtime_receipt(agent_id: str, session_id: str, since: datetime) -> s
         matches = [row for row in response['sessions'] if row.get('id') == session_id]
         if len(matches) != 1 or matches[0].get('harnessAgentId') != agent_id:
             return 'Exact new native session is absent, foreign or ambiguous'
+        if unlinked:
+            from .resume_seat import _ancestor_pids
+            native_pid = matches[0].get('pid')
+            if (not isinstance(native_pid, int) or isinstance(native_pid, bool) or native_pid <= 0
+                    or native_pid not in _ancestor_pids(records[0][1].get('session_pid'))):
+                return 'Exact native session does not own the registered process'
         # Both transport and OS inspection can yield. Re-read registration and
         # liveness after the native read so an exit during inspection is not success.
         current = json.loads((config.get_root() / 'agents' / f'{agent_id}.json').read_text(encoding='utf-8'))
@@ -3524,7 +3539,7 @@ def _owned_runtime_receipt(agent_id: str, session_id: str, since: datetime) -> s
             return 'Runtime registration changed or owner exited during inspection'
         holders = [json.loads(path.read_text(encoding='utf-8'))
                    for path in (config.get_root() / 'agents').glob('*.json')]
-        if sum(row.get('canvas_session_id') == session_id for row in holders) != 1:
+        if sum(row.get('canvas_session_id') == session_id for row in holders) != (0 if unlinked else 1):
             return 'Exact runtime became ambiguous during inspection'
         return None
     except Exception as exc:
