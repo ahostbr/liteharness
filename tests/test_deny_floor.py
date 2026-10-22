@@ -410,18 +410,50 @@ INSTALLED = Path(os.environ.get("LITEHARNESS_DENY_GATE_DIR")
                  or Path.home() / ".claude" / "hooks" / "deny-floor")
 
 
+#: The checkout whose commits the installed record names (a seam for the nested
+#: runs in test_install_deny_gate.py; the default is the checkout under test).
+REPO = Path(os.environ.get("LITEHARNESS_DENY_GATE_REPO") or GATE.parents[1])
+
+
+def _git_bytes(*args):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    return subprocess.run(["git", "-C", str(REPO), *args], env=env, capture_output=True)
+
+
 @pytest.mark.parametrize("name", ["deny_gate.py", "deny_floor.py"])
-def test_the_installed_gate_is_the_repo_gate(name):
-    """Drift fails a TEST, not a seat. Not installed is an XFAIL that names the
-    path (loud in -rx), never a skip: this suite also runs where no Claude
-    Code is installed, and a hard failure there would be noise."""
+def test_the_installed_gate_is_the_recorded_commit(name):
+    """T0091: compare the installed file with the COMMIT the installer recorded for
+    it (INSTALLED.json, `git show <sha>:liteharness/<name>`), never the working
+    tree: a mid-edit checkout is not what is live. Drift fails a TEST, not a
+    seat. Not installed, or no record, is an XFAIL that names what to create
+    (loud in -rx), never a skip: this suite also runs where no Claude Code is
+    installed, and a hard failure there would be noise. Whether the recorded sha
+    is an ancestor of this checkout's HEAD is reported as a warning, not a failure:
+    a gate can be live from a branch this checkout has not merged."""
     installed = INSTALLED / name
+    record_file = INSTALLED / "INSTALLED.json"
     if not installed.exists():
         pytest.xfail(f"deny gate not installed: {installed} is missing "
-                     "(scripts/install_deny_gate.py installs it)")
-    repo = GATE.with_name(name)
-    assert installed.read_bytes() == repo.read_bytes(), (
-        f"{installed} differs from {repo}: rerun scripts/install_deny_gate.py")
+                     "(scripts/install_deny_gate.py --ref <sha> installs it)")
+    if not record_file.exists():
+        pytest.xfail(f"no install record: create {record_file} with "
+                     "scripts/install_deny_gate.py --record-only --ref-gate <sha> --ref-floor <sha>")
+    entry = json.loads(record_file.read_text(encoding="utf-8")).get(name)
+    if entry is None:
+        pytest.xfail(f"{record_file} has no entry for {name}: record it with "
+                     "scripts/install_deny_gate.py --record-only")
+    sha = entry["sha"]
+    shown = _git_bytes("show", f"{sha}:liteharness/{name}")
+    if shown.returncode != 0:
+        pytest.xfail(f"{record_file} names {sha} for {name}, which {REPO} does not have")
+    print(f"{name}: installed from {sha} (recorded {entry.get('installed_at')})")
+    assert installed.read_bytes() == shown.stdout, (
+        f"{installed} differs from {sha}:liteharness/{name}, the commit {record_file} "
+        "says it was installed from: reinstall with scripts/install_deny_gate.py --ref")
+    if _git_bytes("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
+        warnings.warn(f"{name}: recorded commit {sha} is not an ancestor of HEAD in {REPO}; "
+                      "the live gate comes from a commit this checkout does not contain",
+                      UserWarning, stacklevel=1)
 
 
 @pytest.mark.parametrize("name", ["deny_gate.py", "deny_floor.py"])
@@ -441,9 +473,16 @@ def test_the_install_script_copies_both_files_and_names_them(tmp_path):
         import install_deny_gate
     finally:
         sys.path.pop(0)
-    entry = install_deny_gate.install(tmp_path / "deny-floor")
+    # Read-only on the real repo: install the commit the checkout is on, with an
+    # explicit ref. The dirty-tree refusal covers the two gate files only.
+    head = _git_bytes("rev-parse", "HEAD").stdout.decode().strip()
+    try:
+        entry = install_deny_gate.install(tmp_path / "deny-floor", ref=head, repo=REPO)
+    except SystemExit as refused:
+        pytest.skip(f"gate files have uncommitted edits in this checkout: {refused}")
     for name in ("deny_gate.py", "deny_floor.py"):
-        assert (tmp_path / "deny-floor" / name).read_bytes() == GATE.with_name(name).read_bytes()
+        assert (tmp_path / "deny-floor" / name).read_bytes() == _git_bytes(
+            "show", f"{head}:liteharness/{name}").stdout
     # T1085: the file tools too, so a Write/Edit of jobs.json meets the floor.
     assert entry["matcher"] == "Bash|PowerShell|mcp__.*|Write|Edit|MultiEdit|NotebookEdit"
     assert entry["hooks"][0]["command"].endswith("/deny-floor/deny_gate.py")
