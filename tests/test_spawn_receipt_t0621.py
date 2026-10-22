@@ -81,3 +81,70 @@ def test_owned_resume_recovers_only_valid_matching_saved_role(world, capsys, rec
         assert exc.value.code == 2
         assert not state['created']
         assert '--tier' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('entry', ['fresh-split', 'owned-resume'])
+@pytest.mark.parametrize('platform', ['win32', 'posix'])
+@pytest.mark.parametrize('fault', ['outside-path', 'denied', 'reused', 'exited', 'unrelated'])
+def test_full_pane_fallback_proves_only_path_to_exact_native_launcher(
+        world, monkeypatch, capsys, entry, platform, fault):
+    """A dead/inaccessible Electron ancestor is outside the native ownership proof."""
+    from liteharness import process_ancestry
+    from ancestry_boundary import windows_processes
+
+    _, _, registry, state = world
+    bridge = cli._bridge_request
+    launcher, intermediate, outside = PID + 1, PID + 2, PID + 3
+    rows = {PID: (intermediate, 1), intermediate: (launcher, 0.75),
+            launcher: (outside, 0.5)}
+    if fault == 'reused':
+        rows[intermediate] = (launcher, 2)
+    denied = {intermediate} if fault == 'denied' else set()
+    exited = {intermediate} if fault == 'exited' else set()
+    opened = []
+
+    def process(pid):
+        if pid not in rows or pid in denied:
+            raise psutil.AccessDenied(pid)
+        parent, birth = rows[pid]
+        opened.append(pid)
+        return SimpleNamespace(pid=pid, create_time=lambda: birth,
+                               parent=lambda: process(parent),
+                               is_running=lambda: pid not in exited,
+                               status=lambda: psutil.STATUS_RUNNING)
+
+    monkeypatch.setattr(psutil, 'Process', process)
+    if platform == 'win32':
+        boundary = windows_processes(monkeypatch, rows, denied=denied, exited=exited)
+        opened = boundary.opened
+    else:
+        monkeypatch.setattr(process_ancestry, 'sys', SimpleNamespace(platform='posix'))
+
+    def transport(method, path, body=None, **kwargs):
+        if method == 'POST' and path == '/canvas/split':
+            state['calls'].append((method, path, body))
+            return {'ok': False, 'error': 'grid_full'}
+        result = bridge(method, path, body, **kwargs)
+        if method == 'POST' and path == '/pty/create':
+            row_path = registry / 'agents' / f'{AID}.json'
+            row = json.loads(row_path.read_text())
+            row.pop('canvas_session_id')
+            row_path.write_text(json.dumps(row))
+        if path.startswith('/context?') and state['created']:
+            result['activePanes'].append({'id': 'fallback-pane', 'leafCount': 1,
+                                         'leaves': [{'sessionIds': [SESSION]}]})
+        if path == '/pty/list' and state['created']:
+            result['sessions'][0]['pid'] = outside + 1 if fault == 'unrelated' else launcher
+        return result
+
+    monkeypatch.setattr(cli, '_bridge_request', transport)
+    assert launch(world, entry) == (0 if fault == 'outside-path' else 2)
+    output = capsys.readouterr().out
+    if fault == 'outside-path':
+        assert AID in output and SESSION in output
+        assert outside not in opened, 'ancestors above the exact launcher are not evidence'
+    else:
+        assert 'Exact native session does not own the registered process' in output
+    assert sum(path == '/pty/create' for _, path, _ in state['calls']) == 1
+    assert not any(method == 'DELETE' for method, _, _ in state['calls'])
+    assert 'canvas_session_id' not in json.loads((registry / 'agents' / f'{AID}.json').read_text())
