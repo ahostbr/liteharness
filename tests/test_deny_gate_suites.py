@@ -13,6 +13,8 @@ import pytest
 from liteharness import deny_gate
 
 GATE = Path(deny_gate.__file__).resolve()
+#: the real process reader, captured before the autouse fixture stubs it
+READ_PROCESSES = getattr(deny_gate, "_live_runner_pids", None)
 FLAG = "LITEHARNESS_DENY_FULL_SUITES"
 ESCAPE = "LITEHARNESS_ALLOW_FULL_SUITE"
 MARKER = "full test suite"
@@ -96,6 +98,8 @@ def _reason(command, **kw):
 def _clean_env(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
     monkeypatch.delenv(ESCAPE, raising=False)
+    # never read the live machine's processes from a test
+    monkeypatch.setattr(deny_gate, "_live_runner_pids", lambda: [], raising=False)
 
 
 @pytest.mark.parametrize("command", FULL_SUITES + NOT_SUITES)
@@ -156,8 +160,7 @@ def test_the_refusal_is_generic_and_says_what_to_run_instead(monkeypatch, tmp_pa
 @pytest.mark.parametrize("command,flag,denied", [
     ("python -m pytest -q", "1", True),
     ("python -m pytest -q", None, False),
-    ("python -m pytest -q tests/test_x.py", "1", False),
-    ('FILES="tests/a.py"; python -m pytest -q $FILES', "1", False),
+    ("git status", "1", False),
 ])
 def test_run_by_path_through_the_hook_protocol(command, flag, denied, tmp_path):
     env = {**os.environ, "LITEHARNESS_HOME": str(tmp_path / "h")}
@@ -173,3 +176,96 @@ def test_run_by_path_through_the_hook_protocol(command, flag, denied, tmp_path):
     else:
         assert proc.stdout.strip() == ""
 
+
+
+# ── one runner at a time (the old hook's second half) ───────────────────────
+
+SINGLE_FILE_RUNS = [
+    "python -m pytest -q tests/test_x.py",
+    "bunx vitest run src/a.test.ts",
+    'FILES="tests/a.py"; python -m pytest -q $FILES',
+    "cd x && npx playwright test e2e/a.spec.ts",
+]
+RUNNER_REFUSAL = "another test runner is alive"
+
+
+def _fake_pids(monkeypatch, pids):
+    calls = []
+    monkeypatch.setattr(deny_gate, "_live_runner_pids", lambda: calls.append(1) or pids)
+    return calls
+
+
+@pytest.mark.parametrize("command", SINGLE_FILE_RUNS)
+def test_a_live_runner_refuses_a_single_file_run(command, monkeypatch, tmp_path):
+    monkeypatch.setenv(FLAG, "1")
+    _fake_pids(monkeypatch, ["111", "222"])
+    reason = _reason(command, cwd=tmp_path)
+    assert reason and RUNNER_REFUSAL in reason and "111,222" in reason
+
+
+@pytest.mark.parametrize("command", SINGLE_FILE_RUNS)
+def test_no_live_runner_allows_a_single_file_run(command, monkeypatch, tmp_path):
+    monkeypatch.setenv(FLAG, "1")
+    _fake_pids(monkeypatch, [])
+    assert _reason(command, cwd=tmp_path) is None
+
+
+@pytest.mark.parametrize("command", ["git status", "ls -la", "echo pytest", "rg vitest src",
+                                     "cat <<'EOF'\npytest\nEOF", "git commit -m 'run vitest'"])
+def test_a_non_test_command_never_reads_processes(command, monkeypatch, tmp_path):
+    monkeypatch.setenv(FLAG, "1")
+    calls = _fake_pids(monkeypatch, ["111"])
+    assert _reason(command, cwd=tmp_path) is None
+    assert not calls
+
+
+def test_flag_off_and_escape_never_read_processes(monkeypatch, tmp_path):
+    calls = _fake_pids(monkeypatch, ["111"])
+    assert _reason("pytest tests/test_x.py", cwd=tmp_path) is None
+    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.setenv(ESCAPE, "1")
+    assert _reason("pytest tests/test_x.py", cwd=tmp_path) is None
+    assert not calls
+
+
+def test_a_whole_suite_is_refused_as_a_suite_not_as_a_runner(monkeypatch, tmp_path):
+    monkeypatch.setenv(FLAG, "1")
+    _fake_pids(monkeypatch, ["111"])
+    reason = _reason("pytest -q", cwd=tmp_path)
+    assert MARKER in reason and RUNNER_REFUSAL not in reason
+
+
+class _Done:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_the_process_read_parses_pids(monkeypatch):
+    seen = {}
+
+    def run(args, **kw):
+        seen["args"], seen["kw"] = args, kw
+        return _Done("4242\r\n77\r\n")
+    monkeypatch.setattr(deny_gate, "_IS_WINDOWS", True, raising=False)
+    monkeypatch.setattr(deny_gate.subprocess, "run", run, raising=False)
+    assert READ_PROCESSES() == ["4242", "77"]
+    assert "vitest|playwright" in seen["args"][-1] and "Get-CimInstance" in seen["args"][-1]
+    assert 0 < seen["kw"]["timeout"] <= 10
+
+
+@pytest.mark.parametrize("failure", [OSError("no powershell"),
+                                     subprocess.TimeoutExpired("powershell", 8)])
+def test_a_failed_process_read_allows(failure, monkeypatch):
+    def run(*a, **kw):
+        raise failure
+    monkeypatch.setattr(deny_gate, "_IS_WINDOWS", True, raising=False)
+    monkeypatch.setattr(deny_gate.subprocess, "run", run, raising=False)
+    assert READ_PROCESSES() == []
+
+
+def test_off_windows_nothing_is_read(monkeypatch):
+    def run(*a, **kw):
+        raise AssertionError("must not spawn")
+    monkeypatch.setattr(deny_gate, "_IS_WINDOWS", False, raising=False)
+    monkeypatch.setattr(deny_gate.subprocess, "run", run, raising=False)
+    assert READ_PROCESSES() == []

@@ -41,6 +41,7 @@ import importlib.util  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import subprocess  # noqa: E402
 import traceback  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -147,6 +148,9 @@ def _command(payload) -> str | None:
 #: A file, or a word carrying a shell expansion ($FILES, "$@", $(cat list)), is a
 #: target. Judged on shell words, not on text: `grep -E 'vitest\|pytest'` and a
 #: heredoc body are prose. Bash only. deny_floor.py is not consulted or changed.
+#: Same flag, same escape: a test run that names its target is still refused while
+#: another vitest/playwright process is alive (one runner at a time). Only a test
+#: run reads the process list; every other Bash call pays nothing.
 _SUITES_FLAG = "LITEHARNESS_DENY_FULL_SUITES"
 _SUITES_ESCAPE = "LITEHARNESS_ALLOW_FULL_SUITE"
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
@@ -159,6 +163,9 @@ _SUITES_REFUSAL = (
     "touched, e.g. `python -m pytest path/to/test_file.py` or `npx vitest run path/to/file.test.ts`, "
     f"plus the typecheck. To run the full suite once on purpose, set {_SUITES_ESCAPE}=1 in the "
     "environment of that session.")
+_RUNNER_REFUSAL = ("Refused: another test runner is alive on this machine (pids %s). One runner at a "
+                   "time: wait for it to finish, then re-run your single file.")
+_IS_WINDOWS = sys.platform == "win32"
 
 
 def _balanced(cmd: str, i: int, open_c: str, close_c: str) -> int:
@@ -367,17 +374,41 @@ def _is_full_suite(seg):
     return None
 
 
+def _live_runner_pids() -> list[str]:
+    """Pids of live vitest/playwright runners (bun.exe or node.exe) on this machine.
+
+    A coordination guard, not a safety floor: where it cannot look (not Windows, no
+    PowerShell, a read that fails or times out) it returns [] and the call is allowed."""
+    if not _IS_WINDOWS:
+        return []
+    try:
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='bun.exe' OR Name='node.exe'\" | "
+             "Where-Object { $_.CommandLine -match 'vitest|playwright' } | "
+             "ForEach-Object { $_.ProcessId }"],
+            capture_output=True, text=True, timeout=8,
+        ).stdout.split()
+    except Exception:
+        return []
+
+
 def _full_suite_refusal(payload) -> str | None:
-    """The refusal text when the opt-in flag is on and a Bash command runs a whole suite."""
+    """The refusal text when the opt-in flag is on and a Bash command is a test run that is
+    either a whole suite or starts while another seat's runner is alive. A command that is
+    not a test run is judged on text alone: no process is read."""
     if os.environ.get(_SUITES_FLAG, "").strip().lower() not in ("1", "true", "yes", "on"):
         return None
     if os.environ.get(_SUITES_ESCAPE) == "1" or payload.get("tool_name") != "Bash":
         return None
     command = _command(payload)
-    if command is None or not any(r for s in _shell_segments(command)
-                                  if (r := _is_full_suite(s)) is not None):
+    runs = [r for s in _shell_segments(command or "") if (r := _is_full_suite(s)) is not None]
+    if not runs:
         return None
-    return _SUITES_REFUSAL
+    if any(runs):
+        return _SUITES_REFUSAL
+    pids = _live_runner_pids()
+    return _RUNNER_REFUSAL % ",".join(pids[:6]) if pids else None
 
 
 def _load_floor():
