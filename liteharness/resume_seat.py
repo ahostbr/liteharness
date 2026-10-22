@@ -97,23 +97,10 @@ def lookup(agent_id: str | None, convo_id: str | None) -> tuple[str, dict, dict]
 
 
 def _ancestor_pids(pid: int | str | None) -> list[int]:
-    """Live process and at most six parents, stopping on process exit/reused pid."""
-    try:
-        import psutil
+    """Live process and at most six parents; unknown evidence grants no ancestry."""
+    from .process_ancestry import ancestor_pids
 
-        process = psutil.Process(int(pid))
-        chain = []
-        for _ in range(7):  # child + six ancestors; do not walk to an unrelated root
-            chain.append(process.pid)
-            parent = process.parent()
-            if parent is None or parent.create_time() > process.create_time():
-                break
-            process = parent
-        return chain
-    except ImportError:
-        return []
-    except (psutil.Error, ValueError, TypeError, OverflowError):
-        return []
+    return ancestor_pids(pid)
 
 
 def _old_pty(registry: dict, sessions: list) -> dict | None:

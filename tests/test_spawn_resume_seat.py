@@ -132,7 +132,16 @@ def test_old_pty_matches_litetui_launcher_through_python_parent(monkeypatch):
             parent = {48832: 115132, 115132: 133900, 133900: None}[self.pid]
             return Process(parent) if parent else None
 
+        def is_running(self):
+            return True
+
+        def status(self):
+            return psutil.STATUS_RUNNING
+
     monkeypatch.setattr(psutil, "Process", Process)
+    if sys.platform == "win32":
+        from ancestry_boundary import windows_processes
+        windows_processes(monkeypatch, {48832: (115132, 30), 115132: (133900, 20), 133900: (0, 10)})
     sessions = [{"id": "other", "pid": 42, "cwd": "/wrong"},
                 {"id": "pty-13", "pid": 133900, "cwd": "/project"}]
     registry = {"session_pid": 48832, "canvas_session_id": None}
