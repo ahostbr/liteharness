@@ -1,5 +1,6 @@
 """Direct LiteTUI launches have native PID evidence but no canvas-session env."""
 import json
+import sys
 from types import SimpleNamespace
 
 import psutil
@@ -23,9 +24,13 @@ def test_missing_canvas_link_uses_exact_native_process(world, monkeypatch, capsy
     def process(pid):
         assert pid in (PID, PID + 1)
         return SimpleNamespace(pid=pid, create_time=lambda: 1 if pid == PID else 0.5,
-                               parent=lambda: process(PID + 1) if pid == PID else None)
+                               parent=lambda: process(PID + 1) if pid == PID else None,
+                               is_running=lambda: True, status=lambda: psutil.STATUS_RUNNING)
 
     monkeypatch.setattr(psutil, 'Process', process)
+    if sys.platform == 'win32':
+        from ancestry_boundary import windows_processes
+        windows_processes(monkeypatch, {PID: (PID + 1, 1), PID + 1: (0, 0.5)})
 
     def transport(method, path, body=None, **kwargs):
         result = bridge(method, path, body, **kwargs)
