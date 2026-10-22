@@ -22,6 +22,10 @@ their path is judged by the jobs-file rule ALONE. A path not named jobs.json
 returns before deny_floor.py is even loaded, so ordinary edits pay only the
 process start and the JSON parse, and cannot reach the floor to crash in it.
 
+Opt-in (T0427): with LITEHARNESS_DENY_FULL_SUITES=1 a Bash command that runs a whole
+test suite is refused too, after the floor has had its say. Off by default; see the
+"Opt-in" block below. It is inside the same try, so a crash in it falls to the fallback.
+
 ⚠️ INSTALL ORDER: if this FILE is missing, python exits 2, which Claude Code
 treats as BLOCK -- every matched tool call on every Claude seat stops. With the
 file tools in the matcher that is EVERY Write/Edit too (Dijkstra 0fd0f2d0). Copy
@@ -37,6 +41,7 @@ import importlib.util  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import subprocess  # noqa: E402
 import traceback  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -130,6 +135,282 @@ def _command(payload) -> str | None:
     return "\n".join(typed) or None
 
 
+#: ── Opt-in: refuse a whole test suite (T0427, folded from a per-machine hook) ──
+#: OFF unless LITEHARNESS_DENY_FULL_SUITES is truthy ("1", "true", "yes", "on").
+#: An env var, not a config key: this file is stdlib-only and runs on every call,
+#: the harness config is YAML (no stdlib parser), and a flag read from a file that
+#: can be missing or malformed is one more way for the gate to misjudge. The
+#: harness that launches the seat sets it; LITEHARNESS_ALLOW_FULL_SUITE=1 in the
+#: same environment lifts it for the one deliberate, serialized run.
+#:
+#: A whole suite is a runner (pytest, vitest, playwright test, bun test, cargo test,
+#: bun run test*, npm|pnpm|yarn [run] test*) in COMMAND position with no target.
+#: A file, or a word carrying a shell expansion ($FILES, "$@", $(cat list)), is a
+#: target. Judged on shell words, not on text: `grep -E 'vitest\|pytest'` and a
+#: heredoc body are prose. Bash only. deny_floor.py is not consulted or changed.
+#: Same flag, same escape: a test run that names its target is still refused while
+#: another vitest/playwright process is alive (one runner at a time). Only a test
+#: run reads the process list; every other Bash call pays nothing.
+_SUITES_FLAG = "LITEHARNESS_DENY_FULL_SUITES"
+_SUITES_ESCAPE = "LITEHARNESS_ALLOW_FULL_SUITE"
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
+_SRC_FILE = re.compile(r"\.(ts|tsx|js|mjs)$")
+_PY_TARGET = re.compile(r"\.py(::|$)")
+_TEST_SCRIPT = re.compile(r"test(\W|$)")
+_VAR_START = "_@*#?!-"
+_SUITES_REFUSAL = (
+    f"Refused: this runs a full test suite ({_SUITES_FLAG} is on). Run only the test files you "
+    "touched, e.g. `python -m pytest path/to/test_file.py` or `npx vitest run path/to/file.test.ts`, "
+    f"plus the typecheck. To run the full suite once on purpose, set {_SUITES_ESCAPE}=1 in the "
+    "environment of that session.")
+_RUNNER_REFUSAL = ("Refused: another test runner is alive on this machine (pids %s). One runner at a "
+                   "time: wait for it to finish, then re-run your single file.")
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _balanced(cmd: str, i: int, open_c: str, close_c: str) -> int:
+    """Index just past the group whose opener is at cmd[i]; quotes inside are skipped."""
+    depth, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"":
+            j = cmd.find(c, i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if c == open_c:
+            depth += 1
+        elif c == close_c:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
+def _heredoc_delim(cmd: str, i: int):
+    """After `<<`: returns (delimiter, strip_tabs, index past the delimiter word)."""
+    n = len(cmd)
+    strip = cmd[i:i + 1] == "-"
+    if strip:
+        i += 1
+    while i < n and cmd[i] in " \t":
+        i += 1
+    word = []
+    while i < n and cmd[i] not in " \t\n;&|()<>":
+        c = cmd[i]
+        if c in "'\"":
+            j = cmd.find(c, i + 1)
+            j = n if j < 0 else j
+            word.append(cmd[i + 1:j])
+            i = j + 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 1
+            c = cmd[i]
+        word.append(c)
+        i += 1
+    return "".join(word), strip, i
+
+
+def _skip_heredocs(cmd: str, i: int, pending) -> int:
+    """cmd[i] is the first char after a newline; skip each pending heredoc body."""
+    n = len(cmd)
+    for delim, strip in pending:
+        while i < n:
+            j = cmd.find("\n", i)
+            line = cmd[i:n if j < 0 else j]
+            i = n if j < 0 else j + 1
+            if (line.lstrip("\t") if strip else line) == delim:
+                break
+    return i
+
+
+def _is_var(cmd: str, i: int) -> bool:
+    """cmd[i] is a `$` that starts a plain variable reference ($x, $1, $@ ...)."""
+    nxt = cmd[i + 1:i + 2]
+    return bool(nxt) and (nxt.isalnum() or nxt in _VAR_START)
+
+
+def _shell_segments(cmd: str):
+    """Shell-ish tokenizer. Returns segments, each a list of (text, dynamic) words; `dynamic`
+    marks a word carrying an expansion ($x, ${x}, $(..), `..`) outside single quotes. Segments
+    split on UNQUOTED newline ; & | ( ). Heredoc bodies and comments are dropped."""
+    segs, words = [], []
+    cur, has, dyn = [], False, False
+    pending = []
+    i, n = 0, len(cmd)
+
+    def end_word():
+        nonlocal cur, has, dyn
+        if has:
+            words.append(("".join(cur), dyn))
+        cur, has, dyn = [], False, False
+
+    def end_seg():
+        nonlocal words
+        end_word()
+        if words:
+            segs.append(words)
+        words = []
+
+    def expansion(j):
+        """cmd[j] is `$(`, `${` or a backtick: the index past it (j itself when it is none)."""
+        if cmd[j] == "`":
+            k = cmd.find("`", j + 1)
+            return n if k < 0 else k + 1
+        if cmd[j:j + 2] == "$(":
+            return _balanced(cmd, j + 1, "(", ")")
+        if cmd[j:j + 2] == "${":
+            return _balanced(cmd, j + 1, "{", "}")
+        return j
+
+    while i < n:
+        c = cmd[i]
+        if c == "\n":
+            end_seg()
+            i += 1
+            if pending:
+                i = _skip_heredocs(cmd, i, pending)
+                pending = []
+        elif c in " \t\r":
+            end_word()
+            i += 1
+        elif c == "#" and not has:
+            j = cmd.find("\n", i)
+            i = n if j < 0 else j
+        elif c in ";|()":
+            end_seg()
+            i += 1
+        elif c == "&":
+            if (cur and cur[-1] in "<>") or cmd[i + 1:i + 2] == ">":   # 2>&1, &>file
+                cur.append(c)
+                has = True
+            else:
+                end_seg()
+            i += 1
+        elif c == "<" and cmd[i:i + 2] == "<<" and cmd[i:i + 3] != "<<<":
+            delim, strip, i = _heredoc_delim(cmd, i + 2)
+            if delim:
+                pending.append((delim, strip))
+        elif c == "'":
+            j = cmd.find("'", i + 1)
+            j = n if j < 0 else j
+            cur.append(cmd[i + 1:j])
+            has = True
+            i = j + 1
+        elif c == '"':
+            has = True
+            i += 1
+            while i < n and cmd[i] != '"':
+                d = cmd[i]
+                if d == "\\" and cmd[i + 1:i + 2] and cmd[i + 1] in '"\\$`':
+                    cur.append(cmd[i + 1])
+                    i += 2
+                elif d in "$`" and expansion(i) != i:
+                    j = expansion(i)
+                    cur.append(cmd[i:j])
+                    dyn = True
+                    i = j
+                else:
+                    if d == "$" and _is_var(cmd, i):
+                        dyn = True
+                    cur.append(d)
+                    i += 1
+            i += 1
+        elif c == "\\" and i + 1 < n:
+            cur.append(cmd[i + 1])
+            has = True
+            i += 2
+        elif c in "$`" and expansion(i) != i:
+            j = expansion(i)
+            cur.append(cmd[i:j])
+            has = dyn = True
+            i = j
+        else:
+            if c == "$" and _is_var(cmd, i):
+                dyn = True
+            cur.append(c)
+            has = True
+            i += 1
+    end_seg()
+    return segs
+
+
+def _is_full_suite(seg):
+    """None when the segment is not a test run; else True if the run is a whole suite."""
+    k = 0
+    while k < len(seg) and _ENV_ASSIGN.match(seg[k][0]):
+        k += 1
+    if k < len(seg) and seg[k][0] in ("bunx", "npx"):
+        k += 1
+    elif k + 1 < len(seg) and seg[k][0] == "python" and seg[k + 1][0] == "-m":
+        k += 2
+    if k >= len(seg):
+        return None
+    name, rest = seg[k][0], seg[k + 1:]
+    texts = [t for t, _ in rest]
+    expands = any(d for _, d in rest)
+    has_src = expands or any(_SRC_FILE.search(t) for t in texts)
+    if name == "vitest":
+        return not has_src
+    if name == "playwright":
+        return None if texts[:1] != ["test"] else not has_src
+    if name == "pytest":
+        return not (expands or any(_PY_TARGET.search(t) for t in texts))
+    if name == "cargo":
+        if texts[:1] != ["test"]:
+            return None
+        return not (expands or any(re.match(r"\w", t) for t in texts[1:]))
+    if name == "bun":
+        if texts[:1] == ["run"] and len(texts) > 1 and _TEST_SCRIPT.match(texts[1]):
+            return True
+        return not has_src if texts[:1] == ["test"] else None
+    if name in ("npm", "pnpm", "yarn"):
+        script = texts[1:] if texts[:1] == ["run"] else texts
+        return True if script and _TEST_SCRIPT.match(script[0]) else None
+    return None
+
+
+def _live_runner_pids() -> list[str]:
+    """Pids of live vitest/playwright runners (bun.exe or node.exe) on this machine.
+
+    A coordination guard, not a safety floor: where it cannot look (not Windows, no
+    PowerShell, a read that fails or times out) it returns [] and the call is allowed."""
+    if not _IS_WINDOWS:
+        return []
+    try:
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='bun.exe' OR Name='node.exe'\" | "
+             "Where-Object { $_.CommandLine -match 'vitest|playwright' } | "
+             "ForEach-Object { $_.ProcessId }"],
+            capture_output=True, text=True, timeout=8,
+        ).stdout.split()
+    except Exception:
+        return []
+
+
+def _full_suite_refusal(payload) -> str | None:
+    """The refusal text when the opt-in flag is on and a Bash command is a test run that is
+    either a whole suite or starts while another seat's runner is alive. A command that is
+    not a test run is judged on text alone: no process is read."""
+    if os.environ.get(_SUITES_FLAG, "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    if os.environ.get(_SUITES_ESCAPE) == "1" or payload.get("tool_name") != "Bash":
+        return None
+    command = _command(payload)
+    runs = [r for s in _shell_segments(command or "") if (r := _is_full_suite(s)) is not None]
+    if not runs:
+        return None
+    if any(runs):
+        return _SUITES_REFUSAL
+    pids = _live_runner_pids()
+    return _RUNNER_REFUSAL % ",".join(pids[:6]) if pids else None
+
+
 def _load_floor():
     spec = importlib.util.spec_from_file_location("liteharness_deny_floor", FLOOR)
     floor = importlib.util.module_from_spec(spec)
@@ -164,6 +445,7 @@ def decide(payload: dict) -> dict | None:
     bases = [session] + ([os.path.join(session, tool_cwd)] if isinstance(tool_cwd, str)
                          and tool_cwd else [])
     reason = next(filter(None, (floor.refusal(command, base) for base in bases)), None)
+    reason = reason or _full_suite_refusal(payload)
     return _deny(reason) if reason else None
 
 
