@@ -5,6 +5,24 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] — 2026-10-22
+
+Four locally merged cards that the maintainer has not yet checked end to end.
+
+### Added
+- **Deny gate: opt-in refusal of whole test suites (T0427).** Off unless
+  `LITEHARNESS_DENY_FULL_SUITES` is set; it also folds in the old hook's "one test runner at a
+  time" check.
+- **Deny gate installer installs a named commit (T0091).** `install_deny_gate.py` installs from
+  a named commit, one file at a time, and records what it installed.
+
+### Fixed
+- **Spawn no longer prints a false "SPAWN REFUSED" (T0621-A)** for a seat that registered and
+  runs: runtime ancestry is bounded and the native transcript evidence is awaited.
+- **A Bash-launched LiteTUI gets its Claude spawner back only with a live process-ancestry
+  proof (T0106).** The bounded native process identity proof is shared; unlinked LiteTUI
+  runtimes are verified and saved roles recovered.
+
 ## [0.4.7] — 2026-10-19
 
 Everything below except the Agent() item, the `ls-youtube` route and the removed tool guard

@@ -111,7 +111,7 @@ def test_reconciliation_payload_inventory_and_digest(tmp_path):
     assert current['published_restoration_baseline'] == 'fba17c7c40a83584283418c6499467a1a8805196'
     assert current['initial_target_commit'] == '4e57b5f3e851446965f5798431d23f77005bd778'
     assert current['plugin_public_baseline'] == '02f880cfe474e170e511210fb2cd6b8b1dd79f0e'
-    assert current['package_version'] == '0.4.7'
+    assert current['package_version'] == '0.4.8'
     assert current['tracked_runtime_exclusions'] == ['skills/ls-conversation-lookup/.last_indexed']
 
 

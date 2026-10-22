@@ -23,7 +23,7 @@
   "upstream_provenance_status": "historical: source_repo/source_commit/source_path/synced_at record the prior upstream baseline; this reconciled tree was not synced to that commit",
   "reconciliation": {
     "task_id": "T0335-H",
-    "package_version": "0.4.7",
+    "package_version": "0.4.8",
     "published_restoration_baseline": "fba17c7c40a83584283418c6499467a1a8805196",
     "initial_target_commit": "4e57b5f3e851446965f5798431d23f77005bd778",
     "method": "public-descendant; selected retirement revert, owned launch, startup lock, registration, sender checks, Theater and speech guidance; no wholesale tree sync",
