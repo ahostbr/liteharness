@@ -37,8 +37,11 @@ token is the real fix and is out of this card.
 
 1. Every live registry seat plus `--include-offline` ids, resolved from the registry row and the
    native transcript (Claude) or the owned home (LiteTUI). Unresolvable seats stay in the
-   denominator as blocked rows. The caller is the manifest coordinator: never auto-launched,
-   closed or compacted.
+   denominator as blocked rows. The caller is the manifest coordinator: never auto-launched
+   or closed. The detached SAVE worker collects it last, using `--coordinator-handoff` rather
+   than asking the initiating seat to answer its own call. Claude compaction is requested and
+   its boundary observed; LiteTUI uses native prepare/compact/flush. Normal completion needs
+   no manual coordinator compaction/retry. A refused or unobserved boundary remains a blocker.
    **Seats the user started himself are left out.** A seat nobody spawned (empty `spawned_by`) that is not
    the coordinator is not ours to hand off or compact: it is recorded in the manifest's `exclusions` with
    reason `started-directly`, never asked, never compacted, never restored. `--exclude NAME|ID` (repeatable)

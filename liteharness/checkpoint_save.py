@@ -4,7 +4,8 @@ The roster alone is the cure for the 2026-10-19 failure, so an `incomplete` mani
 published BEFORE any seat is asked for anything. Receipts come through a small process
 seam (`SaveEnv`): cooperative inbox handoff, a configured compact command for Claude
 seats, LiteTUI's native checkpoint verbs. This module never commits, pushes, stashes,
-kills, reboots or compacts the coordinator, and never reaches into private scripts.
+kills or reboots, and never reaches into private scripts. The detached worker collects
+its initiating coordinator last, using the supplied handoff rather than waiting for self-mail.
 """
 from __future__ import annotations
 
@@ -511,6 +512,9 @@ class Saver:
         requested_at = self.env.now()
         self.request_handoffs(peers)
         replies = self.await_handoffs(peers)
+        # The submitter must be free to return from SAVE before its runtime can compact.
+        # Peer collection runs first in this detached worker; no self-inbox handshake.
+        todo.sort(key=lambda s: s.agent_id == manifest.coordinator.agent_id)
         for seat in todo:
             if self.cancelled():
                 self.release_holds()
@@ -560,9 +564,16 @@ class Saver:
         return merged
 
     def collect_coordinator(self, manifest: Manifest, seat: Seat, roots: list[Path]) -> Collected:
-        """The coordinator's handoff is supplied; its compaction is observed, never requested."""
+        """Use the supplied handoff; collect the boundary without a manual retry.
+
+        Called last by the detached worker, never synchronously in the initiating
+        tool process. Claude's configured compactor waits for idle; LiteTUI's native
+        checkpoint adapter owns its safe-boundary refusal/hold semantics.
+        """
         out, cid = Collected(disposition='idle'), manifest.checkpoint_id
         handoff = Path(manifest.coordinator.read_first)
+        if seat.cli == 'litetui':
+            return self.collect_litetui(manifest, seat, (handoff, 'idle'), roots)
         revision = seat.source_revision
         out.receipts.append(_receipt(cid, seat, 'handoff', revision, handoff, sha256_file(handoff), durable=True,
                                      assurance='cooperative', at=self.tick()))
@@ -572,9 +583,12 @@ class Saver:
             since = datetime.fromtimestamp(handoff.stat().st_mtime, timezone.utc)
             marker = observe_compaction(transcript, since)
         if marker is None:
-            out.blockers.append(Blocker('coordinator-compaction-pending', seat.agent_id,
-                                        'Compact the coordinator after its handoff, then retry its seat'))
-            return self.unsupported(out, cid, seat, revision, blocker=False)
+            compacted = self.compact_claude(manifest, seat, self.env.now(), handoff)
+            if compacted is None:
+                return self.unsupported(out, cid, seat, revision)
+            out.receipts.extend(compacted.receipts)
+            out.blockers.extend(compacted.blockers)
+            return out
         for kind in ('compact', 'boundary'):
             path, digest = evidence(self.store, cid, seat.agent_id, kind,
                                     {'kind': kind, 'observed': marker, 'transcript': str(transcript)})

@@ -265,13 +265,40 @@ def test_failed_compact_command_blocks_with_failed_code(world):
     assert manifest.state == 'incomplete'
 
 
-def test_uncompacted_coordinator_leaves_it_pending_and_retry_can_finish(world):
+def test_coordinator_compacts_last_in_the_same_save_without_manual_retry(world):
+    w = world
+    coord, handoff = coordinator(w)
+    peer = w.claude(2, parent=coord)
+    store, params, result, _ = save(w, coord, handoff)
+    assert result.state == 'complete'
+    assert store.read_manifest(params.checkpoint_id).state == 'complete'
+    assert [argv[-1] for argv in w.fleet.ran] == [peer, coord]
+    assert all(recipient != coord for _, recipient, _ in w.fleet.sent)
+
+
+def test_litetui_coordinator_uses_native_boundary_in_the_same_save(world):
+    w = world
+    tui = w.litetui(10, role='orchestrator', retired=False)
+    handoff = w.owned_root / '.agents' / tui.name / 'handoff.md'
+    handoff.write_text('SAVE: native coordinator', encoding='utf-8')
+    store, params, result, _ = save(w, tui.agent_id, handoff)
+    assert result.state == 'complete'
+    manifest = store.read_manifest(params.checkpoint_id)
+    boundary = next(r for r in manifest.receipts if r.kind == 'boundary')
+    assert boundary.assurance == 'native' and boundary.durable
+    assert w.fleet.sent == []
+    assert w.fleet.litetui_calls == ['gui.checkpoint.prepare', 'gui.conversations.compact', 'gui.checkpoint.flush']
+
+
+def test_failed_coordinator_compaction_is_explicit_and_retry_can_finish(world):
     w = world
     coord, handoff = coordinator(w)
     w.claude(2, parent=coord)
+    real_run = w.fleet.run
+    w.fleet.run = lambda argv, timeout: 3 if argv[-1] == coord else real_run(argv, timeout)
     store, params, result, op = save(w, coord, handoff)
     manifest = store.read_manifest(params.checkpoint_id)
-    assert [(b.seat_id, b.code) for b in manifest.blockers] == [(coord, 'coordinator-compaction-pending')]
+    assert [(b.seat_id, b.code) for b in manifest.blockers] == [(coord, 'compact-failed')]
     assert result.state == 'incomplete'
     # The caller compacts itself, then retries ONLY its own seat; the peer is not asked again.
     compacted(w, coord, handoff)
