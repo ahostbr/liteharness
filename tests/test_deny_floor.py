@@ -2289,3 +2289,83 @@ def test_git_dash_C_with_a_spaced_quoted_directory_is_still_a_read(checkouts, tm
     assert deny_floor.refusal(f'git -C "{spaced}" log -- run.bat', workspace, home) is None
     reason = deny_floor.refusal("git -c core.pager=run.bat log", spaced, home)
     assert reason and "[owner-launcher]" in reason
+
+
+# T0105 round 2: a wrapper head that RUNS its argument puts the wrapped command's first
+# word in command position, so a launcher there is a launch. Every shape below was
+# MEASURED allowed on 9b690be; run.bat in the `checkouts` layout is `@echo off`.
+WRAPPER_LAUNCHES_T0105 = [
+    # xargs, find -exec family
+    "xargs <bat>", "xargs -n1 <fwd>", "echo x | xargs <bat>", "xargs -I{} <bat> {}",
+    "xargs -0 -- <bat>", "xargs sh -c '<fwd>'", "xargs bash -c <fwd>",
+    "find . -exec <bat> ;", "find . -exec <fwd> {} +", "find . -execdir <bat> ;",
+    "find . -ok <bat> ;", "find . -okdir <bat> ;", "find . -name x -exec cmd /c <bat> ;",
+    "find . -exec sh -c '<fwd>' ;", "find . -exec cat {} \\; -exec <bat> \\;",
+    # priority / environment / limit wrappers
+    "nice <bat>", "nice -n 5 <fwd>", "nice sh -c <fwd>", "ionice -c3 <fwd>", "setsid <fwd>",
+    "stdbuf -oL <fwd>", "env -u X <fwd>", "env -S <fwd>", "timeout -s KILL 5 <fwd>",
+    "timeout -k 1 5 <fwd>", "exec -a x <fwd>", "taskset 1 <fwd>", "chrt 1 <fwd>",
+    "cpulimit -l 50 <fwd>", "flock /tmp/x <fwd>", "strace <fwd>", "ltrace <fwd>",
+    # privilege / supervision / terminal wrappers
+    "sudo <fwd>", "doas <fwd>", "watch <fwd>", "watch -n 1 <fwd>", "chronic <fwd>",
+    "unbuffer <fwd>", "script -c <fwd> /dev/null", "parallel <fwd>", "parallel <fwd> ::: a b",
+    # shells and evaluators
+    "eval <fwd>", "eval '<fwd>'", "zsh -c '<fwd>'", "source <fwd>", ". <fwd>", "busybox sh <fwd>",
+    # Windows
+    "start /b <bat>", "start /wait <bat>", "start \"title\" <bat>", "powershell -File <bat>",
+    "pwsh -File <bat>", "powershell -ExecutionPolicy Bypass -File <bat>",
+    "Invoke-Expression '<bat>'", "iex '<bat>'", ". '<bat>'", "Start-Job <bat>",
+    "wmic process call create <bat>",
+    "Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList <bat>",
+    "Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='<bat>'}",
+    "schtasks /create /tn x /tr <bat> /sc once /st 00:00", "at 00:00 <bat>",
+    "runas /user:x <bat>", "conhost <bat>", "wt <bat>", "wt.exe <bat>", "explorer <bat>",
+    "rundll32 <bat>", "mshta <bat>",
+]
+#: The same family spelled relative, judged from inside the checkout.
+WRAPPER_LAUNCHES_RELATIVE_T0105 = [
+    "xargs ./run.bat", "xargs run.bat", "xargs run", "find . -exec ./run.bat ;",
+    "find . -exec run.bat {} ;", "find . -exec run ;", "nice run.bat", "nice run",
+    "env -u X run", "timeout -s KILL 5 ./run.bat",
+]
+#: Wrappers whose wrapped command is something else, or that only look at the name.
+WRAPPER_CONTROLS_T0105 = [
+    "find . -name run.bat", "find . -name run.bat -print", "find <dir> -name run.bat",
+    "find . -exec cat {} ;", "find . -exec grep -l x {} +", "find . -exec cat <fwd> ;",
+    "find . -exec git log -- <fwd> ;", "find . -exec npm run x ;",
+    "xargs cat <fwd>", "xargs grep foo <bat>", "xargs git log -- <bat>", "echo <bat> | xargs cat",
+    "xargs -n1 uv run x", "nice -n 5 cat <bat>", "nice -n 10 uv run pytest",
+    "timeout -s KILL 5 cat <bat>", "timeout 5 uv run pytest", "env -u X uv run pytest",
+    "env FOO=1 python x.py", "sudo uv run pytest", "time uv run pytest", "command -v run.bat",
+    "powershell -Command Get-Date", "Start-Process notepad", "Invoke-Expression 'Get-Date'",
+    "cmd /c echo run.bat", "type <bat> | more", "bun run dev",
+]
+
+
+def _wrap_spell(template: str, litetui: Path) -> str:
+    bat = litetui / "run.bat"
+    return (template.replace("<bat>", str(bat)).replace("<fwd>", bat.as_posix())
+            .replace("<dir>", str(litetui)))
+
+
+@pytest.mark.parametrize("template", WRAPPER_LAUNCHES_T0105)
+@pytest.mark.parametrize("shell", [None, "powershell"])
+def test_a_wrapper_that_runs_its_argument_does_not_hide_the_launcher(checkouts, template, shell):
+    home, workspace, litetui, _ = checkouts
+    command = _wrap_spell(template, litetui)
+    reason = deny_floor.refusal(command, workspace, home, shell=shell)
+    assert reason and "[owner-launcher]" in reason, command
+
+
+@pytest.mark.parametrize("command", WRAPPER_LAUNCHES_RELATIVE_T0105)
+def test_a_wrapper_does_not_hide_a_relative_launcher_inside_the_checkout(checkouts, command):
+    home, _, litetui, _ = checkouts
+    reason = deny_floor.refusal(command, litetui, home)
+    assert reason and "[owner-launcher]" in reason, command
+
+
+@pytest.mark.parametrize("template", WRAPPER_CONTROLS_T0105)
+def test_a_wrapper_around_something_else_still_passes(checkouts, template):
+    home, _, litetui, _ = checkouts
+    command = _wrap_spell(template, litetui)
+    assert deny_floor.refusal(command, litetui, home) is None, command
