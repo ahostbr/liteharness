@@ -2231,3 +2231,61 @@ def test_under_with_two_folders_of_that_name_in_one_path(roots):
     # CONTROL: two folders of that name and no data root above either.
     neither = plain / UNDER / "other" / UNDER / "Seat" / OTHER_NAME
     assert _asked_every_way(neither, workspace, home) == [False] * 4
+
+
+# T0105: a reader excuses the launcher path only in a READ position. The six shapes
+# MEASURED allowed at oss 5365282 each hand the path to a reader's own exec feature.
+# The layout is the `checkouts` fixture: run.bat there is `@echo off`, never the real file.
+READER_EXEC_SHAPES_T0105 = [
+    'git -c alias.x="!{bat}" x',          # git alias: `!` runs the value
+    "git -c core.pager={bat} log",        # git pager
+    "git rebase -x {bat}",                # git rebase --exec
+    "sed '1e {bat}'",                     # sed `e` command
+    "sed 1e\\ {fwd}",                     # ...unquoted, the space escaped
+    'vim -c "!{bat}"',                    # vim ex `:!`
+    "less +!{bat}",                       # less `!` shell escape as the +cmd
+    # The same family: an option VALUE or a subcommand that runs its operand.
+    "git -c core.editor={fwd} commit", "git --upload-pack={fwd} fetch",
+    "git rebase --exec {bat}", "git bisect run {bat}", "git submodule foreach {bat}",
+    "vim -S {bat}", "nano -s {fwd} x", "rg --pre {bat} pattern x",
+]
+READER_READ_SHAPES_T0105 = [
+    "cat {bat}", "type {bat}", "Get-Content {bat}", "Get-Content -Raw {bat}", "gc '{bat}'",
+    "git log -- {bat}", "git diff -- {bat}", "git add {bat}", "git show HEAD:{rel}",
+    "git -C {dir} log -- run.bat", "git blame -- {fwd}",
+    "rg pattern {bat}", "rg -n LITETUI_OWNER {bat}", "grep -n x {bat}", "head -n 5 {bat}",
+    "less {bat}", "vim {bat}", "bat {bat}", "sed -n p {bat}", "echo {bat}",
+    "Write-Host 'starting {bat}'", "cmd /c type {bat}",
+]
+
+
+def _read_spell(template: str, litetui: Path) -> str:
+    bat = litetui / "run.bat"
+    return template.format(bat=bat, fwd=bat.as_posix(), dir=litetui,
+                           rel=f"{litetui.name}/run.bat")
+
+
+@pytest.mark.parametrize("template", READER_EXEC_SHAPES_T0105)
+def test_a_reader_does_not_excuse_the_launcher_in_an_exec_position(checkouts, template):
+    home, workspace, litetui, _ = checkouts
+    command = _read_spell(template, litetui)
+    reason = deny_floor.refusal(command, workspace, home)
+    assert reason and "[owner-launcher]" in reason, command
+
+
+@pytest.mark.parametrize("template", READER_READ_SHAPES_T0105)
+def test_a_reader_still_excuses_the_launcher_in_a_read_position(checkouts, template):
+    home, workspace, litetui, _ = checkouts
+    command = _read_spell(template, litetui)
+    assert deny_floor.refusal(command, workspace, home) is None, command
+
+
+def test_git_dash_C_with_a_spaced_quoted_directory_is_still_a_read(checkouts, tmp_path):
+    """The verb is found with the quoted directory kept as ONE word (T0105)."""
+    home, workspace, _, _ = checkouts
+    spaced = tmp_path / "Program Files" / "LiteTUI"
+    (spaced / "src" / "litetui").mkdir(parents=True)
+    (spaced / "run.bat").write_text("@echo off\n", encoding="utf-8")
+    assert deny_floor.refusal(f'git -C "{spaced}" log -- run.bat', workspace, home) is None
+    reason = deny_floor.refusal("git -c core.pager=run.bat log", spaced, home)
+    assert reason and "[owner-launcher]" in reason

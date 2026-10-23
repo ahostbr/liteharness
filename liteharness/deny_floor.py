@@ -263,6 +263,41 @@ _READERS = frozenset({
     # names in status lines all the time.
     "echo", "write-output", "write-host", "printf",
 })
+#: Readers (and sed) with an exec feature of their own: an option value (`git -c
+#: core.pager=`, `rg --pre`), a `+cmd` / `-c` / `-S` / `!` (less, vim, nano), a
+#: subcommand (`git bisect run`) or sed's `e`. They excuse the launcher path only
+#: in a READ position (T0105); the other readers have no such feature.
+_EXEC_READERS = frozenset({"git", "vim", "vi", "nano", "less", "more", "bat", "rg", "sed"})
+#: git verbs whose operands are paths and revisions. Not a list of the verbs that
+#: run something (bisect run, submodule foreach, rebase -x, difftool): every verb
+#: not listed here is not read.
+_GIT_READ_VERBS = frozenset({
+    "add", "rm", "mv", "restore", "checkout", "reset", "commit", "diff", "show", "log",
+    "blame", "annotate", "status", "ls-files", "ls-tree", "cat-file", "grep", "shortlog",
+    "whatchanged", "check-ignore", "hash-object", "rev-parse", "rev-list", "diff-tree",
+    "diff-files", "diff-index", "update-index",
+})
+#: git options before the verb that take the next word as their value.
+_GIT_VALUE_OPTIONS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace",
+                                "--exec-path", "--config-env", "--super-prefix"})
+#: Value-less flags (and options that only READ their operand) that may stand right
+#: before the path: any other option word there may take the path as its value
+#: (`vim -c`, `-S`, `less +`, `rg --pre`).
+_PLAIN_FLAGS = {
+    "vim": frozenset("-R -p -o -O -d -b -n -m -M -Z -r -e -E -y -v -N -X".split()),
+    "less": frozenset("-N -n -S -i -I -R -r -M -m -F -X -e -E -s -w -W".split()),
+    "nano": frozenset("-l -m -c -w -i -B -E -S -A -D -L -v".split()),
+    "more": frozenset("-s -d -f -u".split()),
+    "bat": frozenset("-n -p -A -P --number --plain --show-all --no-paging".split()),
+    "rg": frozenset("--files -n -N -i -I -l -L -c -w -F -S -s -u -uu -v -o -q -H --hidden "
+                    "--no-heading --heading --no-filename --count --files-with-matches "
+                    "--no-ignore".split()),
+    # sed -f reads the path as a script file (a bare operand, 8bee16c); it is not run.
+    "sed": frozenset("-n -s -E -r -z -u --quiet --silent -f --file".split()),
+}
+_PLAIN_FLAGS["vi"] = _PLAIN_FLAGS["vim"]
+#: Characters that make quoted text a program or an assignment, not a file name.
+_EXEC_MARKER = re.compile(r"[!+=]")
 
 #: The schedule file as a shell word ends it (T1085).
 #: ...with any Windows alias of it (Dijkstra 69c7c209 A1): a stream suffix
@@ -1415,6 +1450,7 @@ def _owner_launch(command: str, match: re.Match, base: Path | None, home: Path,
         r"(?:/c|'/c'|\"/c\")[ \t]*,[ \t]*[\"']?", before, re.IGNORECASE)
     if cmd_wrapper:
         before = ""
+    raw_before = before
     before = before.strip(" \t\"'")
     before = re.sub(r"\d?[<>]{1,2}&?[^\s<>&|]+", "", before)
     position = re.findall(r"[^\s\"'`]+", before.lower())
@@ -1422,8 +1458,18 @@ def _owner_launch(command: str, match: re.Match, base: Path | None, home: Path,
         position[-1] = "-filepath"
     position = [w.lstrip("@^") for w in position if w.lstrip("@^")]
     position = _owner_command_position(position)
-    if position[:1] and position[0] in _READERS:
-        return False
+    if position[:1] and position[0] in _READERS | _EXEC_READERS:
+        if position[0] not in _EXEC_READERS:
+            return False
+        # A bare `{run}` / `{ run }` is brace data in a pattern (T0291A cost corpus),
+        # not a path in an option value.
+        braced = (not prefix and match.group().lower() == "run"
+                  and raw_before.rstrip().endswith("{")
+                  and re.match(r"\s*\}", command[match.end():]) is not None)
+        # ...and so is a quoted literal handed to a native pattern-search head under
+        # a proven PowerShell (`rg 'it''s (run)'`), checked by _pattern_literal_spans.
+        pattern_text = any(a < start < b for a, b in literals)
+        return not (braced or pattern_text or _read_position(position, raw_before))
     # Narrow command positions: direct invocations and cmd's bounded if
     # conditions. Do not turn a later subcommand/argument into argv0.
     if position and position[0] in ("&", "do", "else"):
@@ -1442,6 +1488,49 @@ def _owner_launch(command: str, match: re.Match, base: Path | None, home: Path,
              and ("-filepath" not in position[1:] or position[-1] == "-filepath"))
             or (position[0] in ("invoke-item", "ii") and not position[1:])):
         return False
+    return True
+
+
+def _read_position(position: list[str], raw: str) -> bool:
+    """Is the launcher path an operand this exec-capable reader READS (T0105)?
+
+    `raw` is the segment text in front of the path. Only a path that starts its
+    own word, outside any option value, qualifies; anything doubtful is not a read.
+    """
+    quote, opened = "", 0
+    for i, ch in enumerate(raw):
+        if quote:
+            quote = "" if ch == quote else quote
+        elif ch in "\"'":
+            quote, opened = ch, i
+    if quote:
+        if _EXEC_MARKER.search(raw[opened + 1:]):
+            return False   # vim -c "!path", git -c "alias.x=!path": the quote holds a program
+        raw = raw[:opened]
+    # Glued to `=`, `!`, `+`, `-x` or an escaped space, the path is an option value.
+    if not raw[-1:].isspace() or raw.endswith("\\ "):
+        return False
+    words = raw.split()
+    prev = words[-1].strip("\"'") if words else ""
+    head = position[0]
+    if (head != "git" and prev != "--" and prev not in _PLAIN_FLAGS.get(head, ())
+            and (prev.startswith(("-", "+")) or "!" in prev or "=" in prev)):
+        return False   # the word before it is an option that may take it as its value
+    if head == "git":
+        # Only the verb decides: its options before the path are flags or glued
+        # (`--output=`, `-c k=v`), and the glue was refused above.
+        # Re-tokenise with quotes kept whole: `-C "C:\Program Files\x"` is one word.
+        words = [w.strip("\"'").lower() for w in re.findall(r"\"[^\"]*\"|'[^']*'|\S+", raw)]
+        args, verb, i = words[words.index("git") + 1:] if "git" in words else [], None, 0
+        while i < len(args):
+            if args[i] in _GIT_VALUE_OPTIONS:
+                i += 2
+            elif args[i].startswith("-"):
+                i += 1
+            else:
+                verb = args[i]
+                break
+        return verb in _GIT_READ_VERBS
     return True
 
 
