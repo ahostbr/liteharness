@@ -2192,6 +2192,8 @@ def register_presence() -> None:
                              assuming the human can see a pane.
     POST /canvas/terminal    {{title, cwd}}          /canvas/claude     {{title, model}}
     POST /canvas/split       {{paneId, direction}}   /canvas/tab        {{paneId, leafId}}
+                             {{paneId, sessionId}} re-docks a live terminal no pane shows;
+    GET  /pty/orphans        lists those terminals (live, unclaimed by any pane)
     POST /canvas/browser     {{url, paneId?, newPane?}} — opens a TAB in your one agent browser pane
                              (per workspace/thread); newPane=true ONLY when a separate pane is
                              asked for; paneId opens the tab in THAT pane, and newTab=false
