@@ -1076,6 +1076,65 @@ def _known_agent_ids() -> tuple[set[str], str | None]:
     return ids, None
 
 
+def _alias_holders(to: str) -> list[str]:
+    """Agent ids whose record carries `to` as an `id`/`session_id` alias.
+
+    Empty when `to` is itself an agent's own id: that is an address, not an alias.
+    `_known_agent_ids` counts an alias as registered, so without this a send to
+    one is accepted and stored under a name no watcher polls (T0226).
+    """
+    if (config.get_root() / "agents" / f"{to}.json").exists():
+        return []  # an exact id never scans the registry
+    holders: set[str] = set()
+    try:
+        entries = list((config.get_root() / "agents").glob("*.json"))
+    except OSError:
+        return []
+    for f in entries:
+        if f.name.endswith(".tmp"):
+            continue
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - an unreadable record can't be resolved
+            rec = {}
+        own = rec.get("agent_id") if isinstance(rec.get("agent_id"), str) and rec.get("agent_id") else f.stem
+        if to in (f.stem, own):
+            return []
+        if to in (rec.get("id"), rec.get("session_id")):
+            holders.add(own)
+    return sorted(holders)
+
+
+def _record_pid(agent_id: str):
+    try:
+        return json.loads((config.get_root() / "agents" / f"{agent_id}.json").read_text(encoding="utf-8")).get("session_pid")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _resolve_alias(to: str, holders: list[str]) -> str:
+    """The one live agent holding the alias `to`; otherwise refuse, nothing sent."""
+    live = [h for h in holders if _agent_record_live(h)]
+    if len(live) == 1:
+        return live[0]
+    if live:
+        detail = f"is held by {len(live)} live agents: {', '.join(live)}"
+        hint = "  Send to one of those ids."
+    else:
+        pids = {_record_pid(h) for h in holders} - {None}
+        current = sorted(f.stem for f in (config.get_root() / "agents").glob("*.json")
+                         if f.stem not in holders and _record_pid(f.stem) in pids and _agent_record_live(f.stem))
+        detail = f"is only recorded by {', '.join(holders)}, which is not live (superseded or exited)"
+        hint = (f"  The current id for that session: {', '.join(current)}." if current
+                else "  No live agent holds it.")
+    print(
+        f"Error: {to!r} is not an agent id; it {detail}. NOTHING WAS SENT.\n{hint}\n"
+        f"  `liteharness discover` lists the live agents.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 #: How long to wait before asking the registry a second time (T238).
 #: 50 ms is far longer than the window a single `os.replace` leaves open and far
 #: shorter than a human notices. It is a module constant so a test can shrink it
@@ -1246,6 +1305,7 @@ def cmd_send(
     #
     # Fails CLOSED on an unknown id and OPEN on an unreadable registry, deliberately:
     # see _known_agent_ids. "broadcast" is a real address that owns no record.
+    alias = None
     if not force and to != "broadcast":
         # Two reads, not one: a single listing can miss a record mid-heartbeat.
         # See _verify_recipient.
@@ -1272,6 +1332,11 @@ def cmd_send(
                 file=sys.stderr,
             )
             sys.exit(1)
+        else:
+            # T0226: an alias passes the check above but nothing polls for it.
+            holders = _alias_holders(to)
+            if holders:
+                alias, to = to, _resolve_alias(to, holders)
 
     agent_id = from_id or config.get_agent_id()
     _verify_sender(agent_id, force=force)
@@ -1286,7 +1351,10 @@ def cmd_send(
         model=config.get_model(),
         msg_type=msg_type or inbox.DEFAULT_MSG_TYPE,
     )
-    print(f"Sent message {msg_id[:8]} to {to}")
+    # The first line keeps the address the caller typed: `lst inbox` validates its tail.
+    print(f"Sent message {msg_id[:8]} to {alias or to}")
+    if alias:
+        print(f"delivered to {to} (alias {alias})")
     warning = _not_a_leader_warning(agent_id, to)
     if warning:
         print(warning)

@@ -276,6 +276,51 @@ def test_the_refusal_counts_the_second_listing_not_the_first():
     assert f"{len(OTHERS) + 1} agent(s) known" in err, err
 
 
+# ── an alias is never stored as the address (T0226) ─────────────────────────
+
+def test_an_alias_is_delivered_to_the_one_live_agent_that_holds_it_or_refused():
+    """🔴 T0226. `_known_agent_ids` accepts a `session_id`/`id` key as "registered",
+    so `send <alias>` passed the check, printed "Sent message", and stored
+    to=<alias>. No watcher polls for an alias: the mail sat in new/ for good.
+    LiteTUI's approval relay lost an APPROVE this way, and the sender saw success.
+
+    Exactly one live holder: stored to=<its agent_id>, and the output says so.
+    Two live holders: refused, nothing stored, both ids named.
+    """
+    import subprocess
+
+    alias = "5e55105e-0000-4000-8000-000000000a11"
+    holder = "00000a11-0000-4000-8000-000000000a11"
+    rival = "00000b22-0000-4000-8000-000000000b22"
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        with _Bench() as root:
+            _write_agent(root, holder)
+            row = json.loads(_record(root, holder).read_text(encoding="utf-8"))
+            row.update(session_id=alias, registered_at=datetime.now(timezone.utc).isoformat())
+            _record(root, holder).write_text(json.dumps(row), encoding="utf-8")
+
+            code, out, err = _send(alias)
+            stored = [json.loads(p.read_text(encoding="utf-8")) for p in inbox.INBOX_NEW.glob("*.json")]
+            assert code == 0, err
+            assert [m["to"] for m in stored] == [holder], f"stored to {[m['to'] for m in stored]}"
+            assert f"delivered to {holder} (alias {alias})" in out
+
+            _write_agent(root, rival)  # a second LIVE agent (another process) holds the same alias
+            row = json.loads(_record(root, rival).read_text(encoding="utf-8"))
+            row.update(session_id=alias, session_pid=child.pid,
+                       registered_at=datetime.now(timezone.utc).isoformat())
+            _record(root, rival).write_text(json.dumps(row), encoding="utf-8")
+
+            code, _out, err = _send(alias)
+            assert code == 1 and "NOTHING WAS SENT" in err
+            assert holder in err and rival in err
+            assert len(list(inbox.INBOX_NEW.glob("*.json"))) == 1, "an ambiguous alias stored a message"
+    finally:
+        child.kill()
+        child.wait()
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
 
 
