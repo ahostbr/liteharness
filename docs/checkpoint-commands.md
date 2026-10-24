@@ -98,6 +98,37 @@ when no turn is confirmed). Bare shells satisfying the existing cleanup rules ma
 but recorded placeholder session IDs are retained even when their registry row is absent.
 `--dry-run` lists cleanup candidates; `--keep-shells` skips cleanup.
 
+## Managed cognitive observation (not seed or launch authority)
+
+An existing LiteTUI home resolved by exact agent ID remains authoritative and resumes as-is.
+Checkpoint restore does not pass cognitive seed arguments or replace managed prompt edits.
+A `profile` receipt observes only the **cognitive role+method digest**, never the full prompt
+revision, conversation context, or original `.prompt-launch.json` seed hashes. SAVE and RESTORE
+use the same normalized text hashing contract; legitimate edits produce one nonblocking
+`cognitive role+method digest: profile changed since save` notice in the receipt and restore
+report, not a seat error. Older checkpoints without a profile receipt have an unavailable saved
+digest, not an invented change.
+
+Observation uses a normal optional import of the installed LiteTUI `prompt_overrides` owner
+helpers, with their read-only scoped resolution, metadata validation and newline normalization.
+Only active scoped `role.md` and `method.md` contribute. Missing/inactive entries are explicit,
+not empty text and not guessed global fallbacks. Empty active text is distinct from a missing
+file. Invalid metadata, unstable publication/home identity, or absent/unsupported helper APIs
+produce explicit unavailable/invalid observations; they never reseed a home. The receipt records
+the helper module path and distribution version (null when unavailable), exact home and per-file
+states. Typed payloads and byte hashes join checkpoint, seat and (for RESTORE) operation; each
+restore operation has its own evidence file and cannot overwrite the saved observation.
+Corrupt optional profile bytes/hashes/identity joins produce a nonblocking
+`profile-evidence-invalid` diagnostic, with the saved comparison unavailable and no invented
+change. This does not relax core manifest, ownership, exact-slot or launch validation.
+
+**Deployment limitation:** the current Harness interpreter cannot import `litetui`
+(`find_spec('litetui')` is `None`), so changed-digest notices are **inert there**. The real
+missing-helper case is tested; positive comparison tests substitute the owner-helper boundary
+and do not prove actual LiteTUI effective composition or a watched restart. No source-path
+injection, package installation or runtime endpoint is added. Exact unmanaged seed/migration
+transport remains separate work; this observation cannot authorize or manufacture a profile.
+
 ## Known limits
 
 - Restore refuses to launch a seat that another operation on the same checkpoint started and never

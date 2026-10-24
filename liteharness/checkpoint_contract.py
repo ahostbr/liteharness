@@ -23,7 +23,7 @@ SeatState = Literal['preparing', 'saved', 'blocked', 'reattaching', 'starting',
 OperationState = Literal['accepted', 'running', 'complete', 'incomplete',
                          'rejected', 'canceling', 'canceled', 'unknown']
 ReceiptKind = Literal['handoff', 'compact', 'boundary', 'layout', 'manual-return',
-                      'resource', 'readiness']
+                      'resource', 'readiness', 'profile']
 
 # Recommendations are labels, NOT implicit choices or executable policy.
 RECOMMENDED_DECISIONS = {
@@ -266,6 +266,76 @@ class Receipt:
         _path(self.reference)
         _digest(self.sha256)
         _time(self.observed_at)
+
+
+@dataclass(frozen=True)
+class ProfilePart:
+    state: Literal['active', 'missing', 'inactive', 'invalid', 'unavailable']
+    digest: str | None
+    diagnostic: str | None
+
+    def validate(self):
+        _require((self.state == 'active') == (self.digest is not None), 'Invalid cognitive component digest')
+        if self.digest is not None:
+            _digest(self.digest)
+        if self.diagnostic is not None:
+            _text(self.diagnostic)
+        _require(self.state not in ('invalid', 'unavailable') or self.diagnostic is not None,
+                 'Unavailable cognitive component requires diagnostic')
+
+
+def cognitive_digest(parts: dict[str, ProfilePart]) -> str | None:
+    """Version-1 digest of the named, normalized active component hashes only."""
+    import hashlib
+    import json
+    if not all(part.state == 'active' for part in parts.values()):
+        return None
+    content = {name: part.digest for name, part in parts.items()}
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class ProfileEvidence:
+    """Observation of two active scoped files, NOT a full prompt revision or seed."""
+    version: Literal[1]
+    scope: Literal['cognitive-role+method-v1']
+    checkpoint_id: str
+    seat_id: str
+    operation_id: str | None
+    home: str | None
+    helper_source: str | None
+    helper_version: str | None
+    parts: dict[str, ProfilePart]
+    saved_digest: str | None
+    saved_diagnostic: str | None
+    current_digest: str | None
+    notice: str | None
+
+    def validate(self):
+        for identity in (self.checkpoint_id, self.seat_id, self.operation_id):
+            if identity is not None:
+                _id(identity)
+        for path in (self.home, self.helper_source):
+            if path is not None:
+                _path(path)
+        _require(set(self.parts) == {'role.md', 'method.md'}, 'Cognitive digest requires exactly role+method')
+        active = all(part.state == 'active' for part in self.parts.values())
+        _require(self.current_digest == cognitive_digest(self.parts), 'Cognitive digest disagrees with components')
+        _require(not active or (self.home is not None and self.helper_source is not None),
+                 'Active cognitive observation needs home and helper provenance')
+        for digest in (self.saved_digest, self.current_digest):
+            if digest is not None:
+                _digest(digest)
+        if self.saved_diagnostic is not None:
+            _text(self.saved_diagnostic)
+            _require(self.operation_id is not None and self.saved_digest is None,
+                     'Invalid saved cognitive evidence cannot supply a comparison digest')
+        changed = (self.saved_digest is not None and self.current_digest is not None
+                   and self.saved_digest != self.current_digest)
+        _require(self.notice == ('cognitive role+method digest: profile changed since save' if changed else None),
+                 'Cognitive notice disagrees with observed digests')
+        if self.operation_id is None:
+            _require(self.saved_digest == self.current_digest, 'SAVE cognitive digests must match')
 
 
 @dataclass(frozen=True)

@@ -400,6 +400,19 @@ class Restorer:
             state = 'incomplete'
         return make_result(self.operation_id, self.manifest.checkpoint_id, state, rows)
 
+    def observe_profile(self, seat: Seat) -> None:
+        """Optional evidence cannot block a resume or become prompt authority."""
+        from .checkpoint_profile import observe, retain, saved_digest
+        diagnostic = None
+        try:
+            saved = saved_digest(self.manifest.receipts, seat, self.manifest.checkpoint_id)
+        except ContractError as exc:
+            saved = None  # never consume unvalidated optional evidence
+            diagnostic = f'profile-evidence-invalid: {exc}'
+        observation = observe(seat, self.manifest.checkpoint_id, self.operation_id, saved, diagnostic)
+        receipt = retain(self.store, seat, observation, self.env.now().isoformat())
+        self.evidence[seat.agent_id] = [r for r in self.evidence.get(seat.agent_id, []) if r.kind != 'profile'] + [receipt]
+
     def journal(self, stage: str, seat_id: str | None, result: Result | None) -> None:
         if self.log is not None:
             self.log.event(stage, seat_id, result)
@@ -687,6 +700,10 @@ class Restorer:
         self.journal('plan', None, self.report('running'))
         for row in rows:
             seat = seats.get(row.seat_id)
+            if (seat is not None and seat.cli == 'litetui' and row.action in ('launch', 'reattach')
+                    and row.seat_id not in prior and row.seat_id not in foreign
+                    and self.states.get(row.seat_id) != 'blocked' and not self.cancelled()):
+                self.observe_profile(seat)
             if (row.action != 'launch' or seat is None or row.seat_id in prior or row.seat_id in foreign
                     or self.states.get(row.seat_id) == 'blocked'):
                 if row.action == 'reattach' and seat is not None:
