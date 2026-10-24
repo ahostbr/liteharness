@@ -55,8 +55,12 @@ token is the real fix and is out of this card.
    Claude seats, and LiteTUI's native `gui.checkpoint.*` verbs. No configured command means a
    `compact-unsupported` blocker, never a silent pass. An unknown disposition is `held`.
 4. `complete` only when the contract accepts it. A partial save is retained and restorable.
-5. Layout receipts are durable only when the seat's leaf is observed in `/context` at the frozen
-   revision. That is observation, not a flush proof; LiteSuite exposes no flush endpoint.
+5. Layout durability requires both the frozen `/context` observation and an acknowledged
+   `/harness/checkpoint/layout/flush` write. The collector reads back the returned file, checks its
+   SHA-256 and checkpoint ID, and verifies the exact workspace/thread/pane/leaf (and tab if recorded).
+   The verified layout snapshot is retained in checkpoint evidence, so later live layout writes do
+   not erase it. Observation alone, a missing endpoint, a lost acknowledgement, or a mismatched file
+   stays unsupported.
 6. Never commits, pushes, stashes, kills or reboots.
 
 ## Restore (`checkpoint_restore.py`)
@@ -92,7 +96,9 @@ the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
   slot names is never closed, and the PTY's cwd is not consulted. Anything unreadable stays.
 - A mid-work (`held`) seat keeps its handoff but is never compacted: `held-not-compacted`.
 - Compaction needs `checkpoint.compact_command` for Claude seats; none ships.
-- Layout receipts are observation, not a flush proof (LiteSuite has no flush endpoint).
+- Native layout flush currently requires the requested workspace/thread to be the renderer's
+  loaded active owner. Hidden/foreign-owner capture and enrichment of missing roster slots remain
+  separate work; an observed active leaf is not evidence of whole-fleet layout coverage.
 - An orchestrator caller of any `spawn --split` no longer falls into its own pane by default.
 - A launch that never registered can read as dead: if `spawn` ran, no registry row was written, an old
   row for the seat remains, and its process is gone, the seat reads `dead` once the operation is idle

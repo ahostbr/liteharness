@@ -1,6 +1,7 @@
 """One-call save: real store, contract and roster; only the process boundary is faked."""
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -82,6 +83,22 @@ class Fleet:
                                      'timestamp': self.clock.now().isoformat()}) + '\n')
         return self.compact_rc
 
+    def layout_flush(self, checkpoint_id, workspace, thread):
+        panes = []
+        for path in (self.w.harness / 'agents').glob('*.json'):
+            row = json.loads(path.read_text())
+            if row.get('workspace_id') == workspace and row.get('thread_id') == thread:
+                panes.append({'id': row['pane_id'], 'workspaceId': workspace,
+                              'splitTree': {'type': 'leaf', 'id': row['leaf_id'], 'sessionIds': []}})
+        reference = self.w.tmp / 'thread-layouts.json'
+        content = json.dumps({thread: {'panes': panes}}).encode()
+        reference.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        return {'ok': True, 'receipt': {'schemaVersion': 1, 'checkpointId': checkpoint_id,
+                'receiptId': uid(7100), 'projectId': 'project', 'sourceRevision': digest,
+                'sha256': digest, 'reference': str(reference), 'durable': True,
+                'coverage': 'thread-layouts-file', 'observedAt': self.clock.now().isoformat()}}
+
     def litetui(self, agent_id, command):
         self.litetui_calls.append(command['type'])
         if command['type'].endswith('flush'):
@@ -118,7 +135,7 @@ def compacted(w, agent_id, handoff):
 
 
 def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=800, layout='present',
-         compact_command=None, compact_timeout=900.0):
+         compact_command=None, compact_timeout=900.0, flush=True):
     put(w.harness / 'names.json', w.names)
     store = CheckpointStore(w.harness)
     request = Request(1, 'save', uid(op), None, None, [], False)
@@ -130,6 +147,7 @@ def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=8
         layout_value = ('rev-1', leaves)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=fleet.send, poll=fleet.poll, run=fleet.run,
                   litetui=fleet.litetui, layout=lambda: layout_value, live=lambda row: row['agent_id'] in w.live,
+                  layout_flush=fleet.layout_flush if flush else lambda *args: {},
                   handoff_timeout=30, poll_interval=1, compact_timeout=compact_timeout,
                   compact_command=(compact_command or ['compact-tool', '{name}', '{agent_id}']) if compact else None)
     params = SaveParams(str(w.harness), coord, str(handoff), uid(850 + op - 800),
@@ -154,6 +172,70 @@ def test_save_collects_every_receipt_and_publishes_complete(world):
     assert w.fleet.ran and all(argv[0] == 'compact-tool' for argv in w.fleet.ran)
     assert not any(coord in argv for argv in w.fleet.ran), 'the coordinator is never compacted'
     assert result.counts.expected == 3 and result.counts.failed == 0
+
+
+def test_observed_leaf_is_not_a_durable_layout_receipt(world):
+    w = world
+    coord, handoff = coordinator(w)
+    compacted(w, coord, handoff)
+    # This transport supplies ONLY a /context observation, never a disk flush.
+    store, params, _, _ = save(w, coord, handoff, flush=False)
+    manifest = store.read_manifest(params.checkpoint_id)
+    layout = next(r for r in manifest.receipts if r.seat_id == coord and r.kind == 'layout')
+    assert not layout.durable
+    assert layout.assurance == 'unsupported'
+    assert manifest.state == 'incomplete'
+
+
+def test_verified_layout_snapshot_is_retained_in_checkpoint_after_live_file_changes(world):
+    w = world
+    coord, handoff = coordinator(w)
+    compacted(w, coord, handoff)
+    store, params, _, _ = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    receipt = next(r for r in manifest.receipts if r.seat_id == coord and r.kind == 'layout')
+    # A later thread save must not erase this checkpoint's only layout copy.
+    (w.tmp / 'thread-layouts.json').write_text('{}')
+    saved = json.loads(Path(receipt.reference).read_bytes())
+    assert saved['snapshot']['th']['panes'][0]['splitTree']['id'] == 'leaf-1'
+
+
+@pytest.mark.parametrize('fault', ['digest', 'checkpoint', 'pane', 'workspace', 'leaf', 'timeout'])
+def test_native_layout_receipt_must_cover_the_exact_persisted_slot(world, fault):
+    w = world
+    coord, handoff = coordinator(w)
+    compacted(w, coord, handoff)
+    flush = w.fleet.layout_flush
+    def broken(checkpoint_id, workspace, thread):
+        if fault == 'timeout':
+            raise TimeoutError('flush acknowledgement lost')
+        reply = flush(checkpoint_id, workspace, thread)
+        receipt = reply['receipt']
+        if fault == 'digest':
+            receipt['sha256'] = '0' * 64
+        elif fault == 'checkpoint':
+            receipt['checkpointId'] = uid(9999)
+        else:
+            path = Path(receipt['reference'])
+            saved = json.loads(path.read_bytes())
+            pane = saved[thread]['panes'][0]
+            if fault == 'pane':
+                pane['id'] = 'different-pane'
+            elif fault == 'workspace':
+                pane['workspaceId'] = 'different-workspace'
+            else:
+                pane['splitTree']['id'] = 'different-leaf'
+            content = json.dumps(saved).encode()
+            path.write_bytes(content)
+            receipt['sha256'] = hashlib.sha256(content).hexdigest()
+        return reply
+    w.fleet.layout_flush = broken
+    store, params, _, _ = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    layout = next(r for r in manifest.receipts if r.seat_id == coord and r.kind == 'layout')
+    assert not layout.durable and layout.assurance == 'unsupported'
+    assert manifest.state == 'incomplete'
+    assert json.loads(Path(layout.reference).read_bytes())['failure']
 
 
 def test_roster_is_published_before_any_seat_is_asked_anything(world):
@@ -305,6 +387,7 @@ def test_failed_coordinator_compaction_is_explicit_and_retry_can_finish(world):
     sent_before = len(w.fleet.sent)
     store2 = CheckpointStore(w.harness)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
+                  layout_flush=w.fleet.layout_flush,
                   layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}), live=lambda row: True,
                   handoff_timeout=30, poll_interval=1, compact_command=['compact-tool', '{name}', '{agent_id}'])
     final = run_save(store2, op.operation_id, params, env, only=[coord])
@@ -321,6 +404,7 @@ def test_activity_after_boundary_invalidates_the_seat(world):
     store = CheckpointStore(w.harness)
     operation = store.submit(Request(1, 'save', uid(802), None, None, [], False), actor_id=coord)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
+                  layout_flush=w.fleet.layout_flush,
                   layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}), live=lambda row: row['agent_id'] in w.live,
                   handoff_timeout=30, poll_interval=1, compact_command=['compact-tool', '{name}', '{agent_id}'])
     params = SaveParams(str(w.harness), coord, str(handoff), uid(852), litetui_root=str(w.owned_root),
@@ -478,6 +562,7 @@ def test_cancel_is_honoured_inside_the_compaction_poll(world):
     store = CheckpointStore(w.harness)
     operation = store.submit(Request(1, 'save', uid(803), None, None, [], False), actor_id=coord)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
+                  layout_flush=w.fleet.layout_flush,
                   layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}), live=lambda row: row['agent_id'] in w.live,
                   handoff_timeout=30, poll_interval=1, compact_timeout=900, compact_command=['compact-tool', '{name}', '{agent_id}'])
     params = SaveParams(str(w.harness), coord, str(handoff), uid(853), litetui_root=str(w.owned_root), cwd_roots=[str(w.tmp)])
@@ -615,6 +700,7 @@ def test_exclude_by_name_keeps_a_spawned_seat_out_of_the_save(world):
     store = CheckpointStore(w.harness)
     operation = store.submit(Request(1, 'save', uid(810), None, None, [], False), actor_id=coord)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
+                  layout_flush=w.fleet.layout_flush,
                   litetui=w.fleet.litetui, layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}),
                   live=lambda row: row['agent_id'] in w.live, handoff_timeout=30, poll_interval=1,
                   compact_command=['compact-tool', '{name}', '{agent_id}'])

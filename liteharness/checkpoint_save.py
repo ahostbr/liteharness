@@ -25,7 +25,7 @@ from uuid import uuid4
 from . import config
 from .checkpoint_contract import (Blocker, Coordinator, ContractError, Decision, Decisions,
                                   ExpectedSeat, Manifest, RECOMMENDED_DECISIONS, Receipt, Result,
-                                  Seat, wire)
+                                  Seat, Slot, wire)
 from .checkpoint_ops import OperationLog, make_result, seat_result
 from .checkpoint_roster import (Discovery, claude_projects_root, discover_current,
                                 roster_census)
@@ -88,6 +88,43 @@ def _layout() -> tuple[str, set[str]] | None:
             {leaf for _, leaves in shape for leaf in leaves})
 
 
+def _layout_flush(checkpoint_id: str, workspace: str, thread: str) -> dict:
+    from . import cli
+    return cli._bridge_request('POST', '/harness/checkpoint/layout/flush', {
+        'checkpointId': checkpoint_id, 'workspaceId': workspace, 'threadId': thread})
+
+
+def _read_flushed_layout(receipt: dict, checkpoint_id: str, slot: Slot) -> dict | None:
+    """Read and validate once; return the exact snapshot the checkpoint must retain."""
+    if (receipt.get('schemaVersion') != 1 or receipt.get('checkpointId') != checkpoint_id
+            or receipt.get('durable') is not True or receipt.get('coverage') != 'thread-layouts-file'):
+        return None
+    reference = Path(receipt.get('reference') or '')
+    if not reference.is_absolute():
+        return None
+    content = reference.read_bytes()
+    if hashlib.sha256(content).hexdigest() != receipt.get('sha256'):
+        return None
+    snapshot = json.loads(content)
+    layout = snapshot.get(slot.thread, {})
+    panes = [p for p in layout.get('panes', []) if p.get('id') == slot.pane]
+    if len(panes) != 1:
+        return None
+    pane = panes[0]
+    if (pane.get('canvasOwner') or {}).get('workspaceId', pane.get('workspaceId')) != slot.workspace:
+        return None
+    def leaves(node):
+        if not isinstance(node, dict):
+            return []
+        if node.get('type') == 'leaf':
+            return [node]
+        return [leaf for child in node.get('children', []) for leaf in leaves(child)]
+    matches = [leaf for leaf in leaves(pane.get('splitTree')) if leaf.get('id') == slot.leaf]
+    if len(matches) != 1 or (slot.tab is not None and slot.tab not in matches[0].get('sessionIds', [])):
+        return None
+    return snapshot
+
+
 @dataclass
 class SaveEnv:
     """The process boundary. Tests replace it; nothing below it is mocked."""
@@ -98,6 +135,7 @@ class SaveEnv:
     run: Callable[[list[str], float], int] = _run
     litetui: Callable[[str, dict], dict] = _litetui
     layout: Callable[[], tuple[str, set[str]] | None] = _layout
+    layout_flush: Callable[[str, str, str], dict] = _layout_flush
     live: Callable[[dict], bool] | None = None
     handoff_timeout: float = 120.0
     compact_timeout: float = 900.0
@@ -482,16 +520,27 @@ class Saver:
     def layout_receipt(self, manifest: Manifest, seat: Seat, revision: str | None = None) -> Receipt | None:
         if seat.slot is None:
             return None
-        # Evidenced = the seat's leaf is in the live /context layout at the frozen revision.
-        # LiteSuite exposes no flush-receipt endpoint, so this is observation, not a flush proof.
-        live = self.env.layout() if self.layout is None else self.layout
+        live = self.env.layout()
         observed = bool(live) and live[0] == seat.slot.layout_revision and seat.slot.leaf in live[1]
+        native, snapshot, failure, durable = None, None, None, False
+        if observed:
+            try:
+                reply = self.env.layout_flush(manifest.checkpoint_id, seat.slot.workspace, seat.slot.thread)
+                native = reply.get('receipt') if isinstance(reply, dict) and reply.get('ok') is True else None
+                if isinstance(native, dict):
+                    snapshot = _read_flushed_layout(native, manifest.checkpoint_id, seat.slot)
+                durable = snapshot is not None
+                if not durable:
+                    failure = str(reply.get('error') or 'Native layout receipt missing, invalid, or does not cover the saved slot') if isinstance(reply, dict) else 'Native layout reply malformed'
+            except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
+                failure = f'Native layout flush unverified: {exc}'
         path, digest = evidence(self.store, manifest.checkpoint_id, seat.agent_id, 'layout',
                                 {'kind': 'layout', 'slot': {k: getattr(seat.slot, k) for k in
                                  ('workspace', 'thread', 'pane', 'leaf', 'tab', 'layout_revision')},
-                                 'source': 'registry-row+context-activePanes', 'observed': observed})
+                                 'source': 'native-thread-layout-flush', 'observed': observed,
+                                 'native_receipt': native, 'snapshot': snapshot, 'failure': failure})
         return _receipt(manifest.checkpoint_id, seat, 'layout', seat.slot.layout_revision, path, digest,
-                        durable=observed, assurance='native' if observed else 'unsupported', at=self.tick())
+                        durable=durable, assurance='native' if durable else 'unsupported', at=self.tick())
 
     # -- whole save ----------------------------------------------------------------------
     def run(self, only: list[str] | None = None) -> Result:
