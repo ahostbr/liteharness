@@ -79,11 +79,26 @@ def _layout() -> tuple[str, set[str]] | None:
         context = cli._bridge_request('GET', '/context')
     except Exception:
         return None
-    panes = context.get('activePanes') if isinstance(context, dict) else None
-    if not isinstance(panes, list):
+    if not isinstance(context, dict) or context.get('ok') is False or context.get('error'):
         return None
-    shape = sorted((str(p.get('id')), sorted(str(leaf.get('id')) for leaf in p.get('leaves', [])
-                                              if isinstance(leaf, dict))) for p in panes if isinstance(p, dict))
+    active, hidden = context.get('activePanes'), context.get('hiddenPanes', [])
+    if not isinstance(active, list) or not isinstance(hidden, list):
+        return None
+    shape = []
+    for pane in active + hidden:
+        if not isinstance(pane, dict) or not isinstance(pane.get('id'), str) or not pane['id']:
+            return None
+        leaves = pane.get('leaves', [])
+        if not isinstance(leaves, list):
+            return None
+        ids = []
+        for leaf in leaves:
+            ident = leaf.get('leafId', leaf.get('id')) if isinstance(leaf, dict) else None
+            if not isinstance(ident, str) or not ident:
+                return None
+            ids.append(ident)
+        shape.append((pane['id'], sorted(ids)))
+    shape.sort()
     return (hashlib.sha256(json.dumps(shape).encode()).hexdigest()[:16],
             {leaf for _, leaves in shape for leaf in leaves})
 
