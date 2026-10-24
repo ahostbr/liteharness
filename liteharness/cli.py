@@ -6250,6 +6250,7 @@ def main() -> None:
         print("  update-scripts [--cli name]    Update watcher scripts for Codex/Copilot")
         print("  status                         Show status")
         print("  send <to> <message>            Send a message")
+        print("  clerk <command>               Opt-in clerk: enable/start/status/disable/forward/digest")
         print("  list                           List inbox messages")
         print("  inbox [N] [--all] [--agent ID]  (--agent-id is an accepted alias; an UNKNOWN flag is rejected,")
         print("                                 never ignored) Read-only inbox view: full bodies, new+cur+done, newest N")
@@ -6362,6 +6363,9 @@ def main() -> None:
         cmd_install_statusline()
     elif cmd == "owner-handoff":
         cmd_owner_handoff(sys.argv[2:])
+    elif cmd == "clerk":
+        from .clerk import main as clerk_main
+        clerk_main(sys.argv[2:])
     elif cmd == "update-scripts":
         cli_filter = None
         if "--cli" in sys.argv:
