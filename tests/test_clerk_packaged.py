@@ -42,9 +42,10 @@ def fake_spawn(**kwargs):
     assert "Never approve, grant, merge, assign or decide." in Path(kwargs["system_prompt_file"]).read_text(encoding="utf-8")
     raise SystemExit(99)  # substituted external boundary: NO app/seat starts
 cli.cmd_spawn = fake_spawn
-try: clerk.start(cwd=str(Path.cwd()))
+try: clerk.start(pane="installed-clerk-pane", cwd=str(Path.cwd()))
 except SystemExit as exc: assert exc.code == 99
 assert len(seen) == 1
+assert seen[0]["split_pane"] == "installed-clerk-pane"
 print(json.dumps({"module": str(Path(clerk.__file__).resolve()), "role": str(role.resolve()), "spawn_substituted": True}))
 '''
     env = {**os.environ, "PYTHONPATH": str(target), "HOME": str(home), "USERPROFILE": str(home),
