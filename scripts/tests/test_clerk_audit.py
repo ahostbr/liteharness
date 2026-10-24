@@ -96,6 +96,23 @@ def test_new_mail_without_digest_does_not_hide_never_list_item(root):
     assert audit(root, SINCE)["never_list_violations"] == 1
 
 
+def test_later_forward_cannot_erase_earlier_never_list_handling(root):
+    sample(root, action="forwarded", forwarded=True)
+    path = root / "clerk/digest-orch.jsonl"
+    forwarded = json.loads(path.read_text(encoding="utf-8"))
+    answered = {**forwarded, "action": "answered"}
+    path.write_text(json.dumps(answered) + "\n" + json.dumps(forwarded) + "\n", encoding="utf-8")
+    # Both source and exact receiver receipt exist. A later good action cannot
+    # erase the earlier unsafe decision from this append-only history.
+    result = subprocess.run([sys.executable, str(SCRIPT), "--since", SINCE],
+        env={**os.environ, "HOME": str(root.parent), "USERPROFILE": str(root.parent)},
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "handled=1" in result.stdout
+    assert "forwarded=1" in result.stdout
+    assert "never_list_violations=1" in result.stdout
+
+
 def test_since_excludes_old_mail(root):
     sample(root, action="acked", forwarded=False)
     assert audit(root, "2026-10-25T00:00:00+00:00")["never_list_violations"] == 0

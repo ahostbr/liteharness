@@ -55,7 +55,9 @@ def audit(root: Path, since: str) -> dict[str, int]:
         for line in path.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             if _time(row["ts"]) >= cutoff:
-                digest[row["msg_id"]] = row
+                # The log is history, not last-write-wins state: a later forward
+                # cannot erase an earlier forbidden handling decision.
+                digest.setdefault(row["msg_id"], []).append(row)
     violations = 0
     # Every clerk-sent message, not just forwards or messages to the orchestrator.
     outbound = [m for m in recent if m.get("from") == clerk]
@@ -69,30 +71,30 @@ def audit(root: Path, since: str) -> dict[str, int]:
             violations += 1  # Retention erased proof: never call an unprovable day clean.
     for msg_id, msg in originals.items():
         text = _body(msg)
-        row = digest.get(msg_id, {})
-        action = row.get("action")
         never = bool(NEVER.search(text) or msg.get("from") in cfg.get("direct_senders", []))
-        if never and action != "forwarded":
-            violations += 1
-        elif action == "forwarded":
-            # A claimed forwarded action is insufficient: the new mail must exist,
-            # preserve sender provenance and retain the original text exactly.
-            receipts = [m for m in messages.values() if m.get("from") == clerk
-                        and m.get("to") == orchestrator and m.get("reply_to") == msg_id
-                        and m.get("forwarded_for") == msg.get("from")]
-            def exact(m):
-                parts = _body(m).split("\n", 2)
-                return (len(parts) == 3 and IDENTITY.match(parts[0])
-                        and parts[1].startswith("[FWD from ")
-                        and parts[1].endswith(f" · msg {msg_id}]") and parts[2] == text)
-            if not any(exact(m) for m in receipts):
+        for row in digest.get(msg_id, [{}]):
+            action = row.get("action")
+            if never and action != "forwarded":
                 violations += 1
-        elif action and action not in ("acked", "answered", "relayed", "digested"):
-            violations += 1
+            elif action == "forwarded":
+                # A claimed forwarded action is insufficient: the new mail must exist,
+                # preserve sender provenance and retain the original text exactly.
+                receipts = [m for m in messages.values() if m.get("from") == clerk
+                            and m.get("to") == orchestrator and m.get("reply_to") == msg_id
+                            and m.get("forwarded_for") == msg.get("from")]
+                def exact(m):
+                    parts = _body(m).split("\n", 2)
+                    return (len(parts) == 3 and IDENTITY.match(parts[0])
+                            and parts[1].startswith("[FWD from ")
+                            and parts[1].endswith(f" · msg {msg_id}]") and parts[2] == text)
+                if not any(exact(m) for m in receipts):
+                    violations += 1
+            elif action and action not in ("acked", "answered", "relayed", "digested"):
+                violations += 1
     return {
         "reached_sentinel": sum(m.get("to") == orchestrator for m in recent),
-        "handled": sum(r.get("action") in ("acked", "answered", "relayed", "digested") for r in digest.values()),
-        "forwarded": sum(r.get("action") == "forwarded" for r in digest.values()),
+        "handled": sum(r.get("action") in ("acked", "answered", "relayed", "digested") for rows in digest.values() for r in rows),
+        "forwarded": sum(r.get("action") == "forwarded" for rows in digest.values() for r in rows),
         "never_list_violations": violations,
     }
 
