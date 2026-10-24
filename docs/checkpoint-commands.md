@@ -101,9 +101,12 @@ the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
   slot names is never closed, and the PTY's cwd is not consulted. Anything unreadable stays.
 - A mid-work (`held`) seat keeps its handoff but is never compacted: `held-not-compacted`.
 - Compaction needs `checkpoint.compact_command` for Claude seats; none ships.
-- Native layout flush currently requires the requested workspace/thread to be the renderer's
-  loaded active owner. Hidden/foreign-owner capture and enrichment of missing roster slots remain
-  separate work; an observed active leaf is not evidence of whole-fleet layout coverage.
+- Active-owner layout flush requires its project map loaded. Hidden-owner flush requires one
+  hydrated thread-to-project binding plus an exact persisted workspace/project record and existing
+  thread layout. The same native write queue merges only captured owned terminal panes, preserving
+  unseen panes and other threads. Missing/corrupt/ambiguous ownership stays unsupported; it never
+  replaces an unknown map with an empty one. Renderer changes during the write invalidate the ACK.
+  Coverage is per recorded exact slot, not a claim that arbitrary non-canvas surfaces were saved.
 - An orchestrator caller of any `spawn --split` no longer falls into its own pane by default.
 - A launch that never registered can read as dead: if `spawn` ran, no registry row was written, an old
   row for the seat remains, and its process is gone, the seat reads `dead` once the operation is idle
