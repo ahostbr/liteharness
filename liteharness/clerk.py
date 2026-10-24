@@ -82,10 +82,12 @@ def _name(agent_id: str) -> str:
     return str(value).splitlines()[0][:128]
 
 
-def start(*, spawn_cli: str = "litetui", model: str | None = None,
+def start(*, pane: str, spawn_cli: str = "litetui", model: str | None = None,
           backend: str | None = None, cwd: str | None = None) -> dict:
     from . import agent_names, cli
 
+    if not pane or not pane.strip():
+        raise ValueError("--pane must name an explicit target pane; no default placement")
     cfg = _read_config()
     if cfg.get("enabled") is not True:
         raise ValueError("Clerk is disabled; enable --for <orchestrator-id> first")
@@ -127,7 +129,7 @@ def start(*, spawn_cli: str = "litetui", model: str | None = None,
         spawn_cli="claude" if spawn_cli == "claude-code" else "litetui",
         model=model, backend=backend, thinking_level="high", cognitive="aurelius",
         cwd=str(Path(cwd or os.getcwd()).resolve()), name="Clerk", tier="worker",
-        split_mode=True, spawned_by=orchestrator, prompt=role, resume_agent_id=seat,
+        split_mode=True, split_pane=pane, spawned_by=orchestrator, prompt=role, resume_agent_id=seat,
         system_prompt_file=str(role_file) if spawn_cli == "litetui" else None,
     )
     # Existing spawn owns launch/wait/registration. Never publish an inferred UUID
@@ -249,6 +251,7 @@ def main(argv: list[str]) -> None:
     commands.add_parser("disable")
     commands.add_parser("status")
     launch = commands.add_parser("start")
+    launch.add_argument("--pane", required=True, help="Explicit target pane ID for split placement (no default)")
     launch.add_argument("--cli", choices=("litetui", "claude-code"), default="litetui")
     launch.add_argument("--model")
     launch.add_argument("--backend")
@@ -266,7 +269,7 @@ def main(argv: list[str]) -> None:
         elif args.command == "disable":
             disable()
         elif args.command == "start":
-            start(spawn_cli=args.cli, model=args.model, backend=args.backend, cwd=args.cwd)
+            start(pane=args.pane, spawn_cli=args.cli, model=args.model, backend=args.backend, cwd=args.cwd)
         elif args.command == "forward":
             print(f"Forwarded message {forward(args.msg_id)}")
             return

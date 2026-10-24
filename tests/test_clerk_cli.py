@@ -68,21 +68,65 @@ def test_start_uses_existing_spawn_then_commits_registered_identity(root, monkey
             assert "Never approve, grant, merge, assign or decide." in Path(kw["system_prompt_file"]).read_text(encoding="utf-8")
         register(root, model=model)
     monkeypatch.setattr(cli, "cmd_spawn", spawn)
-    result = clerk.start(spawn_cli=route, model=model, cwd=str(root.parent))
+    result = clerk.start(pane="clerk-pane", spawn_cli=route, model=model, cwd=str(root.parent))
     assert result["clerk_id"] == "clerk-seat"
     assert cfg(root)["clerk_id"] == "clerk-seat"
     assert seen[0]["spawn_cli"] == ("claude" if route == "claude-code" else "litetui")
     assert seen[0]["backend"] == backend
     assert seen[0]["split_mode"] is True
+    assert seen[0]["split_pane"] == "clerk-pane"
     assert seen[0]["cognitive"] == "aurelius"
     assert seen[0]["cwd"] == str(root.parent)
+
+
+@pytest.mark.parametrize("pane_args", [[], ["--pane", ""], ["--pane", "   "]])
+def test_real_cli_requires_explicit_nonempty_pane_before_spawn(root, pane_args):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    clerk.enable("orch")
+    repo = Path(__file__).resolve().parents[1]
+    marker = root / "spawn-called"
+    probe = '''
+import sys
+from pathlib import Path
+from liteharness import cli, config
+# Exercise the actual CLI entry/dispatch/parser; replace only the dangerous
+# external spawn boundary, so the red run cannot launch an actual seat.
+def forbidden_spawn(**kwargs):
+    (config.get_root() / "spawn-called").write_text("called", encoding="utf-8")
+    raise SystemExit(97)
+cli.cmd_spawn = forbidden_spawn
+sys.argv = ["liteharness", "clerk", "start", *sys.argv[1:]]
+cli.main()
+'''
+    result = subprocess.run([sys.executable, "-c", probe, *pane_args], cwd=repo,
+        env={**os.environ, "HOME": str(root.parent), "USERPROFILE": str(root.parent), "PYTHONPATH": str(repo)},
+        capture_output=True, text=True, timeout=10)
+    assert not marker.exists(), f"CLI reached spawn without an explicit pane: {result.returncode}"
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "--pane" in result.stderr
+    assert not cfg(root).get("clerk_id")
+
+
+def test_cli_explicit_pane_reaches_existing_spawn_argument(root, monkeypatch):
+    clerk.enable("orch")
+    seen = []
+    def spawn(**kwargs):
+        seen.append(kwargs)
+        register(root)
+    monkeypatch.setattr(cli, "cmd_spawn", spawn)
+    clerk.main(["start", "--pane", "clerk-pane", "--cwd", str(root.parent)])
+    assert seen[0]["split_pane"] == "clerk-pane"
+    assert cfg(root)["clerk_id"] == "clerk-seat"
 
 
 def test_start_refuses_disallowed_model_before_spawn(root, monkeypatch):
     clerk.enable("orch")
     monkeypatch.setattr(cli, "cmd_spawn", lambda **kw: pytest.fail("disallowed model launched"))
     with pytest.raises(ValueError, match="Allowed models"):
-        clerk.start(model="claude-opus-9", cwd=str(root.parent))
+        clerk.start(pane="clerk-pane", model="claude-opus-9", cwd=str(root.parent))
     assert not cfg(root).get("clerk_id")
 
 
@@ -95,14 +139,14 @@ def test_local_model_is_user_configurable(root, monkeypatch):
         assert kw["backend"] == "lmstudio"
         register(root, model="my-local-model")
     monkeypatch.setattr(cli, "cmd_spawn", spawn)
-    assert clerk.start(model="my-local-model", backend="lmstudio", cwd=str(root.parent))["clerk_id"] == "clerk-seat"
+    assert clerk.start(pane="clerk-pane", model="my-local-model", backend="lmstudio", cwd=str(root.parent))["clerk_id"] == "clerk-seat"
 
 
 def test_live_seat_is_not_replaced(root, monkeypatch):
     enable_with_seat(root)
     monkeypatch.setattr(cli, "cmd_spawn", lambda **kw: pytest.fail("live seat replaced"))
     with pytest.raises(ValueError, match="already online"):
-        clerk.start(cwd=str(root.parent))
+        clerk.start(pane="clerk-pane", cwd=str(root.parent))
 
 
 def test_failed_spawn_never_enables_routing_to_unregistered_id(root, monkeypatch):
@@ -111,7 +155,7 @@ def test_failed_spawn_never_enables_routing_to_unregistered_id(root, monkeypatch
         raise SystemExit(2)
     monkeypatch.setattr(cli, "cmd_spawn", spawn)
     with pytest.raises(SystemExit):
-        clerk.start(cwd=str(root.parent))
+        clerk.start(pane="clerk-pane", cwd=str(root.parent))
     assert not cfg(root).get("clerk_id")
 
 
@@ -120,9 +164,10 @@ def test_offline_seat_resumes_same_identity(root, monkeypatch):
     register(root, exited_at="gone")
     def spawn(**kw):
         assert kw["resume_agent_id"] == "clerk-seat"
+        assert kw["split_pane"] == "clerk-pane"
         register(root)
     monkeypatch.setattr(cli, "cmd_spawn", spawn)
-    assert clerk.start(cwd=str(root.parent))["clerk_id"] == "clerk-seat"
+    assert clerk.start(pane="clerk-pane", cwd=str(root.parent))["clerk_id"] == "clerk-seat"
 
 
 def test_forward_uses_own_id_verbatim_body_and_readback_digest(root):
@@ -185,14 +230,14 @@ def test_unsupported_route_never_launches(root, monkeypatch, options):
     clerk.enable("orch")
     monkeypatch.setattr(cli, "cmd_spawn", lambda **kw: pytest.fail("unsupported route launched"))
     with pytest.raises(ValueError):
-        clerk.start(cwd=str(root.parent), **options)
+        clerk.start(pane="clerk-pane", cwd=str(root.parent), **options)
 
 
 def test_unconfirmed_spawn_print_is_not_a_registration(root, monkeypatch):
     clerk.enable("orch")
     monkeypatch.setattr(cli, "cmd_spawn", lambda **kw: print("Spawned fake-id successfully"))
     with pytest.raises(ValueError, match="confirmed Clerk registration"):
-        clerk.start(cwd=str(root.parent))
+        clerk.start(pane="clerk-pane", cwd=str(root.parent))
     assert not cfg(root).get("clerk_id")
 
 
@@ -273,7 +318,7 @@ def test_disable_during_spawn_is_not_overwritten(root, monkeypatch):
         clerk.disable()
     monkeypatch.setattr(cli, "cmd_spawn", spawn)
     with pytest.raises(ValueError, match="changed during spawn"):
-        clerk.start(cwd=str(root.parent))
+        clerk.start(pane="clerk-pane", cwd=str(root.parent))
     assert cfg(root)["enabled"] is False
     assert not cfg(root).get("clerk_id")
 
