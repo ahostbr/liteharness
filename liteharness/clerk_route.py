@@ -32,6 +32,14 @@ def route_recipient(frm, to, direct, forwarded_for, cfg, is_live):
     return to, None
 
 
+def clerk_is_live(agent_id: str) -> bool:
+    """Keep malformed presence from blocking mail; do not change CLI liveness."""
+    try:
+        return _agent_record_live(agent_id)
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError):
+        return False
+
+
 def _superseded_by_later_registration(agent_id: str, data: dict) -> bool:
     """True if a LATER registration already owns this record's `session_pid`.
 

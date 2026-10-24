@@ -99,10 +99,10 @@ def send(
     msg_id = str(uuid.uuid4())
     filename = make_filename(priority)
 
-    from .clerk_route import load_clerk_config, route_recipient, _agent_record_live
+    from .clerk_route import load_clerk_config, route_recipient, clerk_is_live
 
     to_agent, original_to = route_recipient(
-        from_agent, to_agent, direct, forwarded_for, load_clerk_config(), _agent_record_live,
+        from_agent, to_agent, direct, forwarded_for, load_clerk_config(), clerk_is_live,
     )
     message = {
         "id": msg_id,

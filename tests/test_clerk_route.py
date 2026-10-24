@@ -148,3 +148,20 @@ def test_process_start_boundary_and_unknown_leniency(home, monkeypatch, offset, 
         return started.timestamp()
     monkeypatch.setattr(psutil.Process, "create_time", create_time)
     assert _agent_record_live("clerk") is expected
+
+@pytest.mark.parametrize("identity", ["clerk", "unrelated"])
+@pytest.mark.parametrize("malformed", [[], None])
+def test_malformed_presence_still_delivers_direct(home, identity, malformed):
+    configure(home)
+    presence(home)
+    (home / ".liteharness/agents" / f"{identity}.json").write_text(json.dumps(malformed), encoding="utf-8")
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home), "PYTHONPATH": str(ROOT)}
+    result = subprocess.run([sys.executable, "-m", "liteharness.cli", "send", "sentinel", "never lose this body",
+        "--from", "worker", "--force"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
+    files = list((home / ".liteharness/inbox/new").glob("*.json"))
+    assert len(files) == 1, result.stderr
+    receipt = json.loads(files[0].read_text(encoding="utf-8"))
+    assert receipt["to"] == "sentinel"
+    assert receipt["body"] == "never lose this body"
+    assert "original_to" not in receipt
+    assert result.returncode == 0, result.stderr
