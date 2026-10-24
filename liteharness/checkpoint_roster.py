@@ -163,6 +163,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
                      exclude_ids: list[str] = (), coordinator_id: str | None = None,
                      litetui_root: Path | str | None = None,
                      layout_revision: str = UNOBSERVED_LAYOUT,
+                     current_slots: dict | None = None,
                      live: Callable[[dict], bool] | None = None) -> Discovery:
     """Name every live seat, plus `include_offline`, in a stable order.
 
@@ -230,8 +231,16 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
                 seat = _litetui_seat(row, base, selection, layout_revision, root, index)
             else:
                 raise ContractError('Seat CLI has no checkpoint adapter')
+            blocker = None
+            if current_slots is not None:
+                from .checkpoint_slots import resolve_slot
+                try:
+                    seat = replace(seat, slot=resolve_slot(row, current_slots, layout_revision))
+                except ContractError as exc:
+                    seat = replace(seat, slot=None)
+                    blocker = Blocker('layout-unresolved', agent_id, f'{exc}; reconcile current renderer binding')
             wire(seat)
-            candidates.append(Candidate(expected, seat, None))
+            candidates.append(Candidate(expected, seat, blocker))
         except (ContractError, StoreError, OSError) as exc:
             # Controlled text only; OS errors can carry private paths.
             detail = str(exc) if isinstance(exc, (ContractError, StoreError)) else 'Seat evidence unreadable'
@@ -267,6 +276,11 @@ def roster_census(discovery: Discovery, *, harness_root: Path | str,
                     authorized_cwd_roots=cwd_roots if cwd_roots is not None else default_cwd_roots(seats),
                     exclusions=list(exclusions)) if seats else Census([], list(exclusions))
     by_id = {row.expected.agent_id: row for row in result.rows}
-    rows = [by_id[c.expected.agent_id] if c.seat is not None else CensusRow(c.expected, None, [c.blocker])
-            for c in discovery.candidates]
+    rows = []
+    for candidate in discovery.candidates:
+        if candidate.seat is None:
+            rows.append(CensusRow(candidate.expected, None, [candidate.blocker]))
+        else:
+            row = by_id[candidate.expected.agent_id]
+            rows.append(replace(row, blockers=[*row.blockers, *([candidate.blocker] if candidate.blocker else [])]))
     return Census(rows, list(exclusions))

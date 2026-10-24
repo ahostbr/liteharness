@@ -85,11 +85,11 @@ class Fleet:
 
     def layout_flush(self, checkpoint_id, workspace, thread):
         panes = []
-        for path in (self.w.harness / 'agents').glob('*.json'):
-            row = json.loads(path.read_text())
-            if row.get('workspace_id') == workspace and row.get('thread_id') == thread:
-                panes.append({'id': row['pane_id'], 'workspaceId': workspace,
-                              'splitTree': {'type': 'leaf', 'id': row['leaf_id'], 'sessionIds': []}})
+        for pane in self.w.panes:
+            if pane['workspace'] == workspace and pane['thread'] == thread:
+                leaves = [{'type': 'leaf', 'id': leaf['leaf'], 'sessionIds': leaf['tabs']} for leaf in pane['leaves']]
+                panes.append({'id': pane['pane'], 'workspaceId': workspace,
+                              'splitTree': leaves[0] if len(leaves) == 1 else {'type': 'split', 'children': leaves}})
         reference = self.w.tmp / 'thread-layouts.json'
         content = json.dumps({thread: {'panes': panes}}).encode()
         reference.write_bytes(content)
@@ -147,7 +147,7 @@ def save(w, coord, handoff, *, compact=True, only=None, include_offline=(), op=8
         layout_value = ('rev-1', leaves)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=fleet.send, poll=fleet.poll, run=fleet.run,
                   litetui=fleet.litetui, layout=lambda: layout_value, live=lambda row: row['agent_id'] in w.live,
-                  layout_flush=fleet.layout_flush if flush else lambda *args: {},
+                  layout_flush=fleet.layout_flush if flush else lambda *args: {}, current_slots=w.current_slots,
                   handoff_timeout=30, poll_interval=1, compact_timeout=compact_timeout,
                   compact_command=(compact_command or ['compact-tool', '{name}', '{agent_id}']) if compact else None)
     params = SaveParams(str(w.harness), coord, str(handoff), uid(850 + op - 800),
@@ -172,6 +172,30 @@ def test_save_collects_every_receipt_and_publishes_complete(world):
     assert w.fleet.ran and all(argv[0] == 'compact-tool' for argv in w.fleet.ran)
     assert not any(coord in argv for argv in w.fleet.ran), 'the coordinator is never compacted'
     assert result.counts.expected == 3 and result.counts.failed == 0
+
+
+def test_save_freezes_current_slot_not_stale_registry_coordinates(world):
+    w = world
+    coord, handoff = coordinator(w)
+    compacted(w, coord, handoff)
+    w.panes[0].update(pane='moved-pane', workspace='hidden-workspace', thread='hidden-thread')
+    store, params, result, _ = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    slot = manifest.seats[0].slot
+    assert (slot.workspace, slot.thread, slot.pane, slot.tab) == ('hidden-workspace', 'hidden-thread', 'moved-pane', 'tab-1')
+    assert result.state == 'complete'
+
+
+def test_save_keeps_missing_current_slot_blocker_after_collection(world):
+    w = world
+    coord, handoff = coordinator(w)
+    compacted(w, coord, handoff)
+    w.current_slots = lambda: {'ok': False}
+    store, params, result, _ = save(w, coord, handoff)
+    manifest = store.read_manifest(params.checkpoint_id)
+    assert result.state == 'incomplete'
+    assert manifest.seats[0].slot is None
+    assert any(b.code == 'layout-unresolved' and b.seat_id == coord for b in manifest.blockers)
 
 
 def test_observed_leaf_is_not_a_durable_layout_receipt(world):
@@ -387,7 +411,7 @@ def test_failed_coordinator_compaction_is_explicit_and_retry_can_finish(world):
     sent_before = len(w.fleet.sent)
     store2 = CheckpointStore(w.harness)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
-                  layout_flush=w.fleet.layout_flush,
+                  layout_flush=w.fleet.layout_flush, current_slots=w.current_slots,
                   layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}), live=lambda row: True,
                   handoff_timeout=30, poll_interval=1, compact_command=['compact-tool', '{name}', '{agent_id}'])
     final = run_save(store2, op.operation_id, params, env, only=[coord])
@@ -404,7 +428,7 @@ def test_activity_after_boundary_invalidates_the_seat(world):
     store = CheckpointStore(w.harness)
     operation = store.submit(Request(1, 'save', uid(802), None, None, [], False), actor_id=coord)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
-                  layout_flush=w.fleet.layout_flush,
+                  layout_flush=w.fleet.layout_flush, current_slots=w.current_slots,
                   layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}), live=lambda row: row['agent_id'] in w.live,
                   handoff_timeout=30, poll_interval=1, compact_command=['compact-tool', '{name}', '{agent_id}'])
     params = SaveParams(str(w.harness), coord, str(handoff), uid(852), litetui_root=str(w.owned_root),
@@ -562,7 +586,7 @@ def test_cancel_is_honoured_inside_the_compaction_poll(world):
     store = CheckpointStore(w.harness)
     operation = store.submit(Request(1, 'save', uid(803), None, None, [], False), actor_id=coord)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
-                  layout_flush=w.fleet.layout_flush,
+                  layout_flush=w.fleet.layout_flush, current_slots=w.current_slots,
                   layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}), live=lambda row: row['agent_id'] in w.live,
                   handoff_timeout=30, poll_interval=1, compact_timeout=900, compact_command=['compact-tool', '{name}', '{agent_id}'])
     params = SaveParams(str(w.harness), coord, str(handoff), uid(853), litetui_root=str(w.owned_root), cwd_roots=[str(w.tmp)])
@@ -700,7 +724,7 @@ def test_exclude_by_name_keeps_a_spawned_seat_out_of_the_save(world):
     store = CheckpointStore(w.harness)
     operation = store.submit(Request(1, 'save', uid(810), None, None, [], False), actor_id=coord)
     env = SaveEnv(now=w.clock.now, sleep=w.clock.sleep, send=w.fleet.send, poll=w.fleet.poll, run=w.fleet.run,
-                  layout_flush=w.fleet.layout_flush,
+                  layout_flush=w.fleet.layout_flush, current_slots=w.current_slots,
                   litetui=w.fleet.litetui, layout=lambda: ('rev-1', {f'leaf-{n}' for n in range(1, 20)}),
                   live=lambda row: row['agent_id'] in w.live, handoff_timeout=30, poll_interval=1,
                   compact_command=['compact-tool', '{name}', '{agent_id}'])

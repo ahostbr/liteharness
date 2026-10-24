@@ -14,6 +14,17 @@ class World:
         monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / '.claude'))
         self.live = set()
         self.names = {}
+        self.panes = []  # renderer boundary, independent of registry coordinates
+
+    def add_pane(self, n, agent_id):
+        session = f'tab-{n}'
+        self.panes.append({'revision': 'renderer-rev', 'pane': f'pane-{n}', 'workspace': 'ws', 'thread': 'th',
+                           'leaves': [{'leaf': f'leaf-{n}', 'tabs': [session]}],
+                           'slots': {session: {'version': 1, 'slotId': f'slot-{n}', 'agentId': agent_id,
+                                               'sessionId': session, 'state': 'attached'}}})
+
+    def current_slots(self):
+        return {'ok': True, 'schemaVersion': 1, 'panes': self.panes}
 
     def claude(self, n, *, role='worker', parent=None, transcript=True, retired=False, alive=True,
                names_cwd='missing', cli='claude-code'):
@@ -33,6 +44,7 @@ class World:
                                        'backend': 'claude', 'model': 'claude-x'}
         if alive and not retired:
             self.live.add(agent_id)
+        self.add_pane(n, agent_id)
         return agent_id
 
     def litetui(self, n, *, retired=True, role='worker'):
@@ -44,6 +56,7 @@ class World:
             'backend': 'codex', 'model': 'home-model', 'thinking_level': 'high', 'cwd': str(cwd)})
         if not retired:
             self.live.add(seat.agent_id)
+        self.add_pane(n, seat.agent_id)
         return seat
 
     def discover(self, **kwargs):

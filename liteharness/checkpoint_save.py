@@ -30,6 +30,7 @@ from .checkpoint_ops import OperationLog, make_result, seat_result
 from .checkpoint_roster import (Discovery, claude_projects_root, discover_current,
                                 roster_census)
 from .checkpoint_store import CheckpointStore, _atomic_json, _bytes, _mkdir, checked_path
+from .checkpoint_slots import current_slots
 
 REPLY = re.compile(r'CHECKPOINT-HANDOFF\s+(?P<path>.+?)\s+(?P<disposition>idle|waiting|held)\s*$',
                    re.IGNORECASE | re.MULTILINE)
@@ -151,6 +152,7 @@ class SaveEnv:
     litetui: Callable[[str, dict], dict] = _litetui
     layout: Callable[[], tuple[str, set[str]] | None] = _layout
     layout_flush: Callable[[str, str, str], dict] = _layout_flush
+    current_slots: Callable[[], dict] = current_slots
     live: Callable[[dict], bool] | None = None
     handoff_timeout: float = 120.0
     compact_timeout: float = 900.0
@@ -310,7 +312,7 @@ class Saver:
                                      exclude_ids=params.exclude_ids, coordinator_id=params.coordinator_id,
                                      litetui_root=params.litetui_root,
                                      layout_revision=self.layout[0] if self.layout else 'unobserved',
-                                     live=env.live)
+                                     current_slots=env.current_slots() or {}, live=env.live)
         census = roster_census(discovery, harness_root=params.harness_root, cwd_roots=params.cwd_roots)
         self.model_sources = dict(discovery.model_sources)
         if params.coordinator_id not in {r.expected.agent_id for r in census.rows}:
@@ -622,7 +624,7 @@ class Saver:
         updated = replace(seat, disposition=got.disposition, source_revision=got.source_revision or seat.source_revision)
         seats = [updated if s.agent_id == seat.agent_id else s for s in manifest.seats]
         receipts = [r for r in manifest.receipts if r.seat_id != seat.agent_id] + got.receipts
-        keep = [b for b in manifest.blockers if b.seat_id != seat.agent_id or b.code == 'seat-unresolved']
+        keep = [b for b in manifest.blockers if b.seat_id != seat.agent_id or b.code in ('seat-unresolved', 'layout-unresolved')]
         merged = replace(manifest, seats=seats, receipts=receipts, blockers=keep + got.blockers)
         self.publish(merged)
         return merged

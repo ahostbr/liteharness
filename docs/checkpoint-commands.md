@@ -49,7 +49,12 @@ token is the real fix and is out of this card.
    wins over the default. The coordinator is never excluded. A caller that is not itself a live seat
    excludes nothing by default (save refuses such a caller anyway). `save --dry-run` prints an
    `excluded:` line with each name and reason.
-2. An `incomplete` manifest is published BEFORE any seat is asked for anything.
+2. An `incomplete` manifest is published BEFORE any seat is asked for anything. SAVE resolves
+   exact current workspace/thread/pane/leaf/tab from the authenticated renderer slot inventory,
+   including retained hidden canvas panes. Current session or retained agent identity must resolve
+   uniquely; legacy Claude leaf-only bindings require one tab. Registry pane coordinates are not a
+   fallback. Missing, ambiguous, conflicting, non-canvas or ownerless bindings retain the seat with
+   a `layout-unresolved` blocker even after handoff collection. Inventory is observation, not durability.
 3. Per seat: a cooperative inbox request (`CHECKPOINT-HANDOFF <path> <idle|waiting|held>`);
    `checkpoint.compact_command` (argv list, `{agent_id}`/`{name}` placeholders, no shell) for
    Claude seats, and LiteTUI's native `gui.checkpoint.*` verbs. No configured command means a
