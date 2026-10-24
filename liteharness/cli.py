@@ -228,7 +228,7 @@ def _place_split(pane: str | None, agent_id: str, direction: str | None,
             result = _bridge_request("POST", "/canvas/split", body)
             if not isinstance(result, dict):
                 return {"ok": False, "error": "malformed creation response; check GET /pty/orphans"}
-            if (result.get("error") in ("grid_full", "no_terminals") and result.get("ok") is not True
+            if (result.get("error") in ("grid_full", "no_terminals", "orchestrator_pane_protected") and result.get("ok") is not True
                     and not any(result.get(key) for key in ("newSessionId", "newLeafId", "session_id"))):
                 print(f"Split placement: pane {target} refused {result['error']}; "
                       "falling back to the placement hierarchy.")

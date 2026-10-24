@@ -126,6 +126,18 @@ def test_full_or_nonterminal_own_pane_uses_fleet_before_other(world, count):
     assert len(placements(world)) == 1
 
 
+@pytest.mark.parametrize("backend", ["claude", "litetui"])
+def test_fresh_peer_skips_protected_parent_pane_and_launches_once_elsewhere(world, backend):
+    world["panes"][-1] = pane("own", 8)
+    world["refusals"]["fleet"] = {"ok": False, "error": "orchestrator_pane_protected"}
+    options = {"spawn_cli": "litetui", "name": "NewSeat", "tier": "worker"} if backend == "litetui" else {}
+    spawn(world, **options)
+    assert [(path, body["paneId"]) for path, body in placements(world)] == [
+        ("/canvas/split", "fleet"), ("/canvas/split", "other")]
+    writes = [body for _, path, body in world["calls"] if path == "/pty/write"]
+    assert len(writes) == (1 if backend == "claude" else 0)
+
+
 def test_other_current_pane_before_new_and_hidden_pane_never_used(world):
     world["panes"] = [pane("other"), pane("own", 8), pane("fleet", 8)]
     spawn(world)
@@ -170,7 +182,7 @@ def test_live_session_beats_stale_pane_and_actual_pane_reaches_child(world):
     assert child["pane_id"] == "merged-destination"
 
 
-@pytest.mark.parametrize("error", ["grid_full", "no_terminals"])
+@pytest.mark.parametrize("error", ["grid_full", "no_terminals", "orchestrator_pane_protected"])
 def test_precreation_refusal_tries_next_pane(world, error):
     world["refusals"]["own"] = {"ok": False, "error": error}
     spawn(world)
@@ -257,7 +269,8 @@ def test_refresh_discovers_merge_destination_before_new_pane(world):
 
 @pytest.mark.parametrize("result", [None, "bad", {"error": "grid_full", "newLeafId": "maybe"},
                                      {"error": "no_terminals", "ok": True},
-                                     {"error": "grid_full", "session_id": "maybe"}])
+                                     {"error": "grid_full", "session_id": "maybe"},
+                                     {"error": "orchestrator_pane_protected", "newSessionId": "maybe"}])
 def test_malformed_or_contradictory_split_never_retries(world, result):
     world["refusals"]["own"] = result
     with pytest.raises(SystemExit):
