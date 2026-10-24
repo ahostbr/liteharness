@@ -639,8 +639,16 @@ class Saver:
         updated = replace(seat, disposition=got.disposition, source_revision=got.source_revision or seat.source_revision)
         if seat.cli == 'litetui':
             from .checkpoint_profile import observe, retain
-            got.receipts.append(retain(self.store, updated, observe(updated, manifest.checkpoint_id),
-                                       self.tick().isoformat()))
+            observation = observe(updated, manifest.checkpoint_id)
+            at = self.tick().isoformat()
+            try:
+                receipt = retain(self.store, updated, observation, at)
+            except (OSError, ContractError) as exc:
+                # Only optional retention is softened. A failed core journal append still raises.
+                self.log.event(f'profile-evidence-write-failed: cognitive role+method digest unavailable: {exc}',
+                               seat.agent_id, None)
+            else:
+                got.receipts.append(receipt)
         seats = [updated if s.agent_id == seat.agent_id else s for s in manifest.seats]
         receipts = [r for r in manifest.receipts if r.seat_id != seat.agent_id] + got.receipts
         keep = [b for b in manifest.blockers if b.seat_id != seat.agent_id or b.code in ('seat-unresolved', 'layout-unresolved')]

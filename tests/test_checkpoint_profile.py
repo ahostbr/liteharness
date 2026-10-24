@@ -126,6 +126,58 @@ def restore_saved(world, store, params):
     return result, box
 
 
+@pytest.mark.parametrize('phase', ['save', 'restore'])
+@pytest.mark.parametrize('error', [OSError, ContractError])
+def test_profile_only_retention_failure_is_nonblocking_and_journalled(world, monkeypatch, phase, error):
+    world.claude(3, parent=uid(1))
+    def unavailable(*args, **kwargs):
+        raise error('profile-only destination inaccessible')
+    if phase == 'save':
+        monkeypatch.setattr(profile, 'retain', unavailable)
+    seat, home, store, params, saved_result = managed_save(world)
+    if phase == 'restore':
+        monkeypatch.setattr(profile, 'retain', unavailable)
+        before = {p.name: p.read_bytes() for p in (home / 'prompts').iterdir()}
+        result, box = restore_saved(world, store, params)
+        assert len(box.calls) == 2
+        assert before == {p.name: p.read_bytes() for p in (home / 'prompts').iterdir()}
+    else:
+        result = saved_result
+    assert result.state == 'complete' and all(not row.errors for row in result.seats)
+    assert store.read_manifest(params.checkpoint_id).state == 'complete'
+    diagnostics = [e for e in store.operation(result.operation_id).events
+                   if e.stage.startswith('profile-evidence-write-failed:')]
+    assert len(diagnostics) == 1 and diagnostics[0].seat_id == seat.agent_id
+    assert 'cognitive role+method digest' in diagnostics[0].stage
+    assert 'profile-only destination inaccessible' in diagnostics[0].stage
+    row = next(row for row in result.seats if row.seat_id == seat.agent_id)
+    assert not any(r.kind == 'profile' for r in row.evidence), 'Never fabricate a retained receipt'
+    assert 'profile-evidence-write-failed' not in render(result), 'Retention failure is journal-only'
+
+
+@pytest.mark.parametrize('phase', ['save', 'restore'])
+@pytest.mark.parametrize('error', [OSError, ContractError])
+def test_profile_retention_diagnostic_core_journal_failure_still_propagates(world, monkeypatch, phase, error):
+    from liteharness import checkpoint_store
+    if phase == 'restore':
+        _, _, store, params, _ = managed_save(world)
+    def unavailable(*args, **kwargs):
+        raise OSError('profile-only destination inaccessible')
+    monkeypatch.setattr(profile, 'retain', unavailable)
+    original = checkpoint_store._atomic_json
+    def fail_diagnostic_write(path, value):
+        events = value.get('events', [])
+        if events and events[-1]['stage'].startswith('profile-evidence-write-failed:'):
+            raise error('core diagnostic journal write refused')
+        return original(path, value)
+    monkeypatch.setattr(checkpoint_store, '_atomic_json', fail_diagnostic_write)
+    with pytest.raises(error, match='core diagnostic journal write refused'):
+        if phase == 'save':
+            managed_save(world)
+        else:
+            restore_saved(world, store, params)
+
+
 def test_normal_interpreter_missing_helper_is_explicit_and_nonblocking(world):
     if find_spec('litetui') is not None:
         pytest.skip('This negative measures an interpreter without the optional owner package')

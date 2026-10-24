@@ -410,7 +410,14 @@ class Restorer:
             saved = None  # never consume unvalidated optional evidence
             diagnostic = f'profile-evidence-invalid: {exc}'
         observation = observe(seat, self.manifest.checkpoint_id, self.operation_id, saved, diagnostic)
-        receipt = retain(self.store, seat, observation, self.env.now().isoformat())
+        at = self.env.now().isoformat()
+        try:
+            receipt = retain(self.store, seat, observation, at)
+        except (OSError, ContractError) as exc:
+            # This core journal failure is deliberately not swallowed with the optional write.
+            self.journal(f'profile-evidence-write-failed: cognitive role+method digest unavailable: {exc}',
+                         seat.agent_id, None)
+            return
         self.evidence[seat.agent_id] = [r for r in self.evidence.get(seat.agent_id, []) if r.kind != 'profile'] + [receipt]
 
     def journal(self, stage: str, seat_id: str | None, result: Result | None) -> None:

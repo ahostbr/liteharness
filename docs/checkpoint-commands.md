@@ -121,6 +121,11 @@ restore operation has its own evidence file and cannot overwrite the saved obser
 Corrupt optional profile bytes/hashes/identity joins produce a nonblocking
 `profile-evidence-invalid` diagnostic, with the saved comparison unavailable and no invented
 change. This does not relax core manifest, ownership, exact-slot or launch validation.
+If optional profile evidence retention itself raises `OSError` or `ContractError`, SAVE/RESTORE
+continue without that receipt and append a seat-tagged `profile-evidence-write-failed` diagnostic
+to the operation journal. This path is **journal-only**: the Result-only CLI cannot show a receipt
+that was not retained. No replacement receipt is fabricated. Core journal/publish failures still
+propagate; inability to durably record this diagnostic is not silently ignored.
 
 **Deployment limitation:** the current Harness interpreter cannot import `litetui`
 (`find_spec('litetui')` is `None`), so changed-digest notices are **inert there**. The real
