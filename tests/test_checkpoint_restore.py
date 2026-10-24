@@ -189,6 +189,44 @@ def test_plan_live_is_reattach_unknown_is_unknown_unresolved_is_blocked(tmp_path
 
 # -- driver -------------------------------------------------------------------------------------
 
+def test_restore_passes_the_saved_execution_and_location_to_governed_resume(tmp_path, box):
+    saved = replace(seat(2, root=tmp_path, model='claude-opus-5-5[1m]'), cli='litetui',
+                    execution=Execution('codex', 'gpt-exact', 'high'))
+    store, params, op = start(tmp_path, manifest(tmp_path, [saved]))
+    run_restore(store, op, params, box.env(model_known=lambda _: False))
+    argv, child_env = box.calls[0]
+    for flag, value in {'--cli': 'litetui', '--convo': saved.conversation_id,
+                        '--cwd': saved.cwd, '--tier': saved.role,
+                        '--model': 'gpt-exact', '--backend': 'codex', '--thinking-level': 'high'}.items():
+        assert flag in argv and argv[argv.index(flag) + 1] == value
+    assert child_env['LITETUI_DATA_ROOT'] == saved.data_root
+
+
+def test_litetui_restore_never_asks_for_a_second_inbox_consumer(tmp_path, box):
+    saved = replace(seat(2, root=tmp_path), cli='litetui', execution=Execution('codex', 'gpt-exact', 'high'),
+                    first_recovery_action='Read your handoff, arm one inbox monitor, wait for your owner')
+    store, params, op = start(tmp_path, manifest(tmp_path, [saved]))
+    box.script[saved.agent_id] = 'refuse-prompt'
+    run_restore(store, op, params, box.env())
+    prompt = box.calls[0][0][box.calls[0][0].index('--prompt') + 1]
+    mail = next(event[3] for event in box.events if event[0] == 'mail')
+    wake = next(event[2] for event in box.events if event[0] == 'wake')
+    assert 'native inbox' in prompt and 'native inbox' in mail
+    assert 'arm' not in wake.lower() and 'Monitor' not in prompt
+    assert 'arm one inbox monitor' not in mail.lower()
+
+
+def test_restore_passes_exact_claude_model_including_context_suffix(tmp_path, box):
+    saved = seat(2, root=tmp_path, model='claude-opus-5-5[1m]')
+    store, params, op = start(tmp_path, manifest(tmp_path, [saved]))
+    run_restore(store, op, params, box.env())
+    argv = box.calls[0][0]
+    assert '--model' in argv and argv[argv.index('--model') + 1] == saved.execution.model
+    assert argv[argv.index('--cli') + 1] == 'claude'
+    assert argv[argv.index('--cwd') + 1] == saved.cwd
+    assert argv[argv.index('--convo') + 1] == saved.conversation_id
+
+
 def test_restore_launches_in_order_one_at_a_time_and_reports_ready(tmp_path, box):
     owner = seat(2, role='owner', root=tmp_path)
     crew = seat(3, parent=owner.agent_id, root=tmp_path, disposition='held')
@@ -856,15 +894,16 @@ def test_an_exited_row_whose_shell_now_runs_something_is_not_dead(tmp_path, monk
 
 # -- round 5: F2 restore never passes an unknown model ----------------------------------------------------------
 
-def test_restore_never_passes_model_and_notes_a_seat_whose_model_is_unconfirmed(tmp_path, box):
+def test_unconfirmed_model_blocks_only_its_row_while_exact_sibling_launches(tmp_path, box):
     s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
     store, params, op = start(tmp_path, manifest(tmp_path, [s2, s3]))
     result = run_restore(store, op, params, box.env(model_known=lambda agent_id: agent_id != s2.agent_id,
                                                     default_model=lambda: 'claude-x[1m]'))
-    assert all('--model' not in argv and 'unknown' not in ' '.join(argv) for argv, _ in box.calls)
-    notes = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('model-unconfirmed')]
-    assert notes == [f'model-unconfirmed seat={s2.agent_id}: resumed without --model']
-    assert result.state == 'complete', 'a non-blocking note never changes the outcome'
+    assert launched(box) == [s3.agent_id]
+    argv = box.calls[0][0]
+    assert argv[argv.index('--model') + 1] == s3.execution.model
+    assert next(r for r in result.seats if r.seat_id == s2.agent_id).state == 'blocked'
+    assert result.state == 'incomplete'
 
 
 # -- round 5: F5 a saved pane id may be an alias of an active pane ------------------------------------------------
@@ -938,12 +977,11 @@ def test_opus_transcript_and_sonnet_default_is_blocked_and_nothing_is_launched(t
     assert result.state == 'incomplete'
 
 
-def test_a_matching_base_model_launches_and_a_context_suffix_does_not_count(tmp_path, box):
+def test_matching_base_model_cannot_prove_the_saved_context_window(tmp_path, box):
     s2, child, store, p, op, env = unknown_model_world(box, tmp_path, SONNET, SONNET + '[1m]')
     result = run_restore(store, op, p, env)
-    assert launched(box) == [s2.agent_id, child.agent_id] and result.state == 'complete'
-    stages = [e.stage for e in OperationLog(store, op).operation().events]
-    assert any(st.startswith('model-unconfirmed') for st in stages), 'the non-blocking note stays'
+    assert launched(box) == [] and result.state == 'incomplete'
+    assert next(r for r in result.seats if r.seat_id == s2.agent_id).errors[0].code == 'model-mismatch'
 
 
 def test_an_unreadable_default_blocks_too(tmp_path, box):
@@ -956,7 +994,8 @@ def test_allow_default_model_launches_on_the_default_and_says_so_on_the_row(tmp_
     s2, child, store, p, op, env = unknown_model_world(box, tmp_path, OPUS, SONNET, allow_default_model=True)
     result = run_restore(store, op, p, env)
     assert launched(box) == [s2.agent_id, child.agent_id]
-    assert all('--model' not in argv for argv, _ in box.calls), 'the transcript model is never passed (no [1m])'
+    assert '--model' not in box.calls[0][0], 'the transcript-only model is not an exact assertion'
+    assert box.calls[1][0][box.calls[1][0].index('--model') + 1] == child.execution.model
     row = next(r for r in result.seats if r.seat_id == s2.agent_id)
     assert row.state == 'ready-idle' and [e.code for e in row.errors] == ['model-defaulted']
     assert result.state == 'incomplete'

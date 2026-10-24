@@ -38,12 +38,24 @@ def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd
         raise ValueError('Recovery destination inspection unavailable; no ordinary split attempted')
     if not result['found']:
         return False
-    unsupported = [key for key, value in (overrides or {}).items() if value is not None]
+    overrides = overrides or {}
+    assertions = {'--model': 'model', '--backend': 'backend', '--thinking-level': 'thinking_level'}
+    unsupported = [key for key, value in overrides.items() if value is not None and key not in assertions]
     if unsupported:
         raise ValueError('Reserved-slot recovery does not support explicit ' + ', '.join(unsupported) + '; nothing launched or applied')
+    expected = None
+    if any(overrides.get(key) is not None for key in assertions):
+        if result.get('contractVersion', 1) < 2:
+            raise ValueError('Host cannot assert saved execution authority; nothing launched')
+        plan = prepare(agent_id, requested_cwd or result.get('cwd'), conversation_id)
+        if any(overrides.get(key) is not None and overrides[key] != plan.get(field)
+               for key, field in assertions.items()):
+            raise ValueError('Saved execution disagrees with current recovery authority; nothing launched')
+        expected = plan['authorityFingerprint']
     response = cli._bridge_request('POST', '/harness/recovered-agent/restore', {
         **{key: result[key] for key in ('paneId', 'slotId', 'agentId', 'requestId') if key in result},
         'kind': 'agent-slot-recovery', 'actorId': caller,
+        **({'expectedAuthorityFingerprint': expected} if expected else {}),
         **({'conversationId': conversation_id} if conversation_id else {}),
         **({'requestedCwd': requested_cwd} if requested_cwd else {}),
         **({'requestedRole': requested_role} if requested_role else {}),

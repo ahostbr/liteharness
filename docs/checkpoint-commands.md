@@ -67,7 +67,12 @@ only its own subtree. A live seat is reattached, never relaunched; unknown liven
 A launch intent is journaled before `spawn --resume` runs (a crash between intent and result is
 `unknown` and is never retried; so is a timeout). Never `--kill-old`, a new name or a takeover.
 Works from an incomplete checkpoint. The caller must be the saved coordinator, or the same named
-seat under a new id.
+seat under a new id. Resume receives the saved CLI, conversation, cwd and tier explicitly.
+A known model is passed exactly, including its context suffix; LiteTUI also receives the saved
+backend, thinking level and data root, and its owned home must still agree. Reserved-slot
+execution assertions require host contract v2 and are revalidated against the current authority
+fingerprint before allocation. An older host refuses rather than silently ignoring the assertion.
+LiteTUI recovery uses its native inbox consumer; it never requests an external monitor.
 
 Placement never puts a seat in the coordinator's pane: the coordinator's panes ride
 `LITEHARNESS_EXCLUDE_PANES` into `cli._place_split`, which also resolves pane aliases
@@ -101,8 +106,10 @@ the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
 - The shell summary (`N bare shells found, M matched a saved leaf, K closed`) is a journal line on a real
   run (stage `shell-summary`) and an informational `shell-summary` blocker on a dry run; the Result
   contract has no note field, so a final result cannot carry it without turning `complete` into `incomplete`.
-- Model gating (`model-mismatch`) compares BASE models only. A seat that was on a 1M window while the harness
-  default is the same base model at 200k is not caught, and neither is a different default `--effort`.
+- Unknown Claude execution blocks with `model-mismatch`, even if the default's base model matches:
+  a transcript does not prove the saved context suffix. The legacy explicit `--allow-default-model`
+  exception remains visible as `model-defaulted` and cannot yield a complete result. Native Claude
+  effort preservation remains unverified; LiteTUI thinking is asserted against its owned home.
 - A registry model that is real but stale (the user switched models with `/model` after registering) is resumed
   on the registry model, not on what the transcript last ran.
 - Cancel is not checked while a compact command is executing (up to `compact_timeout`); it is checked in the

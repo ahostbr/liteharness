@@ -84,11 +84,12 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
         raise StoreError(refusal)
     recovery_overrides = {'--system-prompt-file': system_prompt_file, '--prompt': prompt, '--cognitive': cognitive,
                           '--owner': owner_title, '--memory': memory_dir}
+    recovery_assertions = {'--model': model, '--backend': backend, '--thinking-level': thinking_level}
     has_overrides = any(value is not None for value in recovery_overrides.values())
     if recovery_scope is None and not has_overrides:
         try:
             if recovered_destination.recover_if_reserved(agent.agent_id, caller, conversation_id=conversation_id,
-                    requested_cwd=cwd, requested_role=tier):
+                    requested_cwd=cwd, requested_role=tier, overrides=recovery_assertions):
                 return
         except ValueError as exc:
             raise StoreError(str(exc)) from exc
@@ -116,7 +117,7 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
     if recovery_scope is None and has_overrides:
         try:
             if recovered_destination.recover_if_reserved(agent.agent_id, caller, conversation_id=conversation_id,
-                    requested_cwd=cwd, requested_role=tier, overrides=recovery_overrides):
+                    requested_cwd=cwd, requested_role=tier, overrides={**recovery_overrides, **recovery_assertions}):
                 return
         except ValueError as exc:
             raise StoreError(str(exc)) from exc

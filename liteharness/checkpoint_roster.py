@@ -21,7 +21,7 @@ from .checkpoint_store import checked_path, read_json
 
 CLI_BY_REGISTRY = {'claude-code': 'claude', 'claude': 'claude', 'litetui': 'litetui',
                    'codex': 'codex', 'copilot': 'copilot'}
-FIRST_RECOVERY_ACTION = 'Read your handoff, arm one inbox monitor, wait for your owner'
+FIRST_RECOVERY_ACTION = 'Read your handoff and wait for your owner'
 UNOBSERVED_LAYOUT = 'unobserved'
 
 

@@ -450,20 +450,21 @@ class Restorer:
                 self.evidence[row.seat_id] = list(row.evidence)
 
     def gate_unknown_models(self, rows: list[PlanRow], seats: dict[str, Seat]) -> None:
-        """A seat whose registry model is unknown resumes with no --model, i.e. on the harness default.
-        If the model it was observed running on (base, no context suffix) is not that default, it
-        would silently change model: block it, unless the operator allowed the default."""
+        """A transcript base model cannot prove the exact saved context window.
+
+        Unknown Claude execution blocks even when the configured default has the
+        same base. Only the explicit legacy exception permits a reported default.
+        Owned LiteTUI execution is instead checked against its authoritative home.
+        """
         env = self.env
         default = _base_model(env.default_model())
         for row in rows:
             seat = seats.get(row.seat_id)
-            if row.action != 'launch' or seat is None or env.model_known(row.seat_id):
+            if row.action != 'launch' or seat is None or seat.cli == 'litetui' or env.model_known(row.seat_id):
                 continue
             if self.states.get(row.seat_id) not in ('preparing', 'starting'):
                 continue
             observed = _base_model(seat.execution.model)
-            if observed and observed == default:
-                continue  # same model either way: only the non-blocking note applies
             detail = (f'registry model unknown; transcript says {observed or "nothing"}, harness default is '
                       f'{default or "not configured"}')
             if self.params.allow_default_model:
@@ -537,11 +538,22 @@ class Restorer:
 
     def prompt_for(self, seat: Seat) -> str:
         text = POINTER.format(checkpoint_id=self.manifest.checkpoint_id, coordinator=self.params.coordinator_id)
+        if seat.cli == 'litetui':
+            text = text.replace('Arm ONE inbox Monitor for your own id.',
+                                'Use your existing native inbox consumer; do not start another watcher.')
         return text + (HELD_POINTER if seat.disposition == 'held' else '')
 
     def argv(self, seat: Seat, pane: str | None, *, prompt: bool) -> list[str]:
         out = [self.env.python, '-m', 'liteharness.cli', 'spawn', '--resume', seat.agent_id, '--split',
-               '--spawned-by', self.params.coordinator_id]
+               '--spawned-by', self.params.coordinator_id,
+               '--cli', seat.cli, '--convo', seat.conversation_id, '--cwd', seat.cwd, '--tier', seat.role]
+        # Transcript-only Claude model ids may omit context suffixes. Never turn
+        # them into an exact launch assertion; the explicit legacy exception is
+        # still reported by gate_unknown_models.
+        if seat.cli == 'litetui' or self.env.model_known(seat.agent_id):
+            out += ['--model', seat.execution.model]
+        if seat.cli == 'litetui':
+            out += ['--backend', seat.execution.backend, '--thinking-level', seat.execution.thinking_level]
         if pane:
             out += ['--pane', pane]
         if prompt:
@@ -580,6 +592,8 @@ class Restorer:
         self.journal('launch-intent', seat.agent_id, self.report('running'))
         child_env = {**os.environ, 'LITEHARNESS_AGENT_ID': self.params.coordinator_id,
                      'LITEHARNESS_EXCLUDE_PANES': ','.join(sorted(excluded))}
+        if seat.cli == 'litetui':
+            child_env['LITETUI_DATA_ROOT'] = seat.data_root
         outcome = env.spawn(self.argv(seat, pane, prompt=True), child_env, env.spawn_timeout)
         slot_path = outcome.returncode not in (None, 0) and PROMPT_REFUSAL in outcome.tail
         if slot_path:
@@ -612,8 +626,11 @@ class Restorer:
         into any other session.
         """
         cid = self.manifest.checkpoint_id
+        next_action = seat.first_recovery_action
+        if seat.cli == 'litetui' and next_action == 'Read your handoff, arm one inbox monitor, wait for your owner':
+            next_action = 'Read your handoff and wait for your owner'  # legacy checkpoint instruction
         body = (self.prompt_for(seat)
-                + f' When saved you were: {seat.disposition}. Next: {seat.first_recovery_action}.')
+                + f' When saved you were: {seat.disposition}. Next: {next_action}.')
         failure = None
         try:
             mail_id = self.env.send_mail(self.params.coordinator_id, seat.agent_id, body)
@@ -624,7 +641,8 @@ class Restorer:
         if failure is None and not session_id:
             failure = 'the new session id is unknown; no wake was typed'
         if failure is None:
-            status = self.env.wake(session_id, WAKE_LINE)
+            wake_line = 'resumed: read your native inbox; do not start work' if seat.cli == 'litetui' else WAKE_LINE
+            status = self.env.wake(session_id, wake_line)
             self.journal('pointer-wake', seat.agent_id, None)
             if 'turn confirmed' not in status:
                 failure = 'the wake was typed but no turn was confirmed; message the seat'
