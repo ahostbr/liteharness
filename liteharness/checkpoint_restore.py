@@ -23,15 +23,15 @@ from .checkpoint_contract import Blocker, ContractError, Manifest, Receipt, Resu
 from .checkpoint_ops import OperationLog, make_result, seat_result
 from .checkpoint_save import evidence, sha256_file
 from .checkpoint_store import CheckpointStore
+from .checkpoint_slots import current_slots, resolve_slot
+from .recovered_destination import REQUIRED_SLOT_ENV
 from uuid import uuid4
 
 SPAWN_TIMEOUT = 300.0
 VERIFY_TIMEOUT = 30.0
-MAX_LEAVES = 8  # fleet panes cap at 8 leaves
 POINTER = ('Restored from checkpoint {checkpoint_id}. Resume as-is. Arm ONE inbox Monitor for your own id. '
            'Do not start new work, commit, push or rebuild. Wait for an inbox message from {coordinator}.')
 HELD_POINTER = ' You were mid-work when saved: hold until your owner reconciles.'
-PROMPT_REFUSAL = 'does not support explicit --prompt'  # T0589 slot recovery refuses before launching
 WAKE_LINE = 'resumed: arm ONE inbox Monitor and read your inbox'
 ROLE_RANK = {role: n for n, role in enumerate(roles.ROLES)}
 
@@ -183,6 +183,7 @@ class RestoreEnv:
     wake: Callable[[str, str], str] = lambda session_id, line: _wake(session_id, line)
     context: Callable[[], list[dict] | None] = _context
     hidden_panes: Callable[[], list[dict]] = _hidden_panes
+    slot_snapshot: Callable[[], dict] = current_slots
     pty_list: Callable[[], list[dict] | None] = _pty_list
     leaves: Callable[[str], list[dict] | None] = _leaves
     close_leaf: Callable[[str], bool] = _close_leaf
@@ -376,28 +377,7 @@ def coordinator_panes(env: RestoreEnv, coordinator_id: str) -> set[str]:
         if session and any(session in leaf.get('sessionIds', []) for leaf in pane.get('leaves', [])
                            if isinstance(leaf, dict)):
             found.add(pane['id'])
-    return found
-
-
-def choose_pane(env: RestoreEnv, seat: Seat, excluded: set[str], restored_panes: list[str]) -> str | None:
-    """Saved pane if it exists with room and is not excluded; else a pane already holding
-    restored seats; else None, letting the placement hierarchy (and finally a new pane) decide."""
-    from . import cli
-    active = [p for p in env.context() or [] if isinstance(p, dict)]
-    panes = {p['id']: p for p in active if isinstance(p.get('id'), str)}
-    # The saved id may be an alias (canvas-pane-N for zen-term-N and back): resolve it, and the
-    # exclusions, through the same map spawn placement uses; the ACTIVE id is what gets passed.
-    aliases = cli._pane_aliases(active, env.hidden_panes())
-    barred = {aliases.get(e, e) for e in excluded}
-
-    def room(pane_id: str) -> bool:
-        pane = panes.get(pane_id)
-        count = pane.get('leafCount', 0) if pane else 0
-        return pane is not None and pane_id not in barred and isinstance(count, int) and 0 < count < MAX_LEAVES
-    saved = aliases.get(seat.slot.pane, seat.slot.pane) if seat.slot else None
-    if saved and room(saved):
-        return saved
-    return next((p for p in restored_panes if room(p)), None)
+    return found | {alias for alias, canonical in aliases.items() if canonical in found}
 
 
 # -- driver --------------------------------------------------------------------------------------
@@ -410,7 +390,6 @@ class Restorer:
         self.states: dict[str, str] = {}
         self.errors: dict[str, list[Blocker]] = {}
         self.evidence: dict[str, list[Receipt]] = {}
-        self.restored_panes: list[str] = []
         self.reattached: set[str] = set()
 
     def report(self, state: str, *, final: bool = False) -> Result:
@@ -543,10 +522,11 @@ class Restorer:
                                 'Use your existing native inbox consumer; do not start another watcher.')
         return text + (HELD_POINTER if seat.disposition == 'held' else '')
 
-    def argv(self, seat: Seat, pane: str | None, *, prompt: bool) -> list[str]:
+    def argv(self, seat: Seat, pane: str) -> list[str]:
         out = [self.env.python, '-m', 'liteharness.cli', 'spawn', '--resume', seat.agent_id, '--split',
                '--spawned-by', self.params.coordinator_id,
-               '--cli', seat.cli, '--convo', seat.conversation_id, '--cwd', seat.cwd, '--tier', seat.role]
+               '--cli', seat.cli, '--convo', seat.conversation_id, '--cwd', seat.cwd, '--tier', seat.role,
+               '--pane', pane]
         # Transcript-only Claude model ids may omit context suffixes. Never turn
         # them into an exact launch assertion; the explicit legacy exception is
         # still reported by gate_unknown_models.
@@ -554,68 +534,77 @@ class Restorer:
             out += ['--model', seat.execution.model]
         if seat.cli == 'litetui':
             out += ['--backend', seat.execution.backend, '--thinking-level', seat.execution.thinking_level]
-        if pane:
-            out += ['--pane', pane]
-        if prompt:
-            out += ['--prompt', self.prompt_for(seat)]
         return out
 
-    def verified(self, seat: Seat, since: datetime | None = None) -> bool:
-        """Registry row live by process identity and joined to a PTY that hosts this agent;
-        with `since`, also a NEW registration (a launch), without it any current one (a reattach)."""
-        row = self.env.registry(seat.agent_id)
-        if not row or row.get('exited_at') or self.env.liveness(seat.agent_id) != 'live':
-            return False
+    def verified(self, seat: Seat, since: datetime | None = None) -> str | None:
+        """Return the observed session only when it joins the exact saved slot.
+
+        A launch also requires a new registration and a session other than the
+        saved placeholder. Hidden panes use the same current-slot inventory.
+        Return the identity, not just a bool: pointer delivery must not re-read
+        a newer registry row and accidentally wake an unverified session.
+        """
+        row, saved = self.env.registry(seat.agent_id), seat.slot
+        if (not row or row.get('agent_id') != seat.agent_id or row.get('exited_at')
+                or self.env.liveness(seat.agent_id) != 'live' or not saved
+                or not isinstance(saved.tab, str) or not saved.tab.strip()):
+            return None
         if since is not None:
             try:
                 if datetime.fromisoformat(str(row.get('registered_at'))) < since:
-                    return False
+                    return None
             except ValueError:
-                return False
+                return None
         sessions = self.env.pty_list()
         session = row.get('canvas_session_id')
-        return bool(session) and any(isinstance(s, dict) and s.get('id') == session
-                                     and s.get('harnessAgentId') in (None, seat.agent_id) for s in sessions or [])
+        if not isinstance(session, str) or not session.strip() or (since is not None and session == saved.tab) or not any(
+                isinstance(s, dict) and s.get('id') == session and s.get('harnessAgentId') in (None, seat.agent_id)
+                for s in sessions or []):
+            return None
+        try:
+            current = resolve_slot(row, self.env.slot_snapshot(), 'restore-verification')
+        except ContractError:
+            return None
+        return session if (current.workspace, current.thread, current.pane, current.leaf, current.tab) == (
+            saved.workspace, saved.thread, saved.pane, saved.leaf, session) else None
 
     def launch(self, seat: Seat, excluded: set[str]) -> str:
-        env = self.env
+        env, slot = self.env, seat.slot
+        if not slot or not isinstance(slot.tab, str) or not slot.tab.strip() or slot.pane in excluded:
+            self.errors.setdefault(seat.agent_id, []).append(Blocker(
+                'layout-unresolved', seat.agent_id, 'Exact saved reservation unavailable or protected; no fallback launch'))
+            return 'blocked'
         state = env.liveness(seat.agent_id)  # re-check: it may have come up since the plan
         if state == 'live':
-            if not self.verified(seat):  # a bare "live" is not enough to call it reattached
+            if not self.verified(seat):
                 return 'unknown'
             self.reattached.add(seat.agent_id)
             return self.ready_state(seat)
         if state != 'dead':
             return 'unknown'
-        pane = choose_pane(env, seat, excluded, self.restored_panes)
         started = env.now()
         self.journal('launch-intent', seat.agent_id, self.report('running'))
         child_env = {**os.environ, 'LITEHARNESS_AGENT_ID': self.params.coordinator_id,
-                     'LITEHARNESS_EXCLUDE_PANES': ','.join(sorted(excluded))}
+                     'LITEHARNESS_EXCLUDE_PANES': ','.join(sorted(excluded)),
+                     REQUIRED_SLOT_ENV: json.dumps({'version': 1, 'agentId': seat.agent_id,
+                         'workspace': slot.workspace, 'thread': slot.thread, 'paneId': slot.pane,
+                         'leafId': slot.leaf, 'placeholderSessionId': slot.tab})}
         if seat.cli == 'litetui':
             child_env['LITETUI_DATA_ROOT'] = seat.data_root
-        outcome = env.spawn(self.argv(seat, pane, prompt=True), child_env, env.spawn_timeout)
-        slot_path = outcome.returncode not in (None, 0) and PROMPT_REFUSAL in outcome.tail
-        if slot_path:
-            # A reserved slot takes no prompt and refuses BEFORE launching: safe to retry bare.
-            outcome = env.spawn(self.argv(seat, pane, prompt=False), child_env, env.spawn_timeout)
+        # Exactly one attempt; even a legacy prompt-refusal message cannot
+        # authorize retrying an operation whose side effects may be unknown.
+        outcome = env.spawn(self.argv(seat, slot.pane), child_env, env.spawn_timeout)
         if outcome.returncode is None:
             return 'unknown'
         deadline = env.now().timestamp() + env.verify_timeout
-        while not self.verified(seat, started):
+        while not (session := self.verified(seat, started)):
             if env.now().timestamp() >= deadline:
                 return 'failed' if outcome.returncode != 0 and env.liveness(seat.agent_id) == 'dead' else 'unknown'
             env.sleep(env.poll_interval)
-        row = env.registry(seat.agent_id) or {}
-        for pane_id in [p['id'] for p in env.context() or [] if any(
-                row.get('canvas_session_id') in leaf.get('sessionIds', []) for leaf in p.get('leaves', [])
-                if isinstance(leaf, dict))]:
-            self.restored_panes.append(pane_id)
         if outcome.returncode != 0:
             self.errors.setdefault(seat.agent_id, []).append(Blocker(
                 'spawn-exit-nonzero', seat.agent_id, 'Spawn exited non-zero but the seat registered live'))
-        if slot_path:
-            self.deliver_pointer(seat, row.get('canvas_session_id'))
+        self.deliver_pointer(seat, session)
         return self.ready_state(seat)
 
     def deliver_pointer(self, seat: Seat, session_id: str | None) -> None:
@@ -779,6 +768,9 @@ class Restorer:
             return [], 0, 0
         found = matched = 0
         seat_sessions = {s.get('canvas_session_id') for e in self.manifest.expected if (s := env.registry(e.agent_id))}
+        # A failed restore still owns its exact placeholder, even without a
+        # registry row. Closing that shell would destroy the next reservation.
+        seat_sessions.update(s.slot.tab for s in self.manifest.seats if s.slot and s.slot.tab)
         saved_leaves = {s.slot.leaf for s in self.manifest.seats if s.slot}
         by_id = {s.get('id'): s for s in sessions if isinstance(s, dict)}
         out = []

@@ -83,13 +83,20 @@ execution assertions require host contract v2 and are revalidated against the cu
 fingerprint before allocation. An older host refuses rather than silently ignoring the assertion.
 LiteTUI recovery uses its native inbox consumer; it never requests an external monitor.
 
-Placement never puts a seat in the coordinator's pane: the coordinator's panes ride
-`LITEHARNESS_EXCLUDE_PANES` into `cli._place_split`, which also resolves pane aliases
-(id, syncId, mirrorId) and drops an orchestrator caller's own pane. A reserved-slot seat takes no
-`--prompt`: its pointer goes by inbox first, then ONE fixed wake line is typed into its exact new
-session (`pointer-not-delivered` when no turn is confirmed). Bare restored shells (no child
-process, no seat, not the coordinator's pane, at least one leaf kept per pane) are closed after
-the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
+Checkpoint restore requires the exact saved workspace/thread/pane/leaf/placeholder session.
+`LITEHARNESS_REQUIRED_RECOVERY_SLOT` restricts the existing native recovery path; host contract
+v3 must enforce `expectedSlot` before allocation. A missing reservation, older host, moved slot,
+or coordinator-protected pane refuses rather than choosing another pane, leaf, or tab. A full or
+hidden pane is not a reason to relocate. Presentation aliases never rewrite the saved identity;
+coordinator exclusions still cover aliases. Execution assertions remain independent of placement.
+
+Each seat gets one launch without `--prompt`; even legacy prompt-refusal text never causes a
+second spawn. Current registry/PTY identity must join the saved owner/pane/leaf in the current
+slot inventory, with a new session after launch, before readiness or pointer delivery. The pointer
+goes by inbox first, then ONE fixed wake line to that verified session (`pointer-not-delivered`
+when no turn is confirmed). Bare shells satisfying the existing cleanup rules may be closed,
+but recorded placeholder session IDs are retained even when their registry row is absent.
+`--dry-run` lists cleanup candidates; `--keep-shells` skips cleanup.
 
 ## Known limits
 
@@ -112,11 +119,11 @@ the seats are up; `--dry-run` lists them, `--keep-shells` skips it.
   row for the seat remains, and its process is gone, the seat reads `dead` once the operation is idle
   for longer than spawn timeout plus verify timeout (about 330 s), and a later restore may launch it
   again. The first attempt's seat could in principle still be starting; the wait is the only guard.
-- A seat that ends `failed`, `blocked` or `unknown` can lose its shell-husk leaf in cleanup when that
-  leaf is a saved leaf and its shell has no child. That is accepted: the leaf held nothing.
-- Saved `slot.leaf` ids are expected to survive a LiteSuite restart (`gone-terminal.ts` revives a
-  vanished terminal in the same leaf and the split tree persists), but no restart has proven it yet.
-  If they do not, the cleanup closes nothing and says so in its `shell-summary` line.
+- Failed, blocked and unknown seats retain their recorded placeholder sessions through cleanup,
+  including when their registry row is absent. Unrelated eligible shell cleanup is unchanged.
+- Saved `slot.leaf` and placeholder session ids must survive a LiteSuite restart; no watched
+  restart has proven this yet. Missing or changed reservations block exact restore instead of
+  silently relocating the seat.
 - The shell summary (`N bare shells found, M matched a saved leaf, K closed`) is a journal line on a real
   run (stage `shell-summary`) and an informational `shell-summary` blocker on a dry run; the Result
   contract has no note field, so a final result cannot carry it without turning `complete` into `incomplete`.
