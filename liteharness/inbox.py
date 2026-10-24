@@ -85,6 +85,8 @@ def send(
     model: str = "unknown",
     surface: Optional[str] = None,
     originator: Optional[str] = None,
+    direct: bool = False,
+    forwarded_for: Optional[str] = None,
 ) -> str:
     """
     Send a message to another agent's inbox.
@@ -97,6 +99,11 @@ def send(
     msg_id = str(uuid.uuid4())
     filename = make_filename(priority)
 
+    from .clerk_route import load_clerk_config, route_recipient, _agent_record_live
+
+    to_agent, original_to = route_recipient(
+        from_agent, to_agent, direct, forwarded_for, load_clerk_config(), _agent_record_live,
+    )
     message = {
         "id": msg_id,
         "from": from_agent,
@@ -112,6 +119,12 @@ def send(
         "cli": cli,
         "model": model,
     }
+    if original_to:
+        message["original_to"] = original_to
+    if direct:
+        message["direct"] = True
+    if forwarded_for:
+        message["forwarded_for"] = forwarded_for
     if surface:
         message["surface"] = surface
     if originator:
