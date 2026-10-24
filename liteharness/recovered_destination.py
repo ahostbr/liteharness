@@ -24,6 +24,27 @@ def active_scope():
     return value[0] if value is not None else None
 
 
+REQUIRED_SLOT_ENV = 'LITEHARNESS_REQUIRED_RECOVERY_SLOT'
+
+
+def required_slot(agent_id):
+    """Checkpoint restriction only: it grants no recovery or placement authority."""
+    raw = os.environ.get(REQUIRED_SLOT_ENV)
+    if raw is None:
+        return None
+    fields = ('agentId', 'workspace', 'thread', 'paneId', 'leafId', 'placeholderSessionId')
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise ValueError('Invalid required recovery slot; nothing launched') from exc
+    if (not isinstance(value, dict) or type(value.get('version')) is not int or value['version'] != 1
+            or set(value) != {'version', *fields}
+            or any(not isinstance(value.get(key), str) or not value[key].strip() for key in fields)
+            or value['agentId'] != agent_id):
+        raise ValueError('Invalid required recovery slot identity; nothing launched')
+    return {key: value[key] for key in fields}
+
+
 def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd=None, requested_role=None, overrides=None):
     """Read-only authority checks precede this; NEW-CREATE liveness checks follow.
 
@@ -33,11 +54,22 @@ def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd
     if _active.get() is not None:
         return False
     from . import cli
+    required = required_slot(agent_id)
     result = cli._bridge_request('GET', '/harness/recovered-agent/locate?' + urlencode({'agentId': agent_id}))
     if not isinstance(result, dict) or result.get('ok') is not True or not isinstance(result.get('found'), bool):
         raise ValueError('Recovery destination inspection unavailable; no ordinary split attempted')
     if not result['found']:
+        if required:
+            raise ValueError('Required original reservation unavailable; no ordinary split attempted')
         return False
+    if required:
+        version = result.get('contractVersion')
+        if type(version) is not int or version < 3:
+            raise ValueError('Host cannot enforce the exact saved slot; nothing launched')
+        located = {key: result.get('sessionId' if key == 'placeholderSessionId' else key) for key in required}
+        if located != required or any(not isinstance(result.get(key), str) or not result[key].strip()
+                                      for key in ('slotId', 'requestId')):
+            raise ValueError('Current reservation differs from the saved slot; nothing launched')
     overrides = overrides or {}
     assertions = {'--model': 'model', '--backend': 'backend', '--thinking-level': 'thinking_level'}
     unsupported = [key for key, value in overrides.items() if value is not None and key not in assertions]
@@ -55,16 +87,22 @@ def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd
     response = cli._bridge_request('POST', '/harness/recovered-agent/restore', {
         **{key: result[key] for key in ('paneId', 'slotId', 'agentId', 'requestId') if key in result},
         'kind': 'agent-slot-recovery', 'actorId': caller,
+        **({'expectedSlot': required} if required else {}),
         **({'expectedAuthorityFingerprint': expected} if expected else {}),
         **({'conversationId': conversation_id} if conversation_id else {}),
         **({'requestedCwd': requested_cwd} if requested_cwd else {}),
         **({'requestedRole': requested_role} if requested_role else {}),
     }, timeout=210)
-    identity = f"request {result.get('requestId', '<host did not return request identity>')}; session {(response or {}).get('sessionId', '<allocation outcome unknown>')}"
+    receipt = response if isinstance(response, dict) else {}
+    identity = f"request {result.get('requestId', '<host did not return request identity>')}; session {receipt.get('sessionId', '<allocation outcome unknown>')}"
     if not isinstance(response, dict) or response.get('status') != 'bound' or response.get('ok') is not True:
         raise ValueError(f'Reserved-slot recovery refused or UNKNOWN: {identity}; no split fallback; reconcile this same operation')
     if response.get('agentId') != agent_id or not response.get('sessionId') or not response.get('leafId'):
         raise ValueError(f'Reserved-slot receipt does not join target: {identity}; no split fallback')
+    if required and (any(response.get(key) != result.get(key) for key in ('paneId', 'leafId', 'slotId', 'requestId'))
+                     or not isinstance(response['sessionId'], str) or not response['sessionId'].strip()
+                     or response['sessionId'] == required['placeholderSessionId']):
+        raise ValueError(f'Reserved-slot receipt differs from the requested operation: {identity}; no retry or fallback')
     print(f"Restored {agent_id} into original leaf {response['leafId']}; session {response['sessionId']}")
     return True
 
