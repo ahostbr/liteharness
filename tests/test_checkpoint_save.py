@@ -89,6 +89,7 @@ class Fleet:
             if pane['workspace'] == workspace and pane['thread'] == thread:
                 leaves = [{'type': 'leaf', 'id': leaf['leaf'], 'sessionIds': leaf['tabs']} for leaf in pane['leaves']]
                 panes.append({'id': pane['pane'], 'workspaceId': workspace,
+                              'terminalAgentSlots': pane['slots'],
                               'splitTree': leaves[0] if len(leaves) == 1 else {'type': 'split', 'children': leaves}})
         reference = self.w.tmp / 'thread-layouts.json'
         content = json.dumps({thread: {'panes': panes}}).encode()
@@ -224,7 +225,9 @@ def test_verified_layout_snapshot_is_retained_in_checkpoint_after_live_file_chan
     assert saved['snapshot']['th']['panes'][0]['splitTree']['id'] == 'leaf-1'
 
 
-@pytest.mark.parametrize('fault', ['digest', 'checkpoint', 'pane', 'workspace', 'leaf', 'timeout'])
+@pytest.mark.parametrize('fault', ['digest', 'checkpoint', 'pane', 'workspace', 'leaf', 'timeout',
+    'missing-identity', 'malformed-slots', 'malformed-binding', 'foreign-agent', 'foreign-session',
+    'unknown-binding', 'blank-slot', 'invalid-version', 'conflicting-prior'])
 def test_native_layout_receipt_must_cover_the_exact_persisted_slot(world, fault):
     w = world
     coord, handoff = coordinator(w)
@@ -247,8 +250,25 @@ def test_native_layout_receipt_must_cover_the_exact_persisted_slot(world, fault)
                 pane['id'] = 'different-pane'
             elif fault == 'workspace':
                 pane['workspaceId'] = 'different-workspace'
-            else:
+            elif fault == 'leaf':
                 pane['splitTree']['id'] = 'different-leaf'
+            elif fault == 'missing-identity':
+                pane.pop('terminalAgentSlots')
+            elif fault == 'malformed-slots':
+                pane['terminalAgentSlots'] = []
+            elif fault == 'malformed-binding':
+                pane['terminalAgentSlots']['tab-1'] = []
+            else:
+                binding = pane['terminalAgentSlots']['tab-1']
+                field, value = {
+                    'foreign-agent': ('agentId', uid(9999)),
+                    'foreign-session': ('sessionId', 'different-session'),
+                    'unknown-binding': ('state', 'unknown'),
+                    'blank-slot': ('slotId', '  '),
+                    'invalid-version': ('version', True),
+                    'conflicting-prior': ('binding', {'outcome': 'bound', 'sessionId': 'different-session', 'requestId': uid(9999)}),
+                }[fault]
+                binding[field] = value
             content = json.dumps(saved).encode()
             path.write_bytes(content)
             receipt['sha256'] = hashlib.sha256(content).hexdigest()

@@ -110,7 +110,7 @@ def _layout_flush(checkpoint_id: str, workspace: str, thread: str) -> dict:
         'checkpointId': checkpoint_id, 'workspaceId': workspace, 'threadId': thread})
 
 
-def _read_flushed_layout(receipt: dict, checkpoint_id: str, slot: Slot) -> dict | None:
+def _read_flushed_layout(receipt: dict, checkpoint_id: str, slot: Slot, agent_id: str) -> dict | None:
     """Read and validate once; return the exact snapshot the checkpoint must retain."""
     if (receipt.get('schemaVersion') != 1 or receipt.get('checkpointId') != checkpoint_id
             or receipt.get('durable') is not True or receipt.get('coverage') != 'thread-layouts-file'):
@@ -136,7 +136,22 @@ def _read_flushed_layout(receipt: dict, checkpoint_id: str, slot: Slot) -> dict 
             return [node]
         return [leaf for child in node.get('children', []) for leaf in leaves(child)]
     matches = [leaf for leaf in leaves(pane.get('splitTree')) if leaf.get('id') == slot.leaf]
-    if len(matches) != 1 or (slot.tab is not None and slot.tab not in matches[0].get('sessionIds', [])):
+    if (not isinstance(slot.tab, str) or not slot.tab.strip() or len(matches) != 1
+            or slot.tab not in matches[0].get('sessionIds', [])):
+        return None
+    # A durable terminal location without its identity becomes an ordinary shell
+    # on restart. Byte integrity alone cannot establish recoverable coverage.
+    slots = pane.get('terminalAgentSlots')
+    binding = slots.get(slot.tab) if isinstance(slots, dict) else None
+    if (not isinstance(binding, dict) or type(binding.get('version')) is not int or binding['version'] != 1
+            or not isinstance(binding.get('slotId'), str) or not binding['slotId'].strip()
+            or binding.get('agentId') != agent_id or binding.get('sessionId') != slot.tab
+            or binding.get('state') not in ('attached', 'recovery')):
+        return None
+    prior = binding.get('binding')
+    if prior is not None and (not isinstance(prior, dict) or prior.get('outcome') != 'bound'
+            or prior.get('sessionId') != slot.tab or not isinstance(prior.get('requestId'), str)
+            or not prior['requestId'].strip()):
         return None
     return snapshot
 
@@ -545,7 +560,7 @@ class Saver:
                 reply = self.env.layout_flush(manifest.checkpoint_id, seat.slot.workspace, seat.slot.thread)
                 native = reply.get('receipt') if isinstance(reply, dict) and reply.get('ok') is True else None
                 if isinstance(native, dict):
-                    snapshot = _read_flushed_layout(native, manifest.checkpoint_id, seat.slot)
+                    snapshot = _read_flushed_layout(native, manifest.checkpoint_id, seat.slot, seat.agent_id)
                 durable = snapshot is not None
                 if not durable:
                     failure = str(reply.get('error') or 'Native layout receipt missing, invalid, or does not cover the saved slot') if isinstance(reply, dict) else 'Native layout reply malformed'
