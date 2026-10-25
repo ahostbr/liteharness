@@ -104,6 +104,18 @@ def _preview_save(root: Path, store: CheckpointStore, actor: str, args, labels_o
         labels_out[EXCLUDED_KEY] = ', '.join(f'{e.name} ({e.reason})' for e in census.exclusions)
     rows = [seat_result(r.expected.agent_id, 'blocked' if r.seat is None else 'preparing', errors=r.blockers)
             for r in census.rows]
+    # A LiteTUI home that would refuse its resume shows here, before the real restore (T0558-F-E).
+    env = RestoreEnv()
+    for i, r in enumerate(census.rows):
+        if r.seat is None or r.seat.cli != 'litetui':
+            continue
+        found = env.role_launch(r.seat)
+        if found is not None and found.action == 'stop':
+            rows[i] = seat_result(r.expected.agent_id, 'blocked',
+                                  errors=[*r.blockers, Blocker('role-source-changed', r.seat.agent_id, found.reason)])
+        elif found is not None and found.action == 'override':
+            rows[i] = seat_result(r.expected.agent_id, 'preparing', errors=[*r.blockers, Blocker(
+                'role-source-override', r.seat.agent_id, f'{found.reason}; restore resumes it with the home\'s own {found.role_file}')])
     if labels_out is not None:  # the model discovery RESOLVED, with where it came from, not the registry's value
         for r in census.rows:
             if r.seat is not None:

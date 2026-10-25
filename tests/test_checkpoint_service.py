@@ -631,3 +631,22 @@ def test_save_dry_run_names_the_seats_it_leaves_out_and_why(tmp_path, monkeypatc
     assert 'excluded: Claude-3 (started-directly)' in text
     checkpoint_cli.main(['save', '--dry-run', '--exclude', 'Claude-2', '--harness-root', str(tmp_path)])
     assert 'Claude-2 (excluded-by-request)' in capsys.readouterr().out
+
+
+def test_save_dry_run_flags_a_litetui_home_that_would_refuse_its_resume(tmp_path, monkeypatch, capsys):
+    from liteharness import config
+    from liteharness.prompt_launch import Verdict
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    from checkpoint_world import World
+    w = World(tmp_path, monkeypatch)
+    w.harness = tmp_path
+    monkeypatch.setenv('LITETUI_DATA_ROOT', str(w.owned_root))
+    stale, fixable = w.litetui(5, retired=False), w.litetui(6, retired=False)
+    monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
+    answers = {stale.agent_id: Verdict('stop', reason='home role_source is default ... Resume by hand: spawn --resume X'),
+               fixable.agent_id: Verdict('override', role_file='C:/h/prompts/role.md', reason='home role_source is default ...')}
+    monkeypatch.setattr('liteharness.checkpoint_restore._role_launch', lambda seat: answers.get(seat.agent_id, Verdict('ok')))
+    checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
+    text = capsys.readouterr().out
+    assert 'role-source-changed' in text and 'Resume by hand' in text
+    assert 'role-source-override' in text and 'C:/h/prompts/role.md' in text

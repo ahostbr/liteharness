@@ -11,6 +11,7 @@ from liteharness.checkpoint_ops import OperationLog
 from liteharness.checkpoint_restore import (PlanRow, RestoreEnv, RestoreParams, SpawnOutcome, plan,
                                             resolve_checkpoint, run_restore)
 from liteharness.checkpoint_store import CheckpointStore
+from liteharness.prompt_launch import Verdict
 from checkpoint_fixtures import put, uid
 
 T0 = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
@@ -64,6 +65,7 @@ class Box:
         self.ptys, self.panes, self.calls, self.closed = [], [], [], []
         self.leaves_by_pane, self.children, self.locations = {}, {}, {}
         self.proc_names = {}
+        self.verdicts = {}  # litetui seat id -> prompt_launch.Verdict the role gate sees
         self.hidden = []
         self.events, self.wake_status, self.mail_error = [], 'nudge; turn confirmed on attempt 1 (hook stamp)', None
         self.registry[COORD] = {'agent_id': COORD, 'name': 'Seat-1', 'registered_at': T0.isoformat(),
@@ -78,6 +80,7 @@ class Box:
                     close_leaf=lambda leaf: self.closed.append(leaf) or True,
                     has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
                     send_mail=self.mail, wake=self.wake, model_known=lambda a: True, default_model=lambda: None, hidden_panes=lambda: self.hidden,
+                    role_launch=lambda s: self.verdicts.get(s.agent_id, Verdict('ok')),
                     process_name=lambda pid: self.proc_names.get(pid, 'powershell.exe'),
                     verify_timeout=5, poll_interval=1)
         return RestoreEnv(**{**base, **kw})
@@ -1104,3 +1107,62 @@ def test_exact_pointer_uses_verified_session_not_a_subsequent_registry_row(tmp_p
     run_restore(store, op, p, env)
     assert [event[1] for event in box.events if event[0] == 'wake'] == [f'pty-{saved.agent_id[-3:]}']
     assert len(box.calls) == 1
+
+
+# -- role source (T0558-F-E) --------------------------------------------------------------------
+
+def litetui_seat(tmp_path, n=2):
+    return replace(seat(n, root=tmp_path), cli='litetui')
+
+
+def role_world(box, tmp_path, verdict, **params):
+    s2 = litetui_seat(tmp_path)
+    box.verdicts[s2.agent_id] = verdict
+    store, p, op = start(tmp_path, manifest(tmp_path, [s2]), **params)
+    return s2, store, p, op
+
+
+STOP = Verdict('stop', reason='Seat-2: home role_source is default ... Resume by hand: python -m liteharness.cli spawn --resume X')
+OVERRIDE = Verdict('override', role_file='C:/h/Seat-2/prompts/role.md', reason='Seat-2: home role_source is default ...')
+
+
+def test_a_litetui_home_that_would_refuse_its_resume_is_stopped_before_any_spawn(tmp_path, box):
+    s2, store, p, op = role_world(box, tmp_path, STOP)
+    result = run_restore(store, op, p, box.env())
+    row = next(r for r in result.seats if r.seat_id == s2.agent_id)
+    assert box.calls == [] and row.state == 'blocked'
+    assert [e.code for e in row.errors] == ['role-source-changed'] and 'Resume by hand' in row.errors[0].remedy
+
+
+def test_the_dry_run_flags_the_same_seat_as_would_block_and_writes_nothing(tmp_path, box):
+    s2, store, p, _ = role_world(box, tmp_path, STOP, dry_run=True)
+    result = run_restore(store, None, p, box.env())
+    row = next(r for r in result.seats if r.seat_id == s2.agent_id)
+    assert row.state == 'blocked' and row.errors[0].code == 'role-source-changed'
+    assert row.errors[0].remedy.startswith('would block: ') and box.calls == []
+
+
+def test_a_stale_default_home_the_restore_can_fix_is_launched_and_noted_not_blocked(tmp_path, box):
+    s2, store, p, op = role_world(box, tmp_path, OVERRIDE)
+    result = run_restore(store, op, p, box.env())
+    row = next(r for r in result.seats if r.seat_id == s2.agent_id)
+    assert launched(box) == [s2.agent_id] and row.state == 'ready-idle'
+    assert [e.code for e in row.errors] == ['role-source-override'] and 'C:/h/Seat-2/prompts/role.md' in row.errors[0].remedy
+    assert '--system-prompt-file' not in box.calls[0][0], 'an explicit flag would be refused on the reserved-slot path'
+
+
+def test_an_unaskable_resolver_is_a_note_never_a_blocker(tmp_path, box):
+    s2 = litetui_seat(tmp_path)
+    store, p, op = start(tmp_path, manifest(tmp_path, [s2]))
+    result = run_restore(store, op, p, box.env(role_launch=lambda seat: None))
+    row = next(r for r in result.seats if r.seat_id == s2.agent_id)
+    assert launched(box) == [s2.agent_id] and [e.code for e in row.errors] == ['role-source-unchecked']
+
+
+def test_matching_homes_and_claude_seats_are_never_flagged_or_asked(tmp_path, box):
+    asked = []
+    s2, claude = litetui_seat(tmp_path), seat(3, root=tmp_path)
+    store, p, op = start(tmp_path, manifest(tmp_path, [s2, claude]))
+    result = run_restore(store, op, p, box.env(role_launch=lambda seat: asked.append(seat.agent_id) or Verdict('ok')))
+    assert asked == [s2.agent_id] and set(launched(box)) == {s2.agent_id, claude.agent_id}
+    assert all(not r.errors for r in result.seats if r.seat_id in (s2.agent_id, claude.agent_id))

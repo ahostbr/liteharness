@@ -121,15 +121,36 @@ def spawn(*, value: str | None, conversation_id: str | None, pane: str | None,
                 return
         except ValueError as exc:
             raise StoreError(str(exc)) from exc
-    resolution = cli._bridge_request('POST', '/harness/spawn/resolve', {
-        'cli': 'litetui', 'name': agent.name, 'tier': roles.wire_tier(tier), 'model': saved['model'],
-        'backend': saved['backend'], 'thinkingLevel': saved['thinking_level'],
-        'cwd': cwd, 'spawnedBy': caller, **({'prompt': prompt} if prompt is not None else {}),
-        **({'cognitive': cognitive} if cognitive else {}),
-        **({'systemPromptFile': system_prompt_file} if system_prompt_file is not None else {}),
-    })
+    def resolve(role_file: str | None):
+        return cli._bridge_request('POST', '/harness/spawn/resolve', {
+            'cli': 'litetui', 'name': agent.name, 'tier': roles.wire_tier(tier), 'model': saved['model'],
+            'backend': saved['backend'], 'thinkingLevel': saved['thinking_level'],
+            'cwd': cwd, 'spawnedBy': caller, **({'prompt': prompt} if prompt is not None else {}),
+            **({'cognitive': cognitive} if cognitive else {}),
+            **({'systemPromptFile': role_file} if role_file is not None else {}),
+        })
+    resolution = resolve(system_prompt_file)
     if not isinstance(resolution, dict) or resolution.get('ok') is not True:
         raise StoreError('Owned spawn resolution refused')
+    if system_prompt_file is None:
+        # A default-source home refuses the resolver's role once the tier preamble has changed; that
+        # only shows on the seat's terminal after a PTY exists (T0558-F-E). Decide before creating one.
+        from . import prompt_launch
+        request = resolution.get('request')
+        role_file = prompt_launch.role_file_arg(request.get('args') or []) if isinstance(request, dict) else None
+        found = prompt_launch.verdict(agent.directory, role_file, roles.wire_tier(tier),
+                                      agent_id=agent.agent_id, cwd=cwd, tier=roles.wire_tier(tier))
+        if found.action == 'stop':
+            raise StoreError(found.reason)
+        if found.action == 'override':
+            if recovery_scope is None:
+                # Outside a restore this would silently re-pin the home to `custom`; the operator decides.
+                raise StoreError(found.reason + '. Resume by hand: ' + prompt_launch.manual_command(
+                    agent.agent_id, cwd, roles.wire_tier(tier), found.role_file))
+            system_prompt_file = found.role_file
+            resolution = resolve(system_prompt_file)
+            if not isinstance(resolution, dict) or resolution.get('ok') is not True:
+                raise StoreError('Owned spawn resolution refused')
     launch = owned_launch.request(resolution, root=root, name=agent.name, agent_id=agent.agent_id,
                                   backend=saved['backend'], model=saved['model'],
                                   thinking_level=saved['thinking_level'], conversation_id=conversation_id,

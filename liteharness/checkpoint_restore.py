@@ -196,6 +196,8 @@ class RestoreEnv:
     # answer by default (current row, else the retired one).
     model_known: Callable[[str], bool] = lambda agent_id: _model_known(agent_id)
     default_model: Callable[[], str | None] = lambda: _default_model()
+    # What a LiteTUI seat's resume needs for its role (prompt_launch.Verdict); None = could not be checked.
+    role_launch: Callable[[Seat], 'Verdict | None'] = lambda seat: _role_launch(seat)
     operation_active: Callable | None = None
     journal_age: Callable | None = None
     spawn_timeout: float = SPAWN_TIMEOUT
@@ -244,6 +246,35 @@ def _model_known(agent_id: str) -> bool:
     from .claude_identity import real_model
     from .resume_seat import _registry
     return real_model(_registry(agent_id).get('model')) is not None
+
+
+def _role_launch(seat: Seat) -> 'Verdict | None':
+    """Would LiteTUI accept the default role a resume of this seat derives? Reads only, never launches.
+
+    Only a `default`-source home can be refused, so only those ask the resolver for the role file
+    (`/harness/spawn/resolve` composes a temp snapshot and reserves nothing). None = the resolver is
+    unreachable, so the answer is unknown rather than "fine".
+    """
+    from .agent_store import AgentStore, StoreError
+    from .prompt_launch import Undecidable, Verdict, read_manifest, role_file_arg, verdict
+    tier = roles.wire_tier(seat.role)
+    try:
+        home = AgentStore(Path(seat.data_root)).agent_directory(seat.name)
+        try:
+            manifest = read_manifest(home)
+        except Undecidable:
+            return verdict(home, None, tier, agent_id=seat.agent_id, cwd=seat.cwd, tier=tier)  # a stop that says why
+        if manifest is None or manifest['role_source'] != 'default':
+            return Verdict('ok')
+        resolution = _bridge('POST', '/harness/spawn/resolve', {
+            'cli': 'litetui', 'name': seat.name, 'tier': tier, 'model': seat.execution.model,
+            'backend': seat.execution.backend, 'thinkingLevel': seat.execution.thinking_level, 'cwd': seat.cwd})
+    except StoreError:
+        return None
+    request = resolution.get('request') if isinstance(resolution, dict) and resolution.get('ok') is True else None
+    if not isinstance(request, dict) or not isinstance(request.get('args'), list):
+        return None
+    return verdict(home, role_file_arg(request['args']), tier, agent_id=seat.agent_id, cwd=seat.cwd, tier=tier)
 
 
 def _read_registry(agent_id: str) -> dict | None:
@@ -477,6 +508,29 @@ class Restorer:
                 'model-mismatch', row.seat_id,
                 f'{prefix}{detail}; resume by hand with --model, or pass --allow-default-model'))
 
+    def gate_role_sources(self, rows: list[PlanRow], seats: dict[str, Seat]) -> None:
+        """A default-source LiteTUI home can refuse its resume (stale role), visible only on the seat's terminal.
+
+        Decided here, before any launch, in the dry run too: a seat the restore cannot resume is blocked with
+        the reason and the manual command; one it can resume with the home's own role is noted, not blocked.
+        """
+        prefix = 'would block: ' if self.params.dry_run else ''
+        for row in rows:
+            seat = seats.get(row.seat_id)
+            if (row.action != 'launch' or seat is None or seat.cli != 'litetui'
+                    or self.states.get(row.seat_id) not in ('preparing', 'starting')):
+                continue
+            found = self.env.role_launch(seat)
+            if found is None:
+                self.errors.setdefault(row.seat_id, []).append(Blocker(
+                    'role-source-unchecked', row.seat_id, 'The resolver could not be asked for this seat\'s default role'))
+            elif found.action == 'stop':
+                self.states[row.seat_id] = 'blocked'
+                self.errors.setdefault(row.seat_id, []).append(Blocker('role-source-changed', row.seat_id, prefix + found.reason))
+            elif found.action == 'override':
+                self.errors.setdefault(row.seat_id, []).append(Blocker(
+                    'role-source-override', row.seat_id, f'{found.reason}; restore resumes it with the home\'s own {found.role_file}'))
+
     def foreign_unknown(self) -> set[str]:
         """Seats another operation on this checkpoint started (intent) without ever reporting."""
         if self.log is None:
@@ -695,6 +749,7 @@ class Restorer:
         if params.retry_of and params.seat_ids is not None and self.log is not None:
             self.adopt_prior_states(params.retry_of, set(params.seat_ids))
         self.gate_unknown_models(full, seats)
+        self.gate_role_sources([r for r in full if params.seat_ids is None or r.seat_id in params.seat_ids], seats)
         for seat_id in foreign:
             if self.states.get(seat_id) in ('preparing', 'starting'):
                 self.states[seat_id] = 'unknown'
