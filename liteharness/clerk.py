@@ -127,7 +127,9 @@ def start(*, pane: str, spawn_cli: str = "litetui", model: str | None = None,
     role_file.write_text(role, encoding="utf-8")
     cli.cmd_spawn(
         spawn_cli="claude" if spawn_cli == "claude-code" else "litetui",
-        model=model, backend=backend, thinking_level="high", cognitive="aurelius",
+        # --thinking-level is a LiteTUI option: a fresh Claude spawn and a Claude resume both refuse it.
+        model=model, backend=backend, thinking_level="high" if spawn_cli == "litetui" else None,
+        cognitive="aurelius",
         cwd=str(Path(cwd or os.getcwd()).resolve()), name="Clerk", tier="worker",
         split_mode=True, split_pane=pane, spawned_by=orchestrator, prompt=role, resume_agent_id=seat,
         system_prompt_file=str(role_file) if spawn_cli == "litetui" else None,

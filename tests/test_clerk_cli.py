@@ -73,6 +73,9 @@ def test_start_uses_existing_spawn_then_commits_registered_identity(root, monkey
     assert cfg(root)["clerk_id"] == "clerk-seat"
     assert seen[0]["spawn_cli"] == ("claude" if route == "claude-code" else "litetui")
     assert seen[0]["backend"] == backend
+    # cmd_spawn refuses --thinking-level on a fresh Claude spawn (cli.py "require --resume or --convo");
+    # the mocked spawn above takes **kw and cannot see that, so pin the value it is given.
+    assert seen[0]["thinking_level"] == ("high" if route == "litetui" else None)
     assert seen[0]["split_mode"] is True
     assert seen[0]["split_pane"] == "clerk-pane"
     assert seen[0]["cognitive"] == "aurelius"
