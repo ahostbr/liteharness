@@ -77,6 +77,69 @@ def test_unknown_litetui_root_blocks_the_row_not_the_roster(tmp_path, monkeypatc
         assert 'data root unknown' in rows[tui.agent_id].blocker.remedy
 
 
+def _no_canonical_root(monkeypatch, bridge):
+    """Env root unset and `litetui` not importable (RootUnknown); `bridge` stands in for the LiteSuite bridge."""
+    from liteharness import owned_launch, resume_seat
+    monkeypatch.delenv('LITETUI_DATA_ROOT', raising=False)
+
+    def unknown(resolution=None):
+        raise owned_launch.RootUnknown('LiteTUI data root unknown; configure LITETUI_DATA_ROOT')
+    monkeypatch.setattr(owned_launch, 'data_root', unknown)
+    monkeypatch.setattr(resume_seat, '_bridge_data_root', bridge)
+
+
+def _discover_unrooted(w):
+    put(w.harness / 'names.json', w.names)
+    return discover_current(harness_root=w.harness, live=lambda row: row['agent_id'] in w.live)
+
+
+def test_litetui_root_comes_from_the_bridge_when_the_resolver_is_absent(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    w.claude(1)
+    tui = w.litetui(10, retired=False)
+    asked = []
+
+    def bridge(value, **hints):
+        asked.append(value)
+        return w.owned_root
+    _no_canonical_root(monkeypatch, bridge)
+    rows = {c.expected.agent_id: c for c in _discover_unrooted(w).candidates}
+    assert rows[tui.agent_id].blocker is None and rows[tui.agent_id].seat.data_root == str(w.owned_root)
+    assert rows[uid(1)].seat is not None
+    assert asked == [tui.agent_id]  # a LiteTUI seat names the root, never the Claude row
+
+
+@pytest.mark.parametrize('outcome', ['refuses', 'unreachable', 'names-nothing'])
+def test_unreachable_or_refusing_bridge_blocks_the_litetui_row_without_raising(tmp_path, monkeypatch, outcome):
+    from liteharness.agent_store import StoreError
+    w = World(tmp_path, monkeypatch)
+    w.claude(1)
+    tui = w.litetui(10, retired=False)
+
+    def bridge(value, **hints):
+        if outcome == 'refuses':
+            raise StoreError('Owned data-root discovery refused: no such tier')
+        if outcome == 'unreachable':
+            raise OSError('connection refused')
+        return None
+    _no_canonical_root(monkeypatch, bridge)
+    rows = {c.expected.agent_id: c for c in _discover_unrooted(w).candidates}
+    assert rows[tui.agent_id].seat is None
+    assert 'data root unknown' in rows[tui.agent_id].blocker.remedy
+    assert rows[uid(1)].seat is not None
+
+
+def test_bridge_is_not_asked_when_nothing_needs_a_litetui_root(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    w.claude(1)
+    w.litetui(10)  # retired and not named: not a roster row
+
+    def bridge(value, **hints):
+        raise AssertionError('no live LiteTUI seat to ask about')
+    _no_canonical_root(monkeypatch, bridge)
+    assert [c.expected.agent_id for c in _discover_unrooted(w).candidates] == [uid(1)]
+
+
 def test_excluded_ids_are_dropped_and_discovery_writes_nothing(tmp_path, monkeypatch):
     w = World(tmp_path, monkeypatch)
     w.claude(1)
