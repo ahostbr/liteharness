@@ -41,6 +41,7 @@ class Fleet:
         self.silent, self.bad_path, self.compact_rc = set(), set(), 0
         self.handoffs, self.disposition = {}, {}
         self.litetui_calls = []
+        self.flushed_for = []  # agent id each layout flush was asked for
         self.compact_delay = 0  # seconds until an ASYNC compactor's boundary lands; 0 = inside run()
         self.pending = {}
 
@@ -83,7 +84,8 @@ class Fleet:
                                      'timestamp': self.clock.now().isoformat()}) + '\n')
         return self.compact_rc
 
-    def layout_flush(self, checkpoint_id, workspace, thread):
+    def layout_flush(self, checkpoint_id, workspace, thread, agent_id=None):
+        self.flushed_for.append(agent_id)
         panes = []
         for pane in self.w.panes:
             if pane['workspace'] == workspace and pane['thread'] == thread:
@@ -225,6 +227,16 @@ def test_verified_layout_snapshot_is_retained_in_checkpoint_after_live_file_chan
     assert saved['snapshot']['th']['panes'][0]['splitTree']['id'] == 'leaf-1'
 
 
+def test_layout_flush_is_asked_for_the_seat_whose_receipt_it_is(world):
+    # The Suite uses the id to look only at that seat's registry row, so another
+    # seat's unresolved slot in the same thread cannot fail this seat's receipt.
+    w = world
+    coord, handoff = coordinator(w)
+    compacted(w, coord, handoff)
+    save(w, coord, handoff)
+    assert w.fleet.flushed_for == [coord]
+
+
 @pytest.mark.parametrize('fault', ['digest', 'checkpoint', 'pane', 'workspace', 'leaf', 'timeout',
     'missing-identity', 'malformed-slots', 'malformed-binding', 'foreign-agent', 'foreign-session',
     'unknown-binding', 'blank-slot', 'invalid-version', 'conflicting-prior'])
@@ -233,10 +245,10 @@ def test_native_layout_receipt_must_cover_the_exact_persisted_slot(world, fault)
     coord, handoff = coordinator(w)
     compacted(w, coord, handoff)
     flush = w.fleet.layout_flush
-    def broken(checkpoint_id, workspace, thread):
+    def broken(checkpoint_id, workspace, thread, agent_id=None):
         if fault == 'timeout':
             raise TimeoutError('flush acknowledgement lost')
-        reply = flush(checkpoint_id, workspace, thread)
+        reply = flush(checkpoint_id, workspace, thread, agent_id)
         receipt = reply['receipt']
         if fault == 'digest':
             receipt['sha256'] = '0' * 64
