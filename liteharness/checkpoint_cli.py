@@ -238,6 +238,21 @@ def render(result: Result, labels: dict[str, str] | None = None) -> str:
     for seat in result.seats:
         detail = '; '.join(f'{e.code}: {e.remedy}' for e in seat.errors)
         lines.append(f'  {labels.get(seat.seat_id, seat.seat_id)}  {seat.state}' + (f'  ({detail})' if detail else ''))
+        if seat.state in ('ready-idle', 'ready-held'):
+            from .checkpoint_profile import read
+            for receipt in (r for r in seat.evidence if r.kind == 'profile'):
+                try:
+                    profile = read(receipt, result.checkpoint_id, seat.seat_id, result.operation_id)
+                    if profile.saved_diagnostic:
+                        lines.append(f'    cognitive role+method digest: {profile.saved_diagnostic}')
+                    elif profile.notice:
+                        lines.append(f'    {profile.notice}')
+                    elif profile.current_digest is None:
+                        detail = '; '.join(f'{name}: {part.state}' + (f' ({part.diagnostic})' if part.diagnostic else '')
+                                           for name, part in profile.parts.items())
+                        lines.append(f'    cognitive role+method digest unavailable: {detail}')
+                except ContractError as exc:
+                    lines.append(f'    cognitive role+method digest evidence invalid: {exc}')
     lines += [f'  ! {b.code}: {b.remedy}' for b in result.blockers]
     if excluded:
         lines.append(f'  excluded: {excluded}')

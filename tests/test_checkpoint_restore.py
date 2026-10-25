@@ -23,7 +23,7 @@ class Crash(BaseException):
 
 
 def seat(n, *, role='builder', parent=COORD, disposition='idle', pane=None, root=None, leaf=None, model='claude-x'):
-    slot = Slot('ws', 'th', pane or 'pane-saved', leaf or f'leaf-{n}', None, 'rev-1') if (pane or leaf) else None
+    slot = Slot('ws', 'th', pane or 'pane-saved', leaf or f'leaf-{n}', f'old-{n}', 'rev-1')
     profile = OwnerProfile(f'Seat-{n}', str(root)) if role == 'owner' else None
     return Seat(f'Seat-{n}', uid(n), uid(n + 100), 'claude', Execution('claude', model, 'unrecorded'),
                 str(root), str(root), role, 'tesla', parent, profile, 'selected-current', disposition,
@@ -62,7 +62,7 @@ class Box:
         self.tmp, self.clock = tmp, Clock()
         self.state, self.registry, self.script = {}, {}, {}
         self.ptys, self.panes, self.calls, self.closed = [], [], [], []
-        self.leaves_by_pane, self.children = {}, {}
+        self.leaves_by_pane, self.children, self.locations = {}, {}, {}
         self.proc_names = {}
         self.hidden = []
         self.events, self.wake_status, self.mail_error = [], 'nudge; turn confirmed on attempt 1 (hook stamp)', None
@@ -73,6 +73,7 @@ class Box:
     def env(self, **kw):
         base = dict(now=self.clock.now, sleep=self.clock.sleep, liveness=lambda a: self.state.get(a, 'dead'),
                     spawn=self.spawn, registry=lambda a: self.registry.get(a), context=lambda: self.panes,
+                    slot_snapshot=lambda: {'ok': True, 'schemaVersion': 1, 'panes': list(self.locations.values())},
                     pty_list=lambda: self.ptys, leaves=lambda p: self.leaves_by_pane.get(p),
                     close_leaf=lambda leaf: self.closed.append(leaf) or True,
                     has_children=lambda pid: self.children.get(pid), python='C:/py/python.exe',
@@ -81,11 +82,17 @@ class Box:
                     verify_timeout=5, poll_interval=1)
         return RestoreEnv(**{**base, **kw})
 
-    def make_live(self, agent_id):
+    def locate(self, agent_id, session, slot):
+        self.locations[agent_id] = {'workspace': slot.workspace, 'thread': slot.thread, 'pane': slot.pane,
+            'leaves': [{'leaf': slot.leaf, 'tabs': [session]}],
+            'slots': {session: {'agentId': agent_id, 'sessionId': session}}}
+
+    def make_live(self, agent_id, slot=None):
         session = f'pty-{agent_id[-3:]}'
         self.registry[agent_id] = {'agent_id': agent_id, 'registered_at': T0.isoformat(), 'canvas_session_id': session}
         self.state[agent_id] = 'live'
-        # An ordinary split-launched Claude seat's PTY carries NO harnessAgentId (measured 2026-10-19).
+        self.locate(agent_id, session, slot or seat(int(agent_id[-3:]), root=self.tmp).slot)
+        # A native Claude seat's PTY may carry NO harnessAgentId.
         self.ptys.append({'id': session, 'pid': 100})
 
     def mail(self, sender, recipient, body):
@@ -119,8 +126,9 @@ class Box:
                                        'canvas_session_id': session}
             self.state[agent_id] = 'live'
             self.ptys.append({'id': session, 'pid': 100})
-            self.panes.append({'id': f'pane-{agent_id[-3:]}', 'leafCount': 1,
-                               'leaves': [{'id': 'x', 'sessionIds': [session]}]})
+            required = json.loads(env['LITEHARNESS_REQUIRED_RECOVERY_SLOT'])
+            self.locate(agent_id, session, Slot(required['workspace'], required['thread'], required['paneId'],
+                                               required['leafId'], session, 'current'))
         return SpawnOutcome(0)
 
 
@@ -134,7 +142,7 @@ def holders(box, tmp_path, leaves):
     out = []
     for i, leaf in enumerate(leaves):
         held = seat(40 + i, root=tmp_path, leaf=leaf)
-        box.make_live(held.agent_id)
+        box.make_live(held.agent_id, held.slot)
         out.append(held)
     return out
 
@@ -189,6 +197,43 @@ def test_plan_live_is_reattach_unknown_is_unknown_unresolved_is_blocked(tmp_path
 
 # -- driver -------------------------------------------------------------------------------------
 
+def test_restore_passes_the_saved_execution_and_location_to_governed_resume(tmp_path, box):
+    saved = replace(seat(2, root=tmp_path, model='claude-opus-5-5[1m]'), cli='litetui',
+                    execution=Execution('codex', 'gpt-exact', 'high'))
+    store, params, op = start(tmp_path, manifest(tmp_path, [saved]))
+    run_restore(store, op, params, box.env(model_known=lambda _: False))
+    argv, child_env = box.calls[0]
+    for flag, value in {'--cli': 'litetui', '--convo': saved.conversation_id,
+                        '--cwd': saved.cwd, '--tier': saved.role,
+                        '--model': 'gpt-exact', '--backend': 'codex', '--thinking-level': 'high'}.items():
+        assert flag in argv and argv[argv.index(flag) + 1] == value
+    assert child_env['LITETUI_DATA_ROOT'] == saved.data_root
+
+
+def test_litetui_restore_never_asks_for_a_second_inbox_consumer(tmp_path, box):
+    saved = replace(seat(2, root=tmp_path), cli='litetui', execution=Execution('codex', 'gpt-exact', 'high'),
+                    first_recovery_action='Read your handoff, arm one inbox monitor, wait for your owner')
+    store, params, op = start(tmp_path, manifest(tmp_path, [saved]))
+    run_restore(store, op, params, box.env())
+    assert '--prompt' not in box.calls[0][0]
+    mail = next(event[3] for event in box.events if event[0] == 'mail')
+    wake = next(event[2] for event in box.events if event[0] == 'wake')
+    assert 'native inbox' in mail
+    assert 'arm' not in wake.lower() and 'Monitor' not in mail
+    assert 'arm one inbox monitor' not in mail.lower()
+
+
+def test_restore_passes_exact_claude_model_including_context_suffix(tmp_path, box):
+    saved = seat(2, root=tmp_path, model='claude-opus-5-5[1m]')
+    store, params, op = start(tmp_path, manifest(tmp_path, [saved]))
+    run_restore(store, op, params, box.env())
+    argv = box.calls[0][0]
+    assert '--model' in argv and argv[argv.index('--model') + 1] == saved.execution.model
+    assert argv[argv.index('--cli') + 1] == 'claude'
+    assert argv[argv.index('--cwd') + 1] == saved.cwd
+    assert argv[argv.index('--convo') + 1] == saved.conversation_id
+
+
 def test_restore_launches_in_order_one_at_a_time_and_reports_ready(tmp_path, box):
     owner = seat(2, role='owner', root=tmp_path)
     crew = seat(3, parent=owner.agent_id, root=tmp_path, disposition='held')
@@ -202,11 +247,12 @@ def test_restore_launches_in_order_one_at_a_time_and_reports_ready(tmp_path, box
     assert argv[:6] == ['C:/py/python.exe', '-m', 'liteharness.cli', 'spawn', '--resume', crew.agent_id]
     assert '--split' in argv and argv[argv.index('--spawned-by') + 1] == COORD
     assert not {'--kill-old', '--name', '--takeover'} & set(argv)
-    prompt = argv[argv.index('--prompt') + 1]
-    assert prompt.startswith(f'Restored from checkpoint {CID}.') and 'Arm ONE inbox Monitor' in prompt
-    assert prompt.endswith('hold until your owner reconciles.')
-    idle_prompt = box.calls[0][0][box.calls[0][0].index('--prompt') + 1]
-    assert 'mid-work' not in idle_prompt
+    assert '--prompt' not in argv
+    messages = {event[2]: event[3] for event in box.events if event[0] == 'mail'}
+    assert messages[crew.agent_id].startswith(f'Restored from checkpoint {CID}.')
+    assert 'Arm ONE inbox Monitor' in messages[crew.agent_id]
+    assert 'hold until your owner reconciles.' in messages[crew.agent_id]
+    assert 'mid-work' not in messages[owner.agent_id]
 
 
 def test_live_seat_is_reattached_never_relaunched_and_unknown_is_never_launched(tmp_path, box):
@@ -278,16 +324,14 @@ def test_restores_from_an_incomplete_checkpoint_and_lists_blocked_rows(tmp_path,
 
 
 def slot_seat(box, tmp_path, n=2, disposition='idle'):
-    s2 = seat(n, root=tmp_path, disposition=disposition)
-    box.script[s2.agent_id] = ['refuse-prompt']
-    return s2
+    return seat(n, root=tmp_path, disposition=disposition)
 
 
 def test_slot_recovered_seat_gets_its_pointer_by_inbox_first_then_one_fixed_wake(tmp_path, box):
     s2 = slot_seat(box, tmp_path, disposition='held')
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     result = run_restore(store, op, params, box.env())
-    assert len(box.calls) == 2 and '--prompt' in box.calls[0][0] and '--prompt' not in box.calls[1][0]
+    assert len(box.calls) == 1 and '--prompt' not in box.calls[0][0]
     session = box.registry[s2.agent_id]['canvas_session_id']
     assert [e[0] for e in box.events] == ['mail', 'wake'], 'content by inbox BEFORE the wake'
     kind, sender, recipient, body = box.events[0]
@@ -302,11 +346,12 @@ def test_slot_recovered_seat_gets_its_pointer_by_inbox_first_then_one_fixed_wake
     assert stages.index('pointer-mailed') < stages.index('pointer-wake')
 
 
-def test_seats_launched_with_a_prompt_are_never_mailed_or_woken(tmp_path, box):
+def test_reattached_seats_are_never_mailed_or_woken(tmp_path, box):
     s2 = seat(2, root=tmp_path)
+    box.make_live(s2.agent_id, s2.slot)
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     run_restore(store, op, params, box.env())
-    assert box.events == []
+    assert box.calls == [] and box.events == []
 
 
 def test_wake_that_confirms_no_turn_is_a_pointer_not_delivered_blocker(tmp_path, box):
@@ -414,21 +459,27 @@ def test_saved_pane_with_room_is_used_and_the_coordinator_pane_is_always_exclude
 
 
 @pytest.mark.parametrize('saved', ['pane-coord', 'pane-full', 'pane-gone'])
-def test_saved_pane_that_is_the_coordinators_full_or_missing_is_not_passed(tmp_path, box, saved):
+def test_saved_pane_never_falls_back_for_protection_capacity_or_missing_context(tmp_path, box, saved):
     s2 = seat(2, root=tmp_path, pane=saved)
     box.panes.append({'id': 'pane-full', 'leafCount': 8, 'leaves': []})
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
-    run_restore(store, op, params, box.env())
-    argv, env = box.calls[0]
-    assert '--pane' not in argv and 'pane-coord' in env['LITEHARNESS_EXCLUDE_PANES'].split(',')
+    result = run_restore(store, op, params, box.env())
+    if saved == 'pane-coord':
+        assert box.calls == []
+        assert next(r for r in result.seats if r.seat_id == s2.agent_id).state == 'blocked'
+    else:
+        argv, env = box.calls[0]
+        assert argv[argv.index('--pane') + 1] == saved
+        assert json.loads(env['LITEHARNESS_REQUIRED_RECOVERY_SLOT'])['paneId'] == saved
+        assert 'pane-coord' in env['LITEHARNESS_EXCLUDE_PANES'].split(',')
 
 
-def test_later_seats_prefer_a_pane_that_already_holds_restored_seats(tmp_path, box):
-    s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
+def test_later_seats_keep_their_own_saved_pane_not_an_already_restored_pane(tmp_path, box):
+    s2, s3 = seat(2, root=tmp_path, pane='first'), seat(3, root=tmp_path, pane='second')
     store, params, op = start(tmp_path, manifest(tmp_path, [s2, s3]))
     run_restore(store, op, params, box.env())
     second = box.calls[1][0]
-    assert second[second.index('--pane') + 1] == f'pane-{s2.agent_id[-3:]}'
+    assert second[second.index('--pane') + 1] == 'second'
 
 
 # -- dry run, latest, shells ------------------------------------------------------------------------
@@ -856,60 +907,50 @@ def test_an_exited_row_whose_shell_now_runs_something_is_not_dead(tmp_path, monk
 
 # -- round 5: F2 restore never passes an unknown model ----------------------------------------------------------
 
-def test_restore_never_passes_model_and_notes_a_seat_whose_model_is_unconfirmed(tmp_path, box):
+def test_unconfirmed_model_blocks_only_its_row_while_exact_sibling_launches(tmp_path, box):
     s2, s3 = seat(2, root=tmp_path), seat(3, root=tmp_path)
     store, params, op = start(tmp_path, manifest(tmp_path, [s2, s3]))
     result = run_restore(store, op, params, box.env(model_known=lambda agent_id: agent_id != s2.agent_id,
                                                     default_model=lambda: 'claude-x[1m]'))
-    assert all('--model' not in argv and 'unknown' not in ' '.join(argv) for argv, _ in box.calls)
-    notes = [e.stage for e in OperationLog(store, op).operation().events if e.stage.startswith('model-unconfirmed')]
-    assert notes == [f'model-unconfirmed seat={s2.agent_id}: resumed without --model']
-    assert result.state == 'complete', 'a non-blocking note never changes the outcome'
+    assert launched(box) == [s3.agent_id]
+    argv = box.calls[0][0]
+    assert argv[argv.index('--model') + 1] == s3.execution.model
+    assert next(r for r in result.seats if r.seat_id == s2.agent_id).state == 'blocked'
+    assert result.state == 'incomplete'
 
 
-# -- round 5: F5 a saved pane id may be an alias of an active pane ------------------------------------------------
+# -- exact saved ids are not rewritten by presentation aliases ------------------------------------
 
-def test_a_saved_canvas_pane_id_resolves_to_its_active_zen_mirror(tmp_path, box):
-    s2 = seat(2, root=tmp_path, pane='canvas-pane-3')
-    box.panes.append({'id': 'zen-term-3', 'mirrorId': 'canvas-pane-3', 'leafCount': 2, 'leaves': []})
+@pytest.mark.parametrize('saved,active', [('canvas-pane-3', 'zen-term-3'), ('zen-term-4', 'canvas-pane-4')])
+def test_saved_pane_id_is_not_rewritten_to_a_context_alias(tmp_path, box, saved, active):
+    s2 = seat(2, root=tmp_path, pane=saved)
+    box.panes.append({'id': active, 'mirrorId': saved, 'leafCount': 2, 'leaves': []})
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
     run_restore(store, op, params, box.env())
-    argv = box.calls[0][0]
-    assert argv[argv.index('--pane') + 1] == 'zen-term-3', 'the ACTIVE id is what the placement receives'
+    argv, env = box.calls[0]
+    assert argv[argv.index('--pane') + 1] == saved
+    assert json.loads(env['LITEHARNESS_REQUIRED_RECOVERY_SLOT'])['paneId'] == saved
 
 
-def test_a_saved_zen_pane_id_resolves_when_the_context_lists_the_canvas_form(tmp_path, box):
-    s2 = seat(2, root=tmp_path, pane='zen-term-4')
-    box.panes.append({'id': 'canvas-pane-4', 'syncId': 'sync-canvas-pane-4', 'mirrorId': 'zen-term-4', 'leafCount': 1, 'leaves': []})
+def test_hidden_saved_pane_does_not_require_an_active_mirror(tmp_path, box):
+    s2 = seat(2, root=tmp_path, pane='hidden-saved')
+    box.hidden = [{'id': 'hidden-saved', 'leafCount': 8}]
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
-    run_restore(store, op, params, box.env())
+    result = run_restore(store, op, params, box.env())
     argv = box.calls[0][0]
-    assert argv[argv.index('--pane') + 1] == 'canvas-pane-4'
-
-
-def test_a_hidden_pane_only_helps_resolve_it_never_receives_the_seat(tmp_path, box):
-    s2 = seat(2, root=tmp_path, pane='canvas-pane-5')
-    box.panes.append({'id': 'zen-term-5', 'syncId': 's5', 'leafCount': 1, 'leaves': []})
-    box.hidden = [{'id': 'canvas-pane-5', 'syncId': 's5', 'leafCount': 1, 'leaves': []}, {'id': 'lonely', 'leafCount': 1}]
-    store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
-    run_restore(store, op, params, box.env())
-    argv = box.calls[0][0]
-    assert argv[argv.index('--pane') + 1] == 'zen-term-5'
-    s3 = seat(3, root=tmp_path, pane='lonely')
-    store, params, op = start(tmp_path, manifest(tmp_path, [s3], checkpoint_id=uid(903)), op=703)
-    box.calls.clear()
-    run_restore(store, op, params, box.env())
-    assert '--pane' not in box.calls[0][0], 'a hidden pane with no active mirror is not a destination'
+    assert argv[argv.index('--pane') + 1] == 'hidden-saved'
+    assert next(r for r in result.seats if r.seat_id == s2.agent_id).state == 'ready-idle'
 
 
 def test_the_coordinators_pane_is_excluded_under_any_of_its_aliases(tmp_path, box):
     s2 = seat(2, root=tmp_path, pane='canvas-pane-9')
     box.panes[:] = [{'id': 'zen-term-9', 'mirrorId': 'canvas-pane-9', 'leafCount': 2,
                      'leaves': [{'id': 'lc', 'sessionIds': ['pty-coord']}]}]
-    box.registry[COORD]['pane_id'] = 'canvas-pane-9'  # presence says the canvas form, /context the zen one
+    box.registry[COORD]['pane_id'] = 'canvas-pane-9'
     store, params, op = start(tmp_path, manifest(tmp_path, [s2]))
-    run_restore(store, op, params, box.env())
-    assert '--pane' not in box.calls[0][0], 'the saved pane IS the coordinator pane under another name'
+    result = run_restore(store, op, params, box.env())
+    assert box.calls == [], 'the saved pane IS the coordinator pane under another name'
+    assert next(r for r in result.seats if r.seat_id == s2.agent_id).state == 'blocked'
 
 
 # -- round 6: M-A an unknown-registry seat is never silently moved to another model ---------------------------------
@@ -938,12 +979,11 @@ def test_opus_transcript_and_sonnet_default_is_blocked_and_nothing_is_launched(t
     assert result.state == 'incomplete'
 
 
-def test_a_matching_base_model_launches_and_a_context_suffix_does_not_count(tmp_path, box):
+def test_matching_base_model_cannot_prove_the_saved_context_window(tmp_path, box):
     s2, child, store, p, op, env = unknown_model_world(box, tmp_path, SONNET, SONNET + '[1m]')
     result = run_restore(store, op, p, env)
-    assert launched(box) == [s2.agent_id, child.agent_id] and result.state == 'complete'
-    stages = [e.stage for e in OperationLog(store, op).operation().events]
-    assert any(st.startswith('model-unconfirmed') for st in stages), 'the non-blocking note stays'
+    assert launched(box) == [] and result.state == 'incomplete'
+    assert next(r for r in result.seats if r.seat_id == s2.agent_id).errors[0].code == 'model-mismatch'
 
 
 def test_an_unreadable_default_blocks_too(tmp_path, box):
@@ -956,7 +996,8 @@ def test_allow_default_model_launches_on_the_default_and_says_so_on_the_row(tmp_
     s2, child, store, p, op, env = unknown_model_world(box, tmp_path, OPUS, SONNET, allow_default_model=True)
     result = run_restore(store, op, p, env)
     assert launched(box) == [s2.agent_id, child.agent_id]
-    assert all('--model' not in argv for argv, _ in box.calls), 'the transcript model is never passed (no [1m])'
+    assert '--model' not in box.calls[0][0], 'the transcript-only model is not an exact assertion'
+    assert box.calls[1][0][box.calls[1][0].index('--model') + 1] == child.execution.model
     row = next(r for r in result.seats if r.seat_id == s2.agent_id)
     assert row.state == 'ready-idle' and [e.code for e in row.errors] == ['model-defaulted']
     assert result.state == 'incomplete'
@@ -975,3 +1016,91 @@ def test_dry_run_lists_would_block_per_seat(tmp_path, box):
     row = next(r for r in result.seats if r.seat_id == s2.agent_id)
     assert row.state == 'blocked' and row.errors[0].code == 'model-mismatch' and row.errors[0].remedy.startswith('would block: ')
     assert box.calls == []
+
+
+def exact_seat(tmp_path):
+    return replace(seat(2, root=tmp_path), slot=Slot('ws', 'th', 'pane-saved', 'leaf-2', 'old-2', 'rev-1'))
+
+
+def test_exact_parent_never_uses_capacity_fallback_or_prompt_retry(tmp_path, box):
+    saved = exact_seat(tmp_path)
+    box.panes.append({'id': 'pane-saved', 'leafCount': 8, 'leaves': []})
+    store, p, op = start(tmp_path, manifest(tmp_path, [saved]))
+    run_restore(store, op, p, box.env())
+    assert len(box.calls) == 1
+    argv, child_env = box.calls[0]
+    assert '--prompt' not in argv
+    assert argv[argv.index('--pane') + 1] == saved.slot.pane
+    assert json.loads(child_env['LITEHARNESS_REQUIRED_RECOVERY_SLOT']) == {
+        'version': 1, 'agentId': saved.agent_id, 'workspace': 'ws', 'thread': 'th',
+        'paneId': 'pane-saved', 'leafId': 'leaf-2', 'placeholderSessionId': 'old-2'}
+
+
+def test_exact_parent_missing_saved_slot_blocks_before_spawn(tmp_path, box):
+    saved = replace(exact_seat(tmp_path), slot=None)
+    store, p, op = start(tmp_path, manifest(tmp_path, [saved]))
+    result = run_restore(store, op, p, box.env())
+    assert box.calls == []
+    assert next(r for r in result.seats if r.seat_id == saved.agent_id).state == 'blocked'
+
+
+def test_exact_parent_never_retries_even_legacy_prompt_refusal_text(tmp_path, box):
+    saved = exact_seat(tmp_path)
+    box.script[saved.agent_id] = 'refuse-prompt'
+    store, p, op = start(tmp_path, manifest(tmp_path, [saved]))
+    result = run_restore(store, op, p, box.env())
+    assert len(box.calls) == 1
+    assert next(r for r in result.seats if r.seat_id == saved.agent_id).state != 'ready-idle'
+    assert box.events == []
+
+
+@pytest.mark.parametrize('changed', ['workspace', 'thread', 'pane', 'leaf', 'tab', 'unavailable'])
+def test_exact_parent_requires_receiver_location_before_pointer(tmp_path, box, changed):
+    saved = exact_seat(tmp_path)
+    store, p, op = start(tmp_path, manifest(tmp_path, [saved]))
+    env = box.env()
+    session = f'pty-{saved.agent_id[-3:]}'
+    def snapshot():
+        location = {'workspace': 'ws', 'thread': 'th', 'pane': 'pane-saved', 'leaf': 'leaf-2', 'tab': session}
+        location[changed] = 'wrong'
+        return {'ok': changed != 'unavailable', 'schemaVersion': 1, 'panes': [{
+            **{k: location[k] for k in ('workspace', 'thread', 'pane')},
+            'leaves': [{'leaf': location['leaf'], 'tabs': [location['tab']]}],
+            'slots': {}}]}
+    env.slot_snapshot = snapshot
+    result = run_restore(store, op, p, env)
+    assert len(box.calls) == 1
+    assert next(r for r in result.seats if r.seat_id == saved.agent_id).state == 'unknown'
+    assert box.events == []
+
+
+def test_exact_cleanup_preserves_saved_placeholder_without_registry_but_closes_unrelated_shell(tmp_path, box):
+    from liteharness.checkpoint_restore import Restorer
+    saved = exact_seat(tmp_path)
+    other = replace(seat(3, root=tmp_path), slot=Slot('ws', 'th', 'pane-saved', 'leaf-3', 'old-3', 'rev-1'))
+    store, p, op = start(tmp_path, manifest(tmp_path, [saved, other]))
+    box.panes.append({'id': 'pane-saved', 'leafCount': 3})
+    box.ptys.extend([{'id': 'old-2', 'pid': 8}, {'id': 'orphan-shell', 'pid': 9}])
+    box.children.update({8: False, 9: False})
+    box.leaves_by_pane['pane-saved'] = [
+        {'leafId': 'leaf-2', 'sessionIds': ['old-2']},
+        {'leafId': 'leaf-3', 'sessionIds': ['orphan-shell']},
+        {'leafId': 'human', 'sessionIds': ['keep']}]
+    assert saved.agent_id not in box.registry
+    Restorer(store, p, box.env(), op).cleanup_shells(set())
+    assert box.closed == ['leaf-3']
+
+
+def test_exact_pointer_uses_verified_session_not_a_subsequent_registry_row(tmp_path, box):
+    saved = exact_seat(tmp_path)
+    store, p, op = start(tmp_path, manifest(tmp_path, [saved]))
+    env = box.env()
+    original_snapshot = env.slot_snapshot
+    def snapshot():
+        value = original_snapshot()
+        box.registry[saved.agent_id] = {**box.registry[saved.agent_id], 'canvas_session_id': 'unverified-new-row'}
+        return value
+    env.slot_snapshot = snapshot
+    run_restore(store, op, p, env)
+    assert [event[1] for event in box.events if event[0] == 'wake'] == [f'pty-{saved.agent_id[-3:]}']
+    assert len(box.calls) == 1

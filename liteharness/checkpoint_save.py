@@ -4,7 +4,8 @@ The roster alone is the cure for the 2026-10-19 failure, so an `incomplete` mani
 published BEFORE any seat is asked for anything. Receipts come through a small process
 seam (`SaveEnv`): cooperative inbox handoff, a configured compact command for Claude
 seats, LiteTUI's native checkpoint verbs. This module never commits, pushes, stashes,
-kills, reboots or compacts the coordinator, and never reaches into private scripts.
+kills or reboots, and never reaches into private scripts. The detached worker collects
+its initiating coordinator last, using the supplied handoff rather than waiting for self-mail.
 """
 from __future__ import annotations
 
@@ -24,11 +25,12 @@ from uuid import uuid4
 from . import config
 from .checkpoint_contract import (Blocker, Coordinator, ContractError, Decision, Decisions,
                                   ExpectedSeat, Manifest, RECOMMENDED_DECISIONS, Receipt, Result,
-                                  Seat, wire)
+                                  Seat, Slot, wire)
 from .checkpoint_ops import OperationLog, make_result, seat_result
 from .checkpoint_roster import (Discovery, claude_projects_root, discover_current,
                                 roster_census)
 from .checkpoint_store import CheckpointStore, _atomic_json, _bytes, _mkdir, checked_path
+from .checkpoint_slots import current_slots
 
 REPLY = re.compile(r'CHECKPOINT-HANDOFF\s+(?P<path>.+?)\s+(?P<disposition>idle|waiting|held)\s*$',
                    re.IGNORECASE | re.MULTILINE)
@@ -78,13 +80,80 @@ def _layout() -> tuple[str, set[str]] | None:
         context = cli._bridge_request('GET', '/context')
     except Exception:
         return None
-    panes = context.get('activePanes') if isinstance(context, dict) else None
-    if not isinstance(panes, list):
+    if not isinstance(context, dict) or context.get('ok') is False or context.get('error'):
         return None
-    shape = sorted((str(p.get('id')), sorted(str(leaf.get('id')) for leaf in p.get('leaves', [])
-                                              if isinstance(leaf, dict))) for p in panes if isinstance(p, dict))
+    active, hidden = context.get('activePanes'), context.get('hiddenPanes', [])
+    if not isinstance(active, list) or not isinstance(hidden, list):
+        return None
+    shape = []
+    for pane in active + hidden:
+        if not isinstance(pane, dict) or not isinstance(pane.get('id'), str) or not pane['id']:
+            return None
+        leaves = pane.get('leaves', [])
+        if not isinstance(leaves, list):
+            return None
+        ids = []
+        for leaf in leaves:
+            ident = leaf.get('leafId', leaf.get('id')) if isinstance(leaf, dict) else None
+            if not isinstance(ident, str) or not ident:
+                return None
+            ids.append(ident)
+        shape.append((pane['id'], sorted(ids)))
+    shape.sort()
     return (hashlib.sha256(json.dumps(shape).encode()).hexdigest()[:16],
             {leaf for _, leaves in shape for leaf in leaves})
+
+
+def _layout_flush(checkpoint_id: str, workspace: str, thread: str) -> dict:
+    from . import cli
+    return cli._bridge_request('POST', '/harness/checkpoint/layout/flush', {
+        'checkpointId': checkpoint_id, 'workspaceId': workspace, 'threadId': thread})
+
+
+def _read_flushed_layout(receipt: dict, checkpoint_id: str, slot: Slot, agent_id: str) -> dict | None:
+    """Read and validate once; return the exact snapshot the checkpoint must retain."""
+    if (receipt.get('schemaVersion') != 1 or receipt.get('checkpointId') != checkpoint_id
+            or receipt.get('durable') is not True or receipt.get('coverage') != 'thread-layouts-file'):
+        return None
+    reference = Path(receipt.get('reference') or '')
+    if not reference.is_absolute():
+        return None
+    content = reference.read_bytes()
+    if hashlib.sha256(content).hexdigest() != receipt.get('sha256'):
+        return None
+    snapshot = json.loads(content)
+    layout = snapshot.get(slot.thread, {})
+    panes = [p for p in layout.get('panes', []) if p.get('id') == slot.pane]
+    if len(panes) != 1:
+        return None
+    pane = panes[0]
+    if (pane.get('canvasOwner') or {}).get('workspaceId', pane.get('workspaceId')) != slot.workspace:
+        return None
+    def leaves(node):
+        if not isinstance(node, dict):
+            return []
+        if node.get('type') == 'leaf':
+            return [node]
+        return [leaf for child in node.get('children', []) for leaf in leaves(child)]
+    matches = [leaf for leaf in leaves(pane.get('splitTree')) if leaf.get('id') == slot.leaf]
+    if (not isinstance(slot.tab, str) or not slot.tab.strip() or len(matches) != 1
+            or slot.tab not in matches[0].get('sessionIds', [])):
+        return None
+    # A durable terminal location without its identity becomes an ordinary shell
+    # on restart. Byte integrity alone cannot establish recoverable coverage.
+    slots = pane.get('terminalAgentSlots')
+    binding = slots.get(slot.tab) if isinstance(slots, dict) else None
+    if (not isinstance(binding, dict) or type(binding.get('version')) is not int or binding['version'] != 1
+            or not isinstance(binding.get('slotId'), str) or not binding['slotId'].strip()
+            or binding.get('agentId') != agent_id or binding.get('sessionId') != slot.tab
+            or binding.get('state') not in ('attached', 'recovery')):
+        return None
+    prior = binding.get('binding')
+    if prior is not None and (not isinstance(prior, dict) or prior.get('outcome') != 'bound'
+            or prior.get('sessionId') != slot.tab or not isinstance(prior.get('requestId'), str)
+            or not prior['requestId'].strip()):
+        return None
+    return snapshot
 
 
 @dataclass
@@ -97,6 +166,8 @@ class SaveEnv:
     run: Callable[[list[str], float], int] = _run
     litetui: Callable[[str, dict], dict] = _litetui
     layout: Callable[[], tuple[str, set[str]] | None] = _layout
+    layout_flush: Callable[[str, str, str], dict] = _layout_flush
+    current_slots: Callable[[], dict] = current_slots
     live: Callable[[dict], bool] | None = None
     handoff_timeout: float = 120.0
     compact_timeout: float = 900.0
@@ -256,7 +327,7 @@ class Saver:
                                      exclude_ids=params.exclude_ids, coordinator_id=params.coordinator_id,
                                      litetui_root=params.litetui_root,
                                      layout_revision=self.layout[0] if self.layout else 'unobserved',
-                                     live=env.live)
+                                     current_slots=env.current_slots() or {}, live=env.live)
         census = roster_census(discovery, harness_root=params.harness_root, cwd_roots=params.cwd_roots)
         self.model_sources = dict(discovery.model_sources)
         if params.coordinator_id not in {r.expected.agent_id for r in census.rows}:
@@ -481,16 +552,27 @@ class Saver:
     def layout_receipt(self, manifest: Manifest, seat: Seat, revision: str | None = None) -> Receipt | None:
         if seat.slot is None:
             return None
-        # Evidenced = the seat's leaf is in the live /context layout at the frozen revision.
-        # LiteSuite exposes no flush-receipt endpoint, so this is observation, not a flush proof.
-        live = self.env.layout() if self.layout is None else self.layout
+        live = self.env.layout()
         observed = bool(live) and live[0] == seat.slot.layout_revision and seat.slot.leaf in live[1]
+        native, snapshot, failure, durable = None, None, None, False
+        if observed:
+            try:
+                reply = self.env.layout_flush(manifest.checkpoint_id, seat.slot.workspace, seat.slot.thread)
+                native = reply.get('receipt') if isinstance(reply, dict) and reply.get('ok') is True else None
+                if isinstance(native, dict):
+                    snapshot = _read_flushed_layout(native, manifest.checkpoint_id, seat.slot, seat.agent_id)
+                durable = snapshot is not None
+                if not durable:
+                    failure = str(reply.get('error') or 'Native layout receipt missing, invalid, or does not cover the saved slot') if isinstance(reply, dict) else 'Native layout reply malformed'
+            except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
+                failure = f'Native layout flush unverified: {exc}'
         path, digest = evidence(self.store, manifest.checkpoint_id, seat.agent_id, 'layout',
                                 {'kind': 'layout', 'slot': {k: getattr(seat.slot, k) for k in
                                  ('workspace', 'thread', 'pane', 'leaf', 'tab', 'layout_revision')},
-                                 'source': 'registry-row+context-activePanes', 'observed': observed})
+                                 'source': 'native-thread-layout-flush', 'observed': observed,
+                                 'native_receipt': native, 'snapshot': snapshot, 'failure': failure})
         return _receipt(manifest.checkpoint_id, seat, 'layout', seat.slot.layout_revision, path, digest,
-                        durable=observed, assurance='native' if observed else 'unsupported', at=self.tick())
+                        durable=durable, assurance='native' if durable else 'unsupported', at=self.tick())
 
     # -- whole save ----------------------------------------------------------------------
     def run(self, only: list[str] | None = None) -> Result:
@@ -511,6 +593,9 @@ class Saver:
         requested_at = self.env.now()
         self.request_handoffs(peers)
         replies = self.await_handoffs(peers)
+        # The submitter must be free to return from SAVE before its runtime can compact.
+        # Peer collection runs first in this detached worker; no self-inbox handshake.
+        todo.sort(key=lambda s: s.agent_id == manifest.coordinator.agent_id)
         for seat in todo:
             if self.cancelled():
                 self.release_holds()
@@ -552,17 +637,52 @@ class Saver:
         if layout:
             got.receipts.append(layout)
         updated = replace(seat, disposition=got.disposition, source_revision=got.source_revision or seat.source_revision)
+        if seat.cli == 'litetui':
+            from .checkpoint_profile import observe, retain
+            observation = observe(updated, manifest.checkpoint_id)
+            at = self.tick().isoformat()
+            try:
+                receipt = retain(self.store, updated, observation, at)
+            except (OSError, ContractError) as exc:
+                # Only optional retention is softened. A failed core journal append still raises.
+                self.log.event(f'profile-evidence-write-failed: cognitive role+method digest unavailable: {exc}',
+                               seat.agent_id, None)
+            else:
+                got.receipts.append(receipt)
+        if seat.agent_id != manifest.coordinator.agent_id:  # restore never launches the coordinator
+            self.collect_seed(updated, manifest.checkpoint_id, got)
         seats = [updated if s.agent_id == seat.agent_id else s for s in manifest.seats]
         receipts = [r for r in manifest.receipts if r.seat_id != seat.agent_id] + got.receipts
-        keep = [b for b in manifest.blockers if b.seat_id != seat.agent_id or b.code == 'seat-unresolved']
+        keep = [b for b in manifest.blockers if b.seat_id != seat.agent_id or b.code in ('seat-unresolved', 'layout-unresolved')]
         merged = replace(manifest, seats=seats, receipts=receipts, blockers=keep + got.blockers)
         self.publish(merged)
         return merged
 
+    def collect_seed(self, seat: Seat, checkpoint_id: str, got: Collected) -> None:
+        """Optional evidence of which cognitive method this seat was launched with; never blocks a save."""
+        from .checkpoint_seed import observe, retain
+        seed = observe(seat, checkpoint_id, self.params.harness_root)
+        if seed is None:
+            return
+        if isinstance(seed, str):
+            self.log.event(f'cognitive-seed-unavailable seat={seat.agent_id}: {seed}', seat.agent_id, None)
+            return
+        try:
+            got.receipts.append(retain(self.store, seat, seed, self.tick().isoformat()))
+        except (OSError, ContractError) as exc:
+            self.log.event(f'cognitive-seed-write-failed seat={seat.agent_id}: {exc}', seat.agent_id, None)
+
     def collect_coordinator(self, manifest: Manifest, seat: Seat, roots: list[Path]) -> Collected:
-        """The coordinator's handoff is supplied; its compaction is observed, never requested."""
+        """Use the supplied handoff; collect the boundary without a manual retry.
+
+        Called last by the detached worker, never synchronously in the initiating
+        tool process. Claude's configured compactor waits for idle; LiteTUI's native
+        checkpoint adapter owns its safe-boundary refusal/hold semantics.
+        """
         out, cid = Collected(disposition='idle'), manifest.checkpoint_id
         handoff = Path(manifest.coordinator.read_first)
+        if seat.cli == 'litetui':
+            return self.collect_litetui(manifest, seat, (handoff, 'idle'), roots)
         revision = seat.source_revision
         out.receipts.append(_receipt(cid, seat, 'handoff', revision, handoff, sha256_file(handoff), durable=True,
                                      assurance='cooperative', at=self.tick()))
@@ -572,9 +692,12 @@ class Saver:
             since = datetime.fromtimestamp(handoff.stat().st_mtime, timezone.utc)
             marker = observe_compaction(transcript, since)
         if marker is None:
-            out.blockers.append(Blocker('coordinator-compaction-pending', seat.agent_id,
-                                        'Compact the coordinator after its handoff, then retry its seat'))
-            return self.unsupported(out, cid, seat, revision, blocker=False)
+            compacted = self.compact_claude(manifest, seat, self.env.now(), handoff)
+            if compacted is None:
+                return self.unsupported(out, cid, seat, revision)
+            out.receipts.extend(compacted.receipts)
+            out.blockers.extend(compacted.blockers)
+            return out
         for kind in ('compact', 'boundary'):
             path, digest = evidence(self.store, cid, seat.agent_id, kind,
                                     {'kind': kind, 'observed': marker, 'transcript': str(transcript)})
