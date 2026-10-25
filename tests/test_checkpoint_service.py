@@ -563,12 +563,68 @@ def test_a_save_dry_run_labels_seats_from_the_registry(tmp_path, monkeypatch, ca
     from checkpoint_world import World
     w = World(tmp_path, monkeypatch)
     w.harness = tmp_path
+    _bridge(monkeypatch, w.current_slots())  # w.panes fills as the seats are added
     agent = w.claude(5, role='builder')
     monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
     checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
     text = capsys.readouterr().out
     row = next(line for line in text.splitlines() if 'Claude-5' in line)
     assert 'pane-5' in row and 'claude' in row
+
+
+def _bridge(monkeypatch, snapshot, layout=('rev-1', set())):
+    """The renderer boundary the save dry run reads: the layout revision and the slot snapshot."""
+    from liteharness.checkpoint_save import SaveEnv
+    monkeypatch.setattr(checkpoint_cli, 'SaveEnv', lambda: SaveEnv(layout=lambda: layout, current_slots=lambda: snapshot))
+
+
+@pytest.fixture(autouse=True)
+def no_bridge(monkeypatch):
+    """A dry run must not reach the LiteSuite bridge of whatever box runs the tests."""
+    _bridge(monkeypatch, {'ok': False}, None)
+
+
+def _litetui_dry_run(tmp_path, monkeypatch, capsys, snapshot_of, count=2):
+    from liteharness import config
+    from liteharness.prompt_launch import Verdict
+    monkeypatch.setattr(config, 'get_root', lambda: tmp_path)
+    from checkpoint_world import World
+    w = World(tmp_path, monkeypatch)
+    w.harness = tmp_path
+    monkeypatch.setenv('LITETUI_DATA_ROOT', str(w.owned_root))
+    seats = [w.litetui(n, retired=False) for n in range(5, 5 + count)]
+    claude = w.claude(9)
+    monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)
+    monkeypatch.setattr('liteharness.checkpoint_restore._role_launch', lambda seat: Verdict('ok'))
+    _bridge(monkeypatch, snapshot_of(w))
+    checkpoint_cli.main(['save', '--dry-run', '--harness-root', str(tmp_path)])
+    text = capsys.readouterr().out
+    return seats, text, lambda name: next(line for line in text.splitlines() if name in line)
+
+
+def test_save_dry_run_labels_a_litetui_seat_with_the_pane_the_save_would_record(tmp_path, monkeypatch, capsys):
+    seats, text, line = _litetui_dry_run(tmp_path, monkeypatch, capsys, lambda w: w.current_slots())
+    for seat in seats:
+        row = line(seat.name)
+        assert f'pane-{seats.index(seat) + 5}' in row and 'preparing' in row and '  -  ' not in row
+
+
+def test_save_dry_run_blocks_a_litetui_seat_the_slot_snapshot_does_not_bind(tmp_path, monkeypatch, capsys):
+    def all_but_the_second_litetui(w):
+        return {**w.current_slots(), 'panes': [w.panes[0], w.panes[2]]}
+    seats, text, line = _litetui_dry_run(tmp_path, monkeypatch, capsys, all_but_the_second_litetui)
+    assert 'pane-5' in line(seats[0].name) and 'preparing' in line(seats[0].name)
+    unbound = line(seats[1].name)
+    assert 'blocked' in unbound and 'layout-unresolved' in unbound
+    assert 'pane-9' in line('Claude-9')
+
+
+def test_save_dry_run_with_no_slot_snapshot_blocks_every_seat_as_the_real_save_would(tmp_path, monkeypatch, capsys):
+    seats, text, line = _litetui_dry_run(tmp_path, monkeypatch, capsys, lambda w: {'ok': False})
+    for name in (*(seat.name for seat in seats), 'Claude-9'):
+        row = line(name)
+        assert 'blocked' in row and 'layout-unresolved' in row and 'Current slot inventory unavailable' in row
+    assert 'NOT READY' in text
 
 
 def test_allow_default_model_is_restore_only_and_never_a_dry_run_flag(svc, monkeypatch):
@@ -596,6 +652,7 @@ def test_save_dry_run_shows_the_resolved_model_and_its_source_not_the_registry_v
     from checkpoint_world import World
     w = World(tmp_path, monkeypatch)
     w.harness = tmp_path
+    _bridge(monkeypatch, w.current_slots())  # w.panes fills as the seats are added
     unknown, real = w.claude(5), w.claude(6)
     row_path = tmp_path / 'agents' / f'{unknown}.json'
     row = json.loads(row_path.read_text())
@@ -618,6 +675,7 @@ def test_save_dry_run_names_the_seats_it_leaves_out_and_why(tmp_path, monkeypatc
     from checkpoint_world import World
     w = World(tmp_path, monkeypatch)
     w.harness = tmp_path
+    _bridge(monkeypatch, w.current_slots())  # w.panes fills as the seats are added
     boss = w.claude(1, role='orchestrator')
     w.claude(2, parent=boss)
     w.claude(3)                          # started by hand
@@ -640,6 +698,7 @@ def test_save_dry_run_flags_a_litetui_home_that_would_refuse_its_resume(tmp_path
     from checkpoint_world import World
     w = World(tmp_path, monkeypatch)
     w.harness = tmp_path
+    _bridge(monkeypatch, w.current_slots())  # w.panes fills as the seats are added
     monkeypatch.setenv('LITETUI_DATA_ROOT', str(w.owned_root))
     stale, fixable = w.litetui(5, retired=False), w.litetui(6, retired=False)
     monkeypatch.setattr('liteharness.checkpoint_roster._live', lambda row: True)

@@ -21,7 +21,7 @@ from . import config
 from .checkpoint_contract import Blocker, ContractError, Request, Result, wire
 from .checkpoint_ops import make_result, rejected, seat_result
 from .checkpoint_restore import RestoreEnv, RestoreParams, resolve_checkpoint, run_restore
-from .checkpoint_save import SaveParams
+from .checkpoint_save import SaveEnv, SaveParams
 from .checkpoint_service import ACTIVE, Service
 from .checkpoint_store import CheckpointStore
 
@@ -97,12 +97,19 @@ def _request(args, store: CheckpointStore) -> Request:
 def _preview_save(root: Path, store: CheckpointStore, actor: str, args, labels_out: dict | None = None) -> Result:
     """Roster that WOULD be frozen; nothing is written, asked or compacted."""
     from .checkpoint_roster import discover_current, roster_census
+    save_env = SaveEnv()  # the slot inputs freeze() hands discovery, so the pane shown is the pane a save records
+    layout = save_env.layout()
     discovery = discover_current(harness_root=root, include_offline=args.include_offline,
-                                 exclude_ids=args.exclude, coordinator_id=actor)
+                                 exclude_ids=args.exclude, coordinator_id=actor,
+                                 litetui_root=(config.load().get('checkpoint') or {}).get('litetui_root'),
+                                 layout_revision=layout[0] if layout else 'unobserved',
+                                 current_slots=save_env.current_slots() or {}, live=save_env.live)
     census = roster_census(discovery, harness_root=root)
     if labels_out is not None and census.exclusions:  # left out on purpose, not forgotten
         labels_out[EXCLUDED_KEY] = ', '.join(f'{e.name} ({e.reason})' for e in census.exclusions)
-    rows = [seat_result(r.expected.agent_id, 'blocked' if r.seat is None else 'preparing', errors=r.blockers)
+    rows = [seat_result(r.expected.agent_id,
+                        'blocked' if r.seat is None or any(b.code == 'layout-unresolved' for b in r.blockers) else 'preparing',
+                        errors=r.blockers)
             for r in census.rows]
     # A LiteTUI home that would refuse its resume shows here, before the real restore (T0558-F-E).
     env = RestoreEnv()
@@ -114,7 +121,7 @@ def _preview_save(root: Path, store: CheckpointStore, actor: str, args, labels_o
             rows[i] = seat_result(r.expected.agent_id, 'blocked',
                                   errors=[*r.blockers, Blocker('role-source-changed', r.seat.agent_id, found.reason)])
         elif found is not None and found.action == 'override':
-            rows[i] = seat_result(r.expected.agent_id, 'preparing', errors=[*r.blockers, Blocker(
+            rows[i] = seat_result(r.expected.agent_id, rows[i].state, errors=[*r.blockers, Blocker(
                 'role-source-override', r.seat.agent_id, f'{found.reason}; restore resumes it with the home\'s own {found.role_file}')])
     if labels_out is not None:  # the model discovery RESOLVED, with where it came from, not the registry's value
         for r in census.rows:
