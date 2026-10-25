@@ -209,3 +209,44 @@ def test_census_is_explicitly_metadata_only(tmp_path):
     result = run([s], harness, [s.data_root])
     assert not result.blockers
     assert result.assurance == 'metadata-only'
+
+
+def test_owned_conversation_lookup_does_not_reread_the_catalog_per_home(tmp_path, monkeypatch):
+    """T0558-F-F: AgentStore.locate_conversation re-listed every home once per home (quadratic over the
+    612 LiteTUI homes; a full-fleet save dry run did not finish in 170 s). The census reads the catalog a
+    fixed number of times however many dormant homes there are."""
+    from liteharness.agent_store import AgentStore
+    root = tmp_path / 'owned'
+    a = owned(root, 1)
+    for n in range(2, 32):
+        owned(root, n)
+    harness = tmp_path / 'harness'
+    put(harness / 'names.json', {})
+    calls = []
+    real = AgentStore.list_agents
+
+    def counting(self):
+        calls.append(1)
+        return real(self)
+    monkeypatch.setattr(AgentStore, 'list_agents', counting)
+    result = run([a], harness, [root])
+    assert result.expected_count == 1 and not result.blockers
+    assert len(calls) <= 4, f'{len(calls)} catalog reads for 31 homes'
+
+
+def test_litetui_name_row_of_a_former_holder_does_not_block_but_a_row_for_this_conversation_does(tmp_path):
+    """T0558-F-G: Turing, Kubrick, VanGogh and Miyamoto were Claude seats before they became LiteTUI seats,
+    so names.json still holds a same-name row for the OLD agent id. The owned home is the authority."""
+    root = tmp_path / 'owned'
+    s = owned(root)
+    harness = tmp_path / 'harness'
+    former = {'agent_id': uid(900), 'convo_id': uid(900), 'backend': 'claude'}
+    put(harness / 'names.json', {s.name: former})
+    result = run([s], harness, [root])
+    assert result.expected_count == 1 and not result.blockers and result.rows[0].seat is not None
+    # the same stale row, but claiming this seat's conversation: a real conflict, still blocks
+    put(harness / 'names.json', {s.name: {**former, 'convo_id': s.conversation_id}})
+    assert run([s], harness, [root]).blockers
+    # the seat's own row with the wrong conversation still blocks
+    put(harness / 'names.json', {s.name: {'agent_id': s.agent_id, 'convo_id': uid(901)}})
+    assert run([s], harness, [root]).blockers

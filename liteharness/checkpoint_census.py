@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from .agent_store import AgentStore, StoreError
+from .agent_store import AgentStore, StoreError, valid_id
 from .roles import normalize_role
 from .checkpoint_contract import (Blocker, ContractError, Execution, ExpectedSeat,
                                   Exclusion, Seat, wire)
@@ -46,6 +46,22 @@ def _directory(value: str) -> Path:
     return path
 
 
+def _locate_conversation(store: AgentStore, agents: list, conversation_id: str) -> Path:
+    """AgentStore.locate_conversation over the catalog this census already listed.
+
+    The store method re-reads the whole catalog once per agent (find_agent inside
+    list_conversations), which is quadratic in the number of homes: over the 612 LiteTUI homes a
+    full-fleet save dry run did not finish in 170 s. Same rule: the id must exist under exactly one
+    agent. `agents` is the same list_agents() result, so each is canonical already; the owner's
+    path still goes through the store's link checks.
+    """
+    identity = valid_id(conversation_id)
+    owners = [agent for agent in agents if (agent.conversations_root / identity).is_dir()]
+    if len(owners) != 1:
+        raise StoreError('Conversation is absent or has ambiguous ownership')
+    return store.conversation_directory(owners[0], identity)
+
+
 def _within(value: str, roots: list[Path]) -> Path:
     path = checked_path(value)
     if not any(path.is_relative_to(root) for root in roots):
@@ -68,6 +84,13 @@ def _name_entry(index: dict, seat: Seat, *, required: bool) -> dict | None:
     matches = [(name, row) for name, row in index.items()
                if name.casefold() == seat.name.casefold()
                or (isinstance(row, dict) and row.get('agent_id') == seat.agent_id)]
+    if seat.cli == 'litetui':
+        # The owned home is a LiteTUI seat's identity authority. A row of the same NAME that belongs to
+        # another agent id and claims another conversation is the name's former holder (Turing, Kubrick,
+        # VanGogh and Miyamoto were Claude seats on E: before they moved to LiteTUI), not a conflict.
+        # A row that claims THIS seat's conversation still blocks.
+        matches = [(n, r) for n, r in matches if not (
+            isinstance(r, dict) and r.get('agent_id') != seat.agent_id and r.get('convo_id') != seat.conversation_id)]
     if not matches and not required:
         return None
     if len(matches) != 1:
@@ -209,7 +232,7 @@ def census(selected: list[Seat], *, harness_root: str | Path,
                         candidate.name, candidate.agent_id, root):
                     raise ContractError('Owned home disagrees with selected identity')
                 store = AgentStore(root)
-                conversation = store.locate_conversation(candidate.conversation_id)
+                conversation = _locate_conversation(store, catalogs.get(str(root), []), candidate.conversation_id)
                 if conversation.parent != agent.conversations_root:
                     raise ContractError('Conversation belongs to another seat')
                 # Also check selected other roots: copied conversations cannot be revived twice.
