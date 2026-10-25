@@ -47,13 +47,14 @@ class World:
         self.add_pane(n, agent_id)
         return agent_id
 
-    def litetui(self, n, *, retired=True, role='worker'):
+    def litetui(self, n, *, retired=True, role='worker', record_cwd=True):
         seat = owned(self.owned_root, n)
         cwd = self.tmp / 'tuiwork'
         cwd.mkdir(exist_ok=True)
         put(self.harness / ('retired-agents' if retired else 'agents') / f'{seat.agent_id}.json', {
             'agent_id': seat.agent_id, 'name': seat.name, 'cli': 'litetui', 'role': role,
-            'backend': 'codex', 'model': 'home-model', 'thinking_level': 'high', 'cwd': str(cwd)})
+            'backend': 'codex', 'model': 'home-model', 'thinking_level': 'high',
+            **({'cwd': str(cwd)} if record_cwd else {})})
         if not retired:
             self.live.add(seat.agent_id)
         self.add_pane(n, seat.agent_id)
