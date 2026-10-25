@@ -159,6 +159,32 @@ def _registry_rows(harness: Path, include_offline: list[str],
     return rows, skipped
 
 
+def _resolve_litetui_root(rows: list[tuple[str, dict, str]]) -> Path | None:
+    """The LiteTUI data root found the way resume does: the canonical resolver, then the LiteSuite bridge.
+
+    None when neither names one: LiteTUI rows block, Claude rows do not. The bridge is asked
+    about a LiteTUI row's own execution, so a roster with no LiteTUI seat never calls it.
+    """
+    from . import owned_launch, resume_seat
+    try:
+        return owned_launch.data_root()
+    except owned_launch.RootUnknown:  # a corrupt or invalid root is not bridged around
+        pass
+    except Exception:
+        return None
+    for agent_id, row, _ in rows:
+        if row.get('cli') != 'litetui':
+            continue
+        try:
+            root = resume_seat._bridge_data_root(agent_id, tier=None, backend=None, model=None,
+                                                 thinking_level=None)
+        except Exception:  # a refusal or an unreachable bridge: try the next seat's execution
+            continue
+        if root is not None:
+            return root
+    return None
+
+
 def discover_current(*, harness_root: Path | str, include_offline: list[str] = (),
                      exclude_ids: list[str] = (), coordinator_id: str | None = None,
                      litetui_root: Path | str | None = None,
@@ -180,15 +206,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
         index = read_json(index_path) if index_path.exists() else {}
     except ContractError:
         index = {}
-    root = None
-    if litetui_root is not None:
-        root = Path(litetui_root)
-    else:
-        try:
-            from . import owned_launch
-            root = owned_launch.data_root()
-        except Exception:  # RootUnknown / StoreError: LiteTUI rows block, Claude rows do not
-            root = None
+    root = Path(litetui_root) if litetui_root is not None else _resolve_litetui_root(rows)
     requested = {str(v).casefold() for v in exclude_ids}  # an agent id or a seat name
     explicit = set(include_offline)
     # A caller that is not itself a live seat excludes nothing by default (save refuses such a caller anyway).
