@@ -39,6 +39,7 @@ class Discovery:
     skipped: list[tuple[str, str]]  # (registry stem, why): never a seat, never silently shrunk
     model_sources: dict[str, str] = field(default_factory=dict)  # agent id -> 'registry' | 'transcript'
     excluded: list[Exclusion] = field(default_factory=list)  # named seats left out, each with its reason
+    cwd_sources: dict[str, str] = field(default_factory=dict)  # LiteTUI agent id -> 'registry' | 'pty-session'
 
 
 def claude_projects_root() -> Path:
@@ -48,6 +49,37 @@ def claude_projects_root() -> Path:
 def _live(row: dict) -> bool:
     from . import cli
     return cli._live_owner_pid(row) is not None
+
+
+def _pty_sessions() -> list[dict] | None:
+    from . import cli
+    try:
+        result = cli._bridge_request('GET', '/pty/list')
+    except Exception:  # bridge down: no fallback, the blocker stays
+        return None
+    sessions = result.get('sessions') if isinstance(result, dict) else None
+    return sessions if isinstance(sessions, list) else None
+
+
+def _pty_cwd(row: dict, agent_id: str, sessions: list[dict]) -> str | None:
+    """The cwd the seat's one live PTY session was created with, or None when that is not provable.
+
+    LiteTUI chdirs to its `--cwd` once at startup, so the creation cwd of the session that
+    carries this agent id is the seat's launch cwd. Zero or several sessions for the id, a
+    pid that is neither the row's own nor alive, or a cwd that is not an absolute path
+    prove nothing.
+    """
+    mine = [s for s in sessions if isinstance(s, dict) and s.get('harnessAgentId') == agent_id]
+    if len(mine) != 1:
+        return None
+    cwd, pid = mine[0].get('cwd'), mine[0].get('pid')
+    if not isinstance(cwd, str) or not cwd.strip() or not os.path.isabs(cwd):
+        return None
+    if pid is not None and pid != row.get('session_pid'):
+        from .hooks import _pid_alive
+        if not _pid_alive(pid):
+            return None
+    return cwd
 
 
 def _slot(row: dict, layout_revision: str) -> Slot | None:
@@ -100,7 +132,8 @@ def _claude_seat(row: dict, base: dict, selection: str, layout_revision: str, so
 
 
 def _litetui_seat(row: dict, base: dict, selection: str, layout_revision: str,
-                  root: Path | None, index: dict) -> Seat:
+                  root: Path | None, index: dict, session_cwd: Callable[[dict, str], str | None],
+                  sources: dict) -> Seat:
     if root is None:
         raise ContractError('LiteTUI data root unknown; set LITETUI_DATA_ROOT')
     store = AgentStore(root)
@@ -121,9 +154,12 @@ def _litetui_seat(row: dict, base: dict, selection: str, layout_revision: str,
         conversation = conversations[0]
     else:
         raise ContractError('Owned seat has no single selected conversation')
-    cwd = row.get('cwd')
+    cwd, source = row.get('cwd'), 'registry'
+    if not isinstance(cwd, str) or not cwd.strip():  # rows registered before register recorded it
+        cwd, source = session_cwd(row, agent.agent_id), 'pty-session'
     if not isinstance(cwd, str) or not cwd.strip():
         raise ContractError('Owned seat has no recorded launch cwd')
+    sources[agent.agent_id] = source
     return Seat(
         conversation_id=conversation, cli='litetui',
         execution=Execution(execution['backend'], execution['model'], execution['thinking_level']),
@@ -190,14 +226,17 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
                      litetui_root: Path | str | None = None,
                      layout_revision: str = UNOBSERVED_LAYOUT,
                      current_slots: dict | None = None,
-                     live: Callable[[dict], bool] | None = None) -> Discovery:
+                     live: Callable[[dict], bool] | None = None,
+                     pty_sessions: Callable[[], list[dict] | None] | None = None) -> Discovery:
     """Name every live seat, plus `include_offline`, in a stable order.
 
     The caller (the coordinator) is a seat like any other here; the manifest's
     coordinator record, not this list, keeps restore from ever launching it.
     `exclude_ids` takes agent ids or seat names; with a known `coordinator_id`, a seat nobody
     spawned (started directly by the user) is also left out. Every seat left out is returned in
-    `Discovery.excluded` with its reason, never dropped silently.
+    `Discovery.excluded` with its reason, never dropped silently. A LiteTUI row that recorded no
+    launch cwd falls back to its live PTY session's (`pty_sessions`, default `GET /pty/list`,
+    read once and only when such a row exists); `Discovery.cwd_sources` says which was used.
     """
     harness = checked_path(harness_root)
     rows, skipped = _registry_rows(harness, list(include_offline), live or _live)
@@ -213,6 +252,15 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
     coordinator_known = coordinator_id in {agent_id for agent_id, _, _ in rows}
     candidates = []
     sources: dict[str, str] = {}
+    cwd_sources: dict[str, str] = {}
+    sessions: list[dict] | None = None
+
+    def session_cwd(row: dict, agent_id: str) -> str | None:
+        nonlocal sessions
+        if sessions is None:
+            sessions = (pty_sessions or _pty_sessions)() or []
+        return _pty_cwd(row, agent_id, sessions)
+
     left_out: list[Exclusion] = []
     for agent_id, row, selection in rows:
         try:
@@ -246,7 +294,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
             if cli_name == 'claude':
                 seat = _claude_seat(row, base, selection, layout_revision, sources)
             elif cli_name == 'litetui':
-                seat = _litetui_seat(row, base, selection, layout_revision, root, index)
+                seat = _litetui_seat(row, base, selection, layout_revision, root, index, session_cwd, cwd_sources)
             else:
                 raise ContractError('Seat CLI has no checkpoint adapter')
             blocker = None
@@ -265,7 +313,7 @@ def discover_current(*, harness_root: Path | str, include_offline: list[str] = (
             candidates.append(Candidate(expected, None, Blocker('seat-unresolved', agent_id,
                                                                 f'{detail}; reconcile source evidence')))
     candidates.sort(key=lambda c: c.expected.name.casefold())
-    return Discovery(candidates, skipped, sources, left_out)
+    return Discovery(candidates, skipped, sources, left_out, cwd_sources)
 
 
 def default_cwd_roots(seats: list[Seat]) -> list[Path]:

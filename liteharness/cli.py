@@ -1664,6 +1664,11 @@ def cmd_register(
             presence.setdefault('native_session_id', native_id)
         if os.environ.get('LITEHARNESS_TRANSCRIPT_PATH'):
             presence.setdefault('transcript_path', os.environ['LITEHARNESS_TRANSCRIPT_PATH'])
+    elif presence.get('cli') == 'litetui' and session_pid and presence.get('session_pid') == int(session_pid):
+        # The seat registering itself (its own live pid) runs in its launch cwd: LiteTUI chdirs to
+        # --cwd at startup and runs this as a child. Overwritten, not defaulted: a resume at another cwd
+        # re-registers the same row. A caller that names no live owner pid says nothing about a cwd.
+        presence['cwd'] = os.getcwd()
     _write_json_atomic(path, presence)
     registration(presence, "liteharness-cli-register")
     try:

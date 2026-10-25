@@ -98,6 +98,39 @@ class RegisterSessionPidTests(unittest.TestCase):
         cli.cmd_register("a-1", cli="litetui")
         self.assertFalse(cli._agent_record_live("a-1"))
 
+    # ── the launch cwd a LiteTUI seat declares (T0558-F-C) ─────────────────
+    def test_a_litetui_seat_registering_itself_records_its_cwd(self):
+        cli.cmd_register("a-1", cli="litetui", session_pid=os.getpid())
+        self.assertEqual(self.presence()["cwd"], os.getcwd())
+
+    def test_a_later_register_from_another_cwd_replaces_it(self):
+        elsewhere = self._dir.name
+        cli.cmd_register("a-1", cli="litetui", session_pid=os.getpid())
+        before = os.getcwd()
+        self.addCleanup(os.chdir, before)
+        os.chdir(elsewhere)
+        cli.cmd_register("a-1", cli="litetui", session_pid=os.getpid())
+        self.assertEqual(os.path.realpath(self.presence()["cwd"]), os.path.realpath(elsewhere))
+
+    def test_without_a_session_pid_no_cwd_is_recorded(self):
+        cli.cmd_register("a-1", cli="litetui")
+        self.assertNotIn("cwd", self.presence())
+
+    def test_a_refused_dead_pid_records_no_cwd(self):
+        with mock.patch("liteharness.hooks._pid_alive", return_value=False):
+            cli.cmd_register("a-1", cli="litetui", session_pid=999_999_999)
+        self.assertNotIn("cwd", self.presence())
+
+    def test_a_claude_row_keeps_its_own_cwd_rule(self):
+        cli.cmd_register("a-1", cli="claude-code", session_pid=os.getpid())
+        first = self.presence()["cwd"]
+        self.assertEqual(first, os.getcwd())
+        before = os.getcwd()
+        self.addCleanup(os.chdir, before)
+        os.chdir(self._dir.name)
+        cli.cmd_register("a-1", cli="claude-code", session_pid=os.getpid())
+        self.assertEqual(self.presence()["cwd"], first)  # setdefault: unchanged by this card
+
     # ── argv ───────────────────────────────────────────────────────────────
     def test_argv_rejects_a_non_integer(self):
         import sys

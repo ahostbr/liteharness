@@ -1,5 +1,8 @@
 """Roster discovery against a synthetic harness root: mixed Claude/LiteTUI rows."""
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -241,3 +244,80 @@ def test_excluding_the_coordinator_is_refused_by_ignoring_it(tmp_path, monkeypat
     coordinator = w.claude(1, role='orchestrator')
     found = w.discover(coordinator_id=coordinator, exclude_ids=[coordinator, 'Claude-1'])
     assert [c.expected.agent_id for c in found.candidates] == [coordinator] and found.excluded == []
+
+
+def _pty(agent_id, cwd, **extra):
+    return {'id': 'pty-1-1', 'harnessAgentId': agent_id, 'cwd': str(cwd), 'pid': os.getpid(), **extra}
+
+
+def _dead_pid():
+    done = subprocess.Popen([sys.executable, '-c', 'pass'])
+    done.wait()
+    return done.pid
+
+
+def test_litetui_row_without_cwd_takes_the_cwd_of_its_one_live_pty_session(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    tui = w.litetui(10, retired=False, record_cwd=False)
+    launched = tmp_path / 'launched'
+    launched.mkdir()
+    found = w.discover(pty_sessions=lambda: [_pty(tui.agent_id, launched), _pty(uid(99), tmp_path / 'other')])
+    seat = found.candidates[0].seat
+    assert seat is not None and seat.cwd == str(launched)
+    assert found.cwd_sources == {tui.agent_id: 'pty-session'}
+
+
+@pytest.mark.parametrize('sessions', [
+    [],                                                       # no session for the seat
+    None,                                                     # bridge unreachable
+    [{'id': 'p', 'harnessAgentId': 'someone-else', 'cwd': 'C:/x'}],
+    'two', 'relative', 'blank', 'dead',
+])
+def test_litetui_row_without_cwd_keeps_the_blocker_when_no_session_is_trustworthy(tmp_path, monkeypatch, sessions):
+    w = World(tmp_path, monkeypatch)
+    tui = w.litetui(10, retired=False, record_cwd=False)
+    here = str(tmp_path)
+    named = {'two': [_pty(tui.agent_id, here), _pty(tui.agent_id, here)],
+             'relative': [_pty(tui.agent_id, 'work/dir')],
+             'blank': [_pty(tui.agent_id, '  ')],
+             'dead': [_pty(tui.agent_id, here, pid=_dead_pid())]}
+    sessions = named[sessions] if isinstance(sessions, str) else sessions
+    found = w.discover(pty_sessions=lambda: sessions)
+    assert found.candidates[0].seat is None and found.cwd_sources == {}
+    assert 'no recorded launch cwd' in found.candidates[0].blocker.remedy
+
+
+def test_a_session_pid_the_row_names_is_trusted_even_if_the_os_cannot_find_it(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    tui = w.litetui(10, retired=False, record_cwd=False)
+    row_path = w.harness / 'agents' / f'{tui.agent_id}.json'
+    dead = _dead_pid()
+    put(row_path, {**json.loads(row_path.read_text(encoding='utf-8')), 'session_pid': dead})
+    found = w.discover(pty_sessions=lambda: [_pty(tui.agent_id, tmp_path, pid=dead)])
+    assert found.candidates[0].seat is not None and found.cwd_sources == {tui.agent_id: 'pty-session'}
+
+
+def test_the_rows_own_cwd_wins_and_the_session_list_is_not_even_read(tmp_path, monkeypatch):
+    w = World(tmp_path, monkeypatch)
+    tui = w.litetui(10, retired=False)
+
+    def never():
+        raise AssertionError('PTY inventory read although the row records its cwd')
+    found = w.discover(pty_sessions=never)
+    assert found.candidates[0].seat.cwd == str(tmp_path / 'tuiwork')
+    assert found.cwd_sources == {tui.agent_id: 'registry'}
+
+
+def test_the_cwd_source_never_reaches_the_seat_wire(tmp_path, monkeypatch):
+    from liteharness.checkpoint_contract import wire
+    w = World(tmp_path, monkeypatch)
+    tui = w.litetui(10, retired=False)
+    from_row = w.discover().candidates[0].seat
+    row_path = w.harness / 'agents' / f'{tui.agent_id}.json'
+    row = json.loads(row_path.read_text(encoding='utf-8'))
+    row.pop('cwd')
+    put(row_path, row)
+    found = w.discover(pty_sessions=lambda: [_pty(tui.agent_id, from_row.cwd)])
+    assert found.cwd_sources == {tui.agent_id: 'pty-session'}
+    assert wire(found.candidates[0].seat) == wire(from_row)
+    assert 'pty-session' not in json.dumps(wire(found.candidates[0].seat))
