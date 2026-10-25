@@ -104,10 +104,12 @@ def _layout() -> tuple[str, set[str]] | None:
             {leaf for _, leaves in shape for leaf in leaves})
 
 
-def _layout_flush(checkpoint_id: str, workspace: str, thread: str) -> dict:
+def _layout_flush(checkpoint_id: str, workspace: str, thread: str, agent_id: str | None = None) -> dict:
     from . import cli
-    return cli._bridge_request('POST', '/harness/checkpoint/layout/flush', {
-        'checkpointId': checkpoint_id, 'workspaceId': workspace, 'threadId': thread})
+    body = {'checkpointId': checkpoint_id, 'workspaceId': workspace, 'threadId': thread}
+    if agent_id is not None:  # the seat this receipt is for; an older Suite ignores the key
+        body['agentId'] = agent_id
+    return cli._bridge_request('POST', '/harness/checkpoint/layout/flush', body)
 
 
 def _read_flushed_layout(receipt: dict, checkpoint_id: str, slot: Slot, agent_id: str) -> dict | None:
@@ -166,7 +168,7 @@ class SaveEnv:
     run: Callable[[list[str], float], int] = _run
     litetui: Callable[[str, dict], dict] = _litetui
     layout: Callable[[], tuple[str, set[str]] | None] = _layout
-    layout_flush: Callable[[str, str, str], dict] = _layout_flush
+    layout_flush: Callable[[str, str, str, str | None], dict] = _layout_flush
     current_slots: Callable[[], dict] = current_slots
     live: Callable[[dict], bool] | None = None
     handoff_timeout: float = 120.0
@@ -557,7 +559,7 @@ class Saver:
         native, snapshot, failure, durable = None, None, None, False
         if observed:
             try:
-                reply = self.env.layout_flush(manifest.checkpoint_id, seat.slot.workspace, seat.slot.thread)
+                reply = self.env.layout_flush(manifest.checkpoint_id, seat.slot.workspace, seat.slot.thread, seat.agent_id)
                 native = reply.get('receipt') if isinstance(reply, dict) and reply.get('ok') is True else None
                 if isinstance(native, dict):
                     snapshot = _read_flushed_layout(native, manifest.checkpoint_id, seat.slot, seat.agent_id)
