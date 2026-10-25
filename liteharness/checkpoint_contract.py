@@ -23,7 +23,7 @@ SeatState = Literal['preparing', 'saved', 'blocked', 'reattaching', 'starting',
 OperationState = Literal['accepted', 'running', 'complete', 'incomplete',
                          'rejected', 'canceling', 'canceled', 'unknown']
 ReceiptKind = Literal['handoff', 'compact', 'boundary', 'layout', 'manual-return',
-                      'resource', 'readiness', 'profile']
+                      'resource', 'readiness', 'profile', 'seed']
 
 # Recommendations are labels, NOT implicit choices or executable policy.
 RECOMMENDED_DECISIONS = {
@@ -336,6 +336,33 @@ class ProfileEvidence:
                  'Cognitive notice disagrees with observed digests')
         if self.operation_id is None:
             _require(self.saved_digest == self.current_digest, 'SAVE cognitive digests must match')
+
+
+@dataclass(frozen=True)
+class SeedEvidence:
+    """Which cognitive method file a seat's process was launched with: a reference, NOT prompt text.
+
+    Joined at SAVE from the hook's v2 `.cog_printed` marker to the seat's own process identity. It
+    never overrides an existing managed LiteTUI home and grants no launch authority by itself.
+    """
+    version: Literal[1]
+    scope: Literal['cognitive-seed-v1']
+    checkpoint_id: str
+    seat_id: str
+    method_path: str
+    body_sha256: str
+    process_pid: int
+    process_birth: float
+    native_session: str | None
+
+    def validate(self):
+        _id(self.checkpoint_id)
+        _id(self.seat_id)
+        _path(self.method_path)
+        _digest(self.body_sha256)
+        _require(self.process_pid > 0 and self.process_birth > 0, 'Seed needs the launching process identity')
+        if self.native_session is not None:
+            _text(self.native_session)
 
 
 @dataclass(frozen=True)

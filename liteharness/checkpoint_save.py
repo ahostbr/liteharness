@@ -649,12 +649,28 @@ class Saver:
                                seat.agent_id, None)
             else:
                 got.receipts.append(receipt)
+        if seat.agent_id != manifest.coordinator.agent_id:  # restore never launches the coordinator
+            self.collect_seed(updated, manifest.checkpoint_id, got)
         seats = [updated if s.agent_id == seat.agent_id else s for s in manifest.seats]
         receipts = [r for r in manifest.receipts if r.seat_id != seat.agent_id] + got.receipts
         keep = [b for b in manifest.blockers if b.seat_id != seat.agent_id or b.code in ('seat-unresolved', 'layout-unresolved')]
         merged = replace(manifest, seats=seats, receipts=receipts, blockers=keep + got.blockers)
         self.publish(merged)
         return merged
+
+    def collect_seed(self, seat: Seat, checkpoint_id: str, got: Collected) -> None:
+        """Optional evidence of which cognitive method this seat was launched with; never blocks a save."""
+        from .checkpoint_seed import observe, retain
+        seed = observe(seat, checkpoint_id, self.params.harness_root)
+        if seed is None:
+            return
+        if isinstance(seed, str):
+            self.log.event(f'cognitive-seed-unavailable seat={seat.agent_id}: {seed}', seat.agent_id, None)
+            return
+        try:
+            got.receipts.append(retain(self.store, seat, seed, self.tick().isoformat()))
+        except (OSError, ContractError) as exc:
+            self.log.event(f'cognitive-seed-write-failed seat={seat.agent_id}: {exc}', seat.agent_id, None)
 
     def collect_coordinator(self, manifest: Manifest, seat: Seat, roots: list[Path]) -> Collected:
         """Use the supplied handoff; collect the boundary without a manual retry.

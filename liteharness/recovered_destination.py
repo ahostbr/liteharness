@@ -25,6 +25,7 @@ def active_scope():
 
 
 REQUIRED_SLOT_ENV = 'LITEHARNESS_REQUIRED_RECOVERY_SLOT'
+SEED_ENV = 'LITEHARNESS_RECOVERY_COGNITIVE_SEED'
 
 
 def required_slot(agent_id):
@@ -45,6 +46,54 @@ def required_slot(agent_id):
     return {key: value[key] for key in fields}
 
 
+def cognitive_seed():
+    """The saved method reference the checkpoint driver set for THIS launch, or None.
+
+    Evidence, not an override: it never reaches `overrides`, and a malformed value (which our
+    driver cannot produce) stops the launch before any effect rather than being guessed at.
+    """
+    raw = os.environ.get(SEED_ENV)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise ValueError('Invalid cognitive seed; nothing launched') from exc
+    if (not isinstance(value, dict) or set(value) != {'version', 'path', 'bodySha256'}
+            or type(value['version']) is not int or value['version'] != 1
+            or not isinstance(value['path'], str) or not value['path'].strip() or len(value['path']) > 4096
+            or not Path(value['path']).is_absolute()
+            or not isinstance(value['bodySha256'], str) or len(value['bodySha256']) != 64
+            or any(c not in '0123456789abcdef' for c in value['bodySha256'])):
+        raise ValueError('Invalid cognitive seed; nothing launched')
+    return {key: value[key] for key in ('version', 'path', 'bodySha256')}
+
+
+def verified_seed(seed, role=None):
+    """Stem of the method the library STILL resolves to the exact body SAVE recorded, else None.
+
+    The spawn route takes a method name, so exactness is enforced here: the file the library
+    resolves for that name must hash to the saved body. A changed method is never substituted.
+    """
+    if not isinstance(seed, dict):
+        return None
+    from . import prompts
+    stem = Path(str(seed.get('path', ''))).stem
+    try:
+        current = prompts.resolve_cognitive_file(stem, role, tier_default=False) if stem else None
+        text = current.read_text(encoding='utf-8') if current else None
+    except OSError:
+        return None
+    if text is None or hashlib.sha256(text.encode('utf-8')).hexdigest() != seed.get('bodySha256'):
+        return None
+    return stem
+
+
+def native_cognitive(previous, scope, role):
+    """Method name for a native Claude relaunch: the verified saved seed, else the registry label."""
+    return verified_seed(scope.get('cognitiveSeed'), role) or (previous.get('cognitive') or None)
+
+
 def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd=None, requested_role=None, overrides=None):
     """Read-only authority checks precede this; NEW-CREATE liveness checks follow.
 
@@ -55,6 +104,7 @@ def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd
         return False
     from . import cli
     required = required_slot(agent_id)
+    seed = cognitive_seed()
     result = cli._bridge_request('GET', '/harness/recovered-agent/locate?' + urlencode({'agentId': agent_id}))
     if not isinstance(result, dict) or result.get('ok') is not True or not isinstance(result.get('found'), bool):
         raise ValueError('Recovery destination inspection unavailable; no ordinary split attempted')
@@ -89,6 +139,7 @@ def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd
         'kind': 'agent-slot-recovery', 'actorId': caller,
         **({'expectedSlot': required} if required else {}),
         **({'expectedAuthorityFingerprint': expected} if expected else {}),
+        **({'cognitiveSeed': seed} if seed else {}),
         **({'conversationId': conversation_id} if conversation_id else {}),
         **({'requestedCwd': requested_cwd} if requested_cwd else {}),
         **({'requestedRole': requested_role} if requested_role else {}),
@@ -96,14 +147,20 @@ def recover_if_reserved(agent_id, caller, *, conversation_id=None, requested_cwd
     receipt = response if isinstance(response, dict) else {}
     identity = f"request {result.get('requestId', '<host did not return request identity>')}; session {receipt.get('sessionId', '<allocation outcome unknown>')}"
     if not isinstance(response, dict) or response.get('status') != 'bound' or response.get('ok') is not True:
-        raise ValueError(f'Reserved-slot recovery refused or UNKNOWN: {identity}; no split fallback; reconcile this same operation')
+        # The host's own reason is what tells a refusal from a timeout; it was dropped here (T0558-F).
+        why = response.get('reason') or response.get('error') if isinstance(response, dict) else None
+        raise ValueError(f'Reserved-slot recovery refused or UNKNOWN: {identity}; no split fallback; reconcile this same operation'
+                         + (f'. Host reason: {why}' if isinstance(why, str) and why.strip() else ''))
     if response.get('agentId') != agent_id or not response.get('sessionId') or not response.get('leafId'):
         raise ValueError(f'Reserved-slot receipt does not join target: {identity}; no split fallback')
     if required and (any(response.get(key) != result.get(key) for key in ('paneId', 'leafId', 'slotId', 'requestId'))
                      or not isinstance(response['sessionId'], str) or not response['sessionId'].strip()
                      or response['sessionId'] == required['placeholderSessionId']):
         raise ValueError(f'Reserved-slot receipt differs from the requested operation: {identity}; no retry or fallback')
-    print(f"Restored {agent_id} into original leaf {response['leafId']}; session {response['sessionId']}")
+    # The seat's recorded cwd is the authority; a placeholder that disagrees is reported, not refused.
+    note = (f"; placeholder cwd {response['placeholderCwd']} differs, used the seat's recorded cwd {response.get('authorityCwd')}"
+            if isinstance(response.get('placeholderCwd'), str) else '')
+    print(f"Restored {agent_id} into original leaf {response['leafId']}; session {response['sessionId']}{note}")
     return True
 
 
@@ -264,7 +321,7 @@ def launch_native_claude(entry, role):
     result = cli._bridge_request('POST', '/harness/spawn/resolve', {
         'cli': 'claude', 'name': entry['name'], 'tier': roles.wire_tier(role), 'cwd': entry['cwd'],
         **({'model': entry['model']} if entry.get('model') else {}),
-        **({'cognitive': previous['cognitive']} if previous.get('cognitive') else {}),
+        **({'cognitive': cognitive} if (cognitive := native_cognitive(previous, scope, role)) else {}),
     })
     if not isinstance(result, dict) or result.get('ok') is not True:
         raise ValueError('Native Claude launch resolution refused')
@@ -280,11 +337,41 @@ def launch_native_claude(entry, role):
     verify({**scope, 'sessionId': created['newSessionId']})
 
 
+def holders(session_id):
+    """Registry rows that still name this exact native session; unknown is never reported as absent.
+
+    A row is dropped only with proof it is not a holder: it exited, or its recorded pid is gone. A row
+    with no readable pid stays a holder. An unreadable presence file raises: the caller must treat that
+    as "could not be determined", not as "nobody holds it". The PTY inventory half of the proof is the host's.
+    """
+    import psutil
+    from . import config
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError('An exact native session id is required')
+    found = []
+    for path in sorted((config.get_root() / 'agents').glob('*.json')):
+        row = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(row, dict):
+            raise ValueError('Malformed presence while inspecting session holders')
+        if row.get('canvas_session_id') != session_id or row.get('exited_at'):
+            continue
+        pid = row.get('session_pid')
+        if type(pid) is int and pid > 0:
+            try:
+                psutil.Process(pid)
+            except psutil.NoSuchProcess:
+                continue
+        found.append(path.stem)
+    return {'agentIds': found}
+
+
 def main():
     request = json.load(sys.stdin)
     action = request['action']
     if action == 'issuer':
         return issuer(request['actorId'])
+    if action == 'holders':
+        return holders(request['sessionId'])
     if action == 'prepare':
         return prepare(request['agentId'], request['cwd'], request.get('conversationId'))
     if action == 'verify':

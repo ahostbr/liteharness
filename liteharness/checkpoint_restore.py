@@ -24,7 +24,8 @@ from .checkpoint_ops import OperationLog, make_result, seat_result
 from .checkpoint_save import evidence, sha256_file
 from .checkpoint_store import CheckpointStore
 from .checkpoint_slots import current_slots, resolve_slot
-from .recovered_destination import REQUIRED_SLOT_ENV
+from .checkpoint_seed import reference as seed_reference
+from .recovered_destination import REQUIRED_SLOT_ENV, SEED_ENV
 from uuid import uuid4
 
 SPAWN_TIMEOUT = 300.0
@@ -611,6 +612,14 @@ class Restorer:
                          'leafId': slot.leaf, 'placeholderSessionId': slot.tab})}
         if seat.cli == 'litetui':
             child_env['LITETUI_DATA_ROOT'] = seat.data_root
+        # The saved method reference rides this one launch only. A stale value inherited from the
+        # coordinator's own environment must never reach another seat.
+        child_env.pop(SEED_ENV, None)
+        seed, why = seed_reference(self.manifest.receipts, seat, self.manifest.checkpoint_id)
+        if why:
+            self.journal(f'cognitive-seed-unavailable seat={seat.agent_id}: {why}', seat.agent_id, None)
+        if seed:
+            child_env[SEED_ENV] = json.dumps(seed, sort_keys=True, separators=(',', ':'))
         # Exactly one attempt; even a legacy prompt-refusal message cannot
         # authorize retrying an operation whose side effects may be unknown.
         outcome = env.spawn(self.argv(seat, slot.pane), child_env, env.spawn_timeout)
