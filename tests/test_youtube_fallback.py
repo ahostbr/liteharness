@@ -76,6 +76,7 @@ function yt-dlp {
             Write-Error 'ERROR: metadata unavailable'; $global:LASTEXITCODE = 1; return
         }
         'Title'; 'Channel'; 'fg3LR1UHI1c'; 'https://youtube.com/@channel'
+        if ($env:META_UPLOAD) { $env:META_UPLOAD }
         $global:LASTEXITCODE = 0; return
     }
     if ($args -contains '--dump-single-json') {
@@ -105,6 +106,9 @@ function yt-dlp {
         }
         if ($env:SUB_MODE -in @('ok', 'nofile', 'invalid', 'empty')) {
             $global:LASTEXITCODE = 0; return
+        }
+        if ($env:SUB_MODE -eq 'nodata') {
+            Write-Error 'ERROR: Did not get any data blocks'; $global:LASTEXITCODE = 1; return
         }
         Write-Error 'ERROR: Unable to download video subtitles: HTTP Error 429: Too Many Requests'
         $global:LASTEXITCODE = 1; return
@@ -141,25 +145,29 @@ function python {
 exit $LASTEXITCODE
 ''', encoding="utf-8-sig")
 
-    def run(sub="fail", api="ok", media=False, frames=False, metadata_fail=False, audio="down"):
+    def run(sub="fail", api="ok", media=False, frames=False, metadata_fail=False, audio="down",
+            whisper=False, upload_date="", output_path=True):
         output.unlink(missing_ok=True)
         log.unlink(missing_ok=True)
         env = os.environ.copy()
         env.update(TEMP=str(sandbox), TMP=str(sandbox), APPDATA=str(sandbox / "appdata"),
                    PYTHONPATH=str(sandbox), PYTHONIOENCODING="utf-8", CAPTION_MODE=api,
                    AUDIO_MODE=audio, CALL_LOG=str(log), SUB_MODE=sub, META_FAIL="1" if metadata_fail else "0",
-                   LITEYT_ARCHIVE_SCRIPT="", YT_DLP_JS_RUNTIME="node")
+                   META_UPLOAD=upload_date, LITEYT_ARCHIVE_SCRIPT="", YT_DLP_JS_RUNTIME="node")
         if api == "missing":
             (package / "__init__.py").write_text(
                 "raise ModuleNotFoundError(\"No module named 'youtube_transcript_api'\", name='youtube_transcript_api')",
                 encoding="utf-8")
         args = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper),
-                "-Url", "https://youtu.be/fg3LR1UHI1c", "-OutputPath", str(output),
-                "-MediaRoot", str(sandbox / "media")]
+                "-Url", "https://youtu.be/fg3LR1UHI1c", "-MediaRoot", str(sandbox / "media")]
+        if output_path:
+            args += ["-OutputPath", str(output)]
         if not media:
             args.append("-NoVideo")
         if not frames:
             args.append("-NoFrames")
+        if whisper:
+            args.append("-Whisper")
         result = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", env=env, timeout=30)
         text = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout + result.stderr)
         markdown = output.read_text(encoding="utf-8") if output.exists() else ""
@@ -201,8 +209,8 @@ def test_fallback_uses_shared_renderer_and_standalone_archive(run_skill, sub):
 
 
 @pytest.mark.parametrize("sub", ["fail", "nofile"])
-def test_catalog_absence_still_attempts_audio(run_skill, sub):
-    code, text, md, calls, folder = run_skill(sub=sub, api="no_english")
+def test_catalog_absence_still_attempts_audio_when_opted_in(run_skill, sub):
+    code, text, md, calls, folder = run_skill(sub=sub, api="no_english", whisper=True)
     assert code == 3, text
     assert "whisper-probe" in calls
     assert "needs LiteSuite" in text
@@ -210,6 +218,35 @@ def test_catalog_absence_still_attempts_audio(run_skill, sub):
     assert "available languages: de" in text
     assert md == ""
     assert calls.count("api-list") == 1
+
+
+@pytest.mark.parametrize("api", ["no_english", "fetch_error"])
+def test_whisper_is_opt_in_and_off_by_default(run_skill, api):
+    code, text, md, calls, folder = run_skill(api=api, audio="ok")
+    text = ' '.join(re.sub(r"(?m)^\s*\|\s?", "", text).split())
+    assert code == 3, text
+    assert "whisper-probe" not in calls
+    assert "--dump-single-json" not in calls
+    assert "whisper-audio: off (opt-in: re-run with -Whisper" in text
+    assert md == ""
+
+
+@pytest.mark.parametrize("days_ago,hint", [(0, True), (30, False)])
+def test_empty_caption_body_is_named_not_called_absent(run_skill, days_ago, hint):
+    import datetime
+    uploaded = (datetime.date.today() - datetime.timedelta(days=days_ago)).strftime("%Y%m%d")
+    code, text, md, calls, folder = run_skill(sub="nodata", api="fetch_error", upload_date=uploaded)
+    text = ' '.join(re.sub(r"(?m)^\s*\|\s?", "", text).split())
+    assert code == 3, text
+    assert "served it EMPTY - not proof there are no captions" in text
+    assert ("retry later" in text) == hint
+
+
+def test_transcript_defaults_to_media_folder_without_output_path(run_skill):
+    code, text, md, calls, folder = run_skill(sub="ok", output_path=False)
+    assert code == 0, text
+    saved = folder / "media/fg3LR1UHI1c/transcript.md"
+    assert "**01:05** Primary caption" in saved.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("api,diagnostic", [
@@ -280,7 +317,7 @@ def test_no_video_can_still_extract_existing_video_frames(run_skill):
 
 @pytest.mark.parametrize("api", ["fetch_error", "no_english"])
 def test_audio_uses_original_hls_after_direct_403(run_skill, api):
-    code, text, md, calls, folder = run_skill(api=api, audio="ok")
+    code, text, md, calls, folder = run_skill(api=api, audio="ok", whisper=True)
     assert code == 0, text
     assert "**Transcript route:** whisper-audio" in md
     assert "**00:02** Audio transcript" in md
@@ -294,7 +331,7 @@ def test_audio_uses_original_hls_after_direct_403(run_skill, api):
 
 @pytest.mark.parametrize("audio", ["wrong_server", "download_fail", "inference_fail", "empty", "ambiguous", "no_audio", "ffmpeg_fail"])
 def test_audio_failures_never_claim_success(run_skill, audio):
-    code, text, md, calls, folder = run_skill(api="no_english", audio=audio)
+    code, text, md, calls, folder = run_skill(api="no_english", audio=audio, whisper=True)
     assert code == 3, text
     assert not md
     assert "whisper-audio" in text
@@ -305,7 +342,7 @@ def test_audio_failures_never_claim_success(run_skill, audio):
 
 
 def test_original_hls_only_does_not_need_direct_format(run_skill):
-    code, text, md, calls, folder = run_skill(api="fetch_error", audio="hls_only")
+    code, text, md, calls, folder = run_skill(api="fetch_error", audio="hls_only", whisper=True)
     assert code == 0, text
     assert "**Transcript route:** whisper-audio" in md
     assert "-f original-hls" in calls

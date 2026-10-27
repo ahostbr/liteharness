@@ -16,7 +16,9 @@ param(
     # skill this grew out of: callers and SKILL.md both already pass a FILE path
     # here, so repurposing it as a directory for the whole set would have broken
     # every existing invocation silently — the write would just land somewhere
-    # else. Video and frames get their own root below.
+    # else. Video and frames get their own root below. When omitted, the
+    # transcript goes to <MediaRoot>/<video_id>/transcript.md: the agent
+    # summarizes by default, so the full text needs a file the user can open.
     [string]$OutputPath,
 
     # Where <video_id>/ is created for the video and frames.
@@ -33,7 +35,12 @@ param(
 
     # The transcript-only path this skill used to be. Both still work alone.
     [switch]$NoVideo,
-    [switch]$NoFrames
+    [switch]$NoFrames,
+
+    # Audio transcription through an ALREADY-RUNNING whisper.cpp on 127.0.0.1:8080,
+    # tried only after every caption route fails. Opt-in, off by default. User
+    # request 2026-10-27: "whisper is opt in only off by default".
+    [switch]$Whisper
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -107,7 +114,7 @@ function Get-DiagText([object[]]$lines, [int]$maxLen = 400) {
     return $text
 }
 
-# Audio is the last resort, using ONLY an already-running whisper.cpp server.
+# Audio is the last resort and opt-in (-Whisper), using ONLY an already-running whisper.cpp server.
 function Get-AudioTranscript([string]$output) {
     try {
         $server = Invoke-WebRequest 'http://127.0.0.1:8080/' -UseBasicParsing -TimeoutSec 3 -MaximumRedirection 0 -ErrorAction Stop
@@ -164,7 +171,7 @@ try {
     # geo-blocked video fails HERE, and the message said only "may be unavailable
     # or private" while yt-dlp's own line naming the reason had been discarded.
     # Splitting them also keeps stderr from displacing the positional fields.
-    $metaResult = & yt-dlp @JsRuntimeArgs --print title --print channel --print id --print uploader_url --skip-download $Url 2>&1
+    $metaResult = & yt-dlp @JsRuntimeArgs --print title --print channel --print id --print uploader_url --print upload_date --skip-download $Url 2>&1
     $metaStdout = @($metaResult | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
     $metaStderr = @($metaResult | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { $_.ToString() })
     if ($LASTEXITCODE -ne 0) {
@@ -182,6 +189,8 @@ try {
     $ChannelName = $metaLines[1]
     $VideoId     = $metaLines[2]
     $ChannelUrl  = $metaLines[3]
+    # Optional 5th field (yyyymmdd); only used to explain empty captions on new uploads.
+    $UploadDate  = if ($metaLines.Count -ge 5 -and $metaLines[4] -match '^\d{8}$') { $metaLines[4] } else { '' }
 
     $ChannelHandle = ''
     if ($ChannelUrl -match '/@([^/\s]+)') {
@@ -315,12 +324,30 @@ try {
             Write-Warning "No English subtitles (youtube-transcript-api catalog confirmed). $fallbackDiag"
         }
         if ($fallbackExit -ne 0 -or -not (Test-Path -LiteralPath $fallbackPath)) {
-            Write-Warning "Caption routes failed; trying whisper-audio."
+            # yt-dlp says "Did not get any data blocks" when YouTube answers 200 with an
+            # empty body. Measured 2026-10-27 on YdK5mrz_ljc, uploaded that day: its
+            # English auto-captions were listed but served empty on every client, while
+            # an older video's auto-captions downloaded normally on the same box.
+            $emptyHint = ''
+            if ($primaryDiag -match 'Did not get any data blocks') {
+                $emptyHint = ' YouTube listed the caption track but served it EMPTY - not proof there are no captions.'
+                if ($UploadDate) {
+                    $uploaded = [datetime]::ParseExact($UploadDate, 'yyyyMMdd', $null)
+                    if (((Get-Date) - $uploaded).TotalDays -le 2) {
+                        $emptyHint += " The video was uploaded $($uploaded.ToString('yyyy-MM-dd')); automatic captions on new uploads can be listed before they are served, so retry later."
+                    }
+                }
+            }
+            if (-not $Whisper) {
+                Write-Error "Transcript fetch FAILED on all routes. $primaryDiag; youtube-transcript-api exit ${fallbackExit}: $fallbackDiag; whisper-audio: off (opt-in: re-run with -Whisper; needs LiteSuite's Whisper already running on 127.0.0.1:8080).$emptyHint"
+                exit 3
+            }
+            Write-Warning "Caption routes failed; trying whisper-audio (-Whisper)."
             try {
                 Get-AudioTranscript $fallbackPath
                 $transcriptRoute = 'whisper-audio (local speech recognition, not captions)'
             } catch {
-                Write-Error "Transcript fetch FAILED on all routes. $primaryDiag; youtube-transcript-api exit ${fallbackExit}: $fallbackDiag; whisper-audio: $($_.Exception.Message)"
+                Write-Error "Transcript fetch FAILED on all routes. $primaryDiag; youtube-transcript-api exit ${fallbackExit}: $fallbackDiag; whisper-audio: $($_.Exception.Message).$emptyHint"
                 exit 3
             }
         }
@@ -605,11 +632,13 @@ print('inserted' if changed else 'exists')
 $transcript
 "@
 
-    if ($OutputPath) {
-        $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-        [System.IO.File]::WriteAllText($OutputPath, $Markdown, $utf8NoBom)
-        Write-Host "Written to: $OutputPath" -ForegroundColor Cyan
+    if (-not $OutputPath) {
+        if (-not (Test-Path $MediaDir)) { New-Item -ItemType Directory -Path $MediaDir -Force | Out-Null }
+        $OutputPath = Join-Path $MediaDir 'transcript.md'
     }
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($OutputPath, $Markdown, $utf8NoBom)
+    Write-Host "Written to: $OutputPath" -ForegroundColor Cyan
 
     Write-Output $Markdown
 
