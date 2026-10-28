@@ -95,6 +95,7 @@ def launch(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("wrapper", ["{}", "cmd /c {}", "python -m {}", 'pwsh -c "{}"',
+                                     'bash -c "{}"', 'sh -c "{}"',
                                      '"C:\\Program Files\\LiteTUI\\litetui.exe"{}'])
 def test_pty_launch_verifies_the_joined_seat_not_the_provisional_row(launch, capsys, wrapper):
     command = "litetui --backend codex --model gpt-6.1-sol --thinking-level high"
@@ -186,3 +187,19 @@ def test_ambiguous_join_is_refused_instead_of_selecting_a_seat(launch, capsys):
 def test_wrapper_keeps_a_quoted_executable_path_as_one_program(program, wrapper):
     command = rf'{wrapper} "C:\Program Files\Seat\{program}.exe"'
     assert cli._spawn_floor_refusal(None, command).startswith("SPAWN REFUSED")
+
+
+@pytest.mark.parametrize("shell", [
+    "bash", "sh", "bash.exe", "sh.exe", "/bin/bash", "/bin/sh",
+    r"C:\tools\bash.exe", r"C:\tools\sh.exe",
+])
+@pytest.mark.parametrize("command,refused", [
+    ('"litetui --model gpt-5.5"', True),
+    ("'claude -p \"review the codex adapter\"'", False),
+])
+def test_posix_shell_wrappers_judge_the_program_not_the_prompt(shell, command, refused):
+    why = cli._spawn_floor_refusal(None, f"{shell} -c {command}")
+    if refused:
+        assert why and why.startswith("SPAWN REFUSED")
+    else:
+        assert why is None

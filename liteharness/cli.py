@@ -3744,7 +3744,8 @@ def _spawn_exec_request(model: str | None, exec_cmd: str) -> tuple[str, str | No
         if program in ("python", "python3", "py") and flag == "-m":
             tokens = tokens[2:]
         elif ((program == "cmd" and flag in ("/c", "/k"))
-              or (program in ("pwsh", "powershell") and flag in ("-c", "-command"))):
+              or (program in ("pwsh", "powershell") and flag in ("-c", "-command"))
+              or (program in ("bash", "sh") and flag == "-c")):
             tokens = tokens[2:]
             if len(tokens) == 1:
                 # A quoted seat executable path (possibly containing spaces)
