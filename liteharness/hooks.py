@@ -1334,7 +1334,11 @@ def _record_belongs_to_process(agent_id: str, session_pid: int | None, *,
         started = datetime.fromtimestamp(psutil.Process(session_pid).create_time(), timezone.utc)
     except Exception:
         return True
-    return registered >= started
+    # A registration made just after process creation can read slightly EARLIER:
+    # Python's Windows wall clock can tick at 15.625 ms, while psutil reads the
+    # OS process creation time. That sub-tick inversion is not proof of PID
+    # reuse. Allow 20 ms (one tick plus rounding), not an unbounded live-PID pass.
+    return (started - registered).total_seconds() <= 0.020
 
 
 _IDENTITY_DECISION: dict = {}

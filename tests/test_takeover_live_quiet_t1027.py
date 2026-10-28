@@ -13,6 +13,7 @@ Run:  python -m pytest tests/test_takeover_live_quiet_t1027.py -q
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -105,6 +106,37 @@ def test_a_REUSED_pid_does_not_hold_a_dead_seats_name(root, live_pid):
     assert cli._agent_record_live("crashed") is False
     cli.cmd_register("relaunch", cli="litetui", name="OpenBolt", session_pid=live_pid)
     assert naming.get_name("relaunch") == "OpenBolt"
+
+
+@pytest.mark.parametrize("clock_skew", [0.000227, 0.015625, 0.020])
+@pytest.mark.parametrize("takeover", [False, True])
+def test_clock_quantization_does_not_release_a_live_holders_name(
+        root, live_pid, monkeypatch, clock_skew, takeover):
+    """A coarse registration clock can lag the OS process-birth clock by a tick.
+
+    Only the external clock reading is substituted; naming, takeover, presence
+    and the owning PID's liveness are real. No actual PID reuse occurred.
+    """
+    import psutil
+
+    _holder(root, "holder", live_pid, quiet_s=700)
+    path = root / "agents" / "holder.json"
+    row = json.loads(path.read_text(encoding="utf-8"))
+    registered = datetime.fromisoformat(row["registered_at"])
+    created = (registered + timedelta(seconds=clock_skew)).timestamp()
+    real_create_time = psutil.Process.create_time
+    monkeypatch.setattr(psutil.Process, "create_time", lambda self:
+                        created if self.pid == live_pid else real_create_time(self))
+
+    assert naming.is_name_taken("OpenBolt", exclude_id="claimant") == "holder"
+    assert cli._agent_record_live("holder") is True
+    cli.cmd_register("claimant", cli="litetui", name="OpenBolt",
+                     takeover=takeover, session_pid=os.getpid())
+
+    assert json.loads(path.read_text(encoding="utf-8")) == row
+    assert naming.get_name("holder") == "OpenBolt"
+    assert naming.get_name("claimant") != "OpenBolt"
+    assert cli._agent_record_live("holder") is True
 
 
 def test_register_records_the_resolved_backend(root):
