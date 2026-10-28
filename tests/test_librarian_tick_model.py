@@ -242,7 +242,10 @@ def test_an_unpinned_launch_says_so_on_stderr_and_in_the_ledger(rig, capsys):
     captured = capsys.readouterr()
     assert "Note: no model" in captured.err and "Note:" not in captured.out
     row = rig.ledger()
-    assert row["outcome"].startswith("success") and "no model" in row["outcome"], row
+    assert row["outcome"] == (
+        "success (no model on the job and no spawn_default_model in the harness config: "
+        "claude will boot the model in its own settings.json)"
+    ), row
     assert "\n" not in row["outcome"]
 
 
@@ -460,3 +463,84 @@ def test_a_slot_completed_by_an_os_refusal_is_not_rerun(rig, monkeypatch):
     _refuse_to_start(monkeypatch, PermissionError(13, "Permission denied"))
     assert rig.tick() == 1
     assert rig.tick() == 0  # the slot is history, like any other spawn-failed
+
+
+# ── T0487: diagnostics cannot strand an ordinary failed start in a claimed slot ──────────────
+
+class _BrokenTextError(OSError):
+    def __str__(self):
+        raise ValueError("cannot format this error")
+
+
+@pytest.mark.parametrize("exc", [_BrokenTextError(), SystemExit(_BrokenTextError())])
+def test_failure_text_falls_back_to_the_type_when_string_conversion_raises(exc):
+    assert librarian_tick._failure_text(exc) == type(exc).__name__
+
+
+@pytest.mark.parametrize("source", ["model_flags", "subprocess"])
+def test_an_unprintable_failure_completes_the_slot(rig, monkeypatch, source):
+    exc = _BrokenTextError()
+    if source == "model_flags":
+        monkeypatch.setattr(librarian_tick, "_model_flags", _raise(exc))
+    else:
+        _refuse_to_start(monkeypatch, exc)
+    assert rig.tick() == 1
+    row = rig.ledger()
+    assert row["completed_at"] and row["outcome"] == "spawn-failed: _BrokenTextError", row
+    assert rig.tick() == 0
+
+
+def test_a_nul_prompt_start_value_error_completes_the_slot(rig, monkeypatch):
+    rig.write_job(prompt="bad\x00prompt")
+
+    def fake_run(argv, **_kw):
+        assert argv[2] == "bad\x00prompt"
+        raise ValueError("embedded null character")
+
+    monkeypatch.setattr(librarian_tick.subprocess, "run", fake_run)
+    assert rig.tick() == 1
+    row = rig.ledger()
+    assert row["completed_at"], row
+    assert row["outcome"] == "spawn-failed: ValueError: embedded null character"
+    assert rig.tick() == 0
+
+
+def test_a_keyboard_interrupt_from_subprocess_propagates_and_cleans_up(rig, monkeypatch):
+    opened = _track_ledger_connections(monkeypatch)
+    before = set(threading.enumerate())
+    _refuse_to_start(monkeypatch, KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        rig.tick()
+    assert set(threading.enumerate()) <= before
+    assert len(opened) == 2
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("select 1")
+    assert not rig.ledger()["completed_at"]
+
+
+@pytest.mark.parametrize("source", ["model_flags", "subprocess"])
+@pytest.mark.parametrize("length", [271, 272, 273, 1000])
+def test_ledger_failure_text_is_capped_at_300_characters(rig, monkeypatch, capsys, source, length):
+    message = "x" * length + "\nsecond line"
+    exc = RuntimeError(message)
+    if source == "model_flags":
+        monkeypatch.setattr(librarian_tick, "_model_flags", _raise(exc))
+    else:
+        _refuse_to_start(monkeypatch, exc)
+    assert rig.tick() == 1
+    row = rig.ledger()
+    assert row["completed_at"], row
+    assert row["outcome"] == ("spawn-failed: RuntimeError: " + "x" * length)[:300]
+    if source == "model_flags":
+        assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("code", [0, 1, -1, 255])
+def test_system_exit_integer_keeps_its_code_as_failure_text(rig, monkeypatch, code):
+    exc = SystemExit(code)
+    assert librarian_tick._failure_text(exc) == str(code)
+    monkeypatch.setattr(librarian_tick, "_model_flags", _raise(exc))
+    assert rig.tick() == 1
+    row = rig.ledger()
+    assert row["completed_at"] and row["outcome"] == f"spawn-failed: {code}", row

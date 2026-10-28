@@ -95,12 +95,15 @@ def _own_text(action: dict, key: str) -> str | None:
 def _failure_text(exc: BaseException) -> str:
     """What a refusal or a failed start says, never empty: a deliberate SystemExit keeps its
     message as written; anything else carries its type in front, since "boom" alone does not
-    say what raised it."""
-    if isinstance(exc, SystemExit):
-        text = "" if exc.code is None else str(exc.code).strip()
-        return text or "refused without a message"
-    text = str(exc).strip()
+    say what raised it. Broken string conversion falls back to the type name."""
     name = type(exc).__name__
+    try:
+        if isinstance(exc, SystemExit):
+            text = "" if exc.code is None else str(exc.code).strip()
+            return text or "refused without a message"
+        text = str(exc).strip()
+    except Exception:
+        return name
     return f"{name}: {text}" if text else name
 
 
@@ -226,12 +229,12 @@ def run_tick(
             except (SystemExit, Exception) as exc:
                 # A bad model or effort never falls back to an unpinned launch. The slot
                 # completes as failed, the same as a spawn that could not start; the ledger
-                # keeps the first line, stderr the whole message.
+                # keeps at most 300 characters of the first line, stderr the whole message.
                 message = _failure_text(exc)
                 print(f"[librarian-tick] spawn-failed: {message} — claude was not started",
                       file=sys.stderr)
                 occurrences.complete(conn, job_id, slot, owner,
-                                     f"spawn-failed: {message.splitlines()[0]}", db_path=db)
+                                     f"spawn-failed: {message.splitlines()[0]}"[:300], db_path=db)
                 return 1
             if note:
                 print(f"[librarian-tick] Note: {note}.", file=sys.stderr)
@@ -261,9 +264,9 @@ def run_tick(
                 outcome = f"success ({note})" if note else "success"
             else:
                 outcome = f"exit-{proc.returncode}" + (" (unpinned)" if note else "")
-        except OSError as exc:
-            # FileNotFoundError, PermissionError, WinError 193: whatever the OS refuses.
-            outcome = f"spawn-failed: {_failure_text(exc).splitlines()[0]}"
+        except Exception as exc:
+            # OS refusals and invalid arguments (e.g. NUL); interrupts still propagate.
+            outcome = f"spawn-failed: {_failure_text(exc).splitlines()[0]}"[:300]
             proc = None
         finally:
             stop.set()
