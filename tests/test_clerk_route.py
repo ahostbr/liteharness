@@ -137,7 +137,10 @@ def test_name_holder_age_boundary(home, monkeypatch, age, expected):
     assert _agent_record_live("clerk") is expected
 
 
-@pytest.mark.parametrize("offset,expected", [(0, True), (-0.001, False), (None, True)])
+@pytest.mark.parametrize("offset,expected", [
+    (0, True), (-0.001, True), (-0.020, True), (-0.020001, False),
+    (-1, False), (None, True),
+])
 def test_process_start_boundary_and_unknown_leniency(home, monkeypatch, offset, expected):
     import psutil
     started = datetime.now(timezone.utc).replace(microsecond=0)
