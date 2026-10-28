@@ -360,7 +360,7 @@ def _run_spawn(monkeypatch, **kw):
     ("litetui --backend codex --model gpt-5.6-sol --thinking-level medium", "is below gpt-6.1-sol"),
     ("litetui --backend codex --model gpt-6-sol", "thinking_level None"),
     ("litetui", "model None"),                                   # the pin would decide
-    # F2: the program is found in ANY token, so a wrapper is no way round the floor.
+    # T0085: known wrappers expose the program, without scanning prompt arguments.
     ("cmd /c litetui", "model None"),
     ("python -m litetui", "model None"),
     (r'cmd /c "C:\x\litetui.exe --backend codex --model gpt-5.6-sol --thinking-level medium"',
