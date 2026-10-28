@@ -3729,38 +3729,26 @@ def _exec_request(model: str | None, exec_cmd: str) -> tuple[str | None, str | N
     return program, backend, model, thinking
 
 
-def _spawn_exec_request(model: str | None, exec_cmd: str) -> tuple[str, str | None, str | None, str | None]:
-    """Read the program, not mentions in arguments. Unwrap only known launchers.
+def _spawn_floor_refusal(model: str | None, exec_cmd: str | None) -> str | None:
+    """T1025 pre-launch floor. Claude seats pass through (no floor names them).
+    An --exec seat is judged by the PROGRAM it runs, found in any token, so a
+    wrapper (`cmd /c litetui`, `python -m litetui`, `pwsh -c codex`) is no way
+    round it. A litetui seat is judged by its own --backend/--model/--thinking-level,
+    and one naming neither backend nor model is codex (its saved settings, the
+    T1004 pin, would decide). The codex CLI, or any other non-LiteTUI program on
+    a governed model, is refused outright: see T0088-A.
 
-    Non-POSIX splitting keeps Windows path backslashes and quoted prompt arguments.
-    Shell wrappers may quote their entire command; only that command is re-tokenized.
-    This is not a shell interpreter (arbitrary scripts are not inferred as seats).
-    """
-    import shlex
-
-    tokens = shlex.split(exec_cmd, posix=False)
-    while tokens:
-        tokens = [t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t for t in tokens]
-        program = re.split(r"[\\/]", tokens[0])[-1].split(".")[0].lower()
-        flag = tokens[1].lower() if len(tokens) > 1 else ""
-        if program in ("python", "python3", "py") and flag == "-m":
-            tokens = tokens[2:]
-        elif ((program == "cmd" and flag in ("/c", "/k"))
-              or (program in ("pwsh", "powershell") and flag in ("-c", "-command"))
-              or (program in ("bash", "sh") and flag == "-c")):
-            tokens = tokens[2:]
-            if len(tokens) == 1:
-                # A quoted seat executable path (possibly containing spaces)
-                # is already one program token, not a quoted command to split.
-                executable = re.split(r"[\\/]", tokens[0])[-1].lower()
-                if executable not in ("litetui", "litetui.exe", "codex", "codex.exe"):
-                    tokens = shlex.split(tokens[0], posix=False)
-        else:
-            break
-    else:
-        program = ""
+    Pre-launch only. The post-launch check of what the seat resolved is not run
+    on this path: a pty seat registers under its own id, and nothing yet joins
+    it to the pty-* id minted here (T1025-A)."""
+    from . import fleet_policy
+    if not exec_cmd:
+        return fleet_policy.gate(None, model, None)
+    tokens = [t for t in re.split(r"[\s\"']+", exec_cmd) if t]
+    stems = [re.split(r"[\\/]", t)[-1].split(".")[0].lower() for t in tokens]
+    at = next((i for i, stem in enumerate(stems) if stem in ("litetui", "codex")), None)
     backend = thinking = None
-    args = tokens[1:]
+    args = tokens[at + 1:] if at is not None else tokens
     for flag, value in zip(args, args[1:]):
         if flag == "--backend":
             backend = value
@@ -3768,68 +3756,15 @@ def _spawn_exec_request(model: str | None, exec_cmd: str) -> tuple[str, str | No
             model = value
         elif flag == "--thinking-level":
             thinking = value
-    if program == "litetui" and not backend and not model:
-        backend = "codex"  # otherwise the saved settings / pin would decide
-    return program, backend, model, thinking
-
-
-def _spawn_floor_refusal(model: str | None, exec_cmd: str | None) -> str | None:
-    """T1025 pre-launch floor; T0085 judges only the program and known wrappers.
-
-    LiteTUI also gets a post-launch check of its joined presence. The codex CLI,
-    or any other non-LiteTUI program on a governed model, stays refused (T0088-A).
-    """
-    from . import fleet_policy
-    if not exec_cmd:
-        return fleet_policy.gate(None, model, None)
-    try:
-        program, backend, model, thinking = _spawn_exec_request(model, exec_cmd)
-    except ValueError as exc:
-        return f"SPAWN REFUSED: invalid --exec command: {exc}"
-    if program == "litetui":
-        return fleet_policy.gate(backend, model, thinking)
+    if at is not None and stems[at] == "litetui":
+        return fleet_policy.gate(backend or ("codex" if not model else None), model, thinking)
     try:
         policy = fleet_policy.load()[0]
     except fleet_policy.PolicyError as exc:
         return f"SPAWN REFUSED: {exc}"
-    if program == "codex" or fleet_policy.floor_for(policy, backend, model):
+    if at is not None or fleet_policy.floor_for(policy, backend, model):
         return _UNGOVERNED_CODEX_CLI
     return None
-
-
-_PTY_VERIFY_WAIT = 90
-
-
-def _verify_pty_seat(provisional_id: str, root: Path, *, backend: str | None,
-                     model: str | None, thinking: str | None) -> str | None:
-    """One bounded wait for the join AND the effective execution report."""
-    from . import fleet_policy
-
-    deadline = time.monotonic() + _PTY_VERIFY_WAIT
-    while True:
-        seats = []
-        for path in (root / "agents").glob("*.json"):
-            if path.stem == provisional_id:
-                continue  # the spawner's placeholder is not the seat's report
-            try:
-                row = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if (isinstance(row, dict) and row.get("provisional_id") == provisional_id
-                    and row.get("agent_id") == path.stem):
-                seats.append(path.stem)
-        if len(seats) > 1:
-            return f"SEAT FAILED JOIN: multiple seats claim {provisional_id}. Unverified is refused."
-        remaining = max(0, deadline - time.monotonic())
-        if seats:
-            return fleet_policy.verify_seat(seats[0], root, wait=remaining, backend=backend,
-                                            expect_model=model, expect_thinking=thinking, clock=time.monotonic,
-                                            sleep=lambda seconds: time.sleep(min(
-                                                seconds, max(0, deadline - time.monotonic()))))
-        if not remaining:
-            return (f"SEAT FAILED JOIN: no seat reported provisional_id={provisional_id} "
-                    f"within {_PTY_VERIFY_WAIT}s. Unverified is refused.")
-        time.sleep(min(1, remaining))
 
 
 #: What `spawn --split --cli codex --args` may carry: safety flags only. Anything that can change the
@@ -5263,19 +5198,6 @@ def cmd_spawn(
         # session (the provisional pty-* record and the real UUID record were
         # otherwise never joined, making agents unkillable by their UUID).
         context_env["LITEHARNESS_PROVISIONAL_ID"] = agent_id
-        # The seat may register before spawn returns: its claim requires this row.
-        # Also supplies spawn_mode so send-input auto-routes.
-        agents_dir = config.get_root() / "agents"
-        agents_dir.mkdir(parents=True, exist_ok=True)
-        presence_path = agents_dir / f"{agent_id}.json"
-        config.atomic_write_json(presence_path, {
-            "agent_id": agent_id,
-            "spawn_mode": "pty",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "name": name,
-            "model": resolved_model,
-        })
-
         result = pty_daemon.send_command({
             "cmd": "spawn",
             "agent_id": agent_id,
@@ -5286,30 +5208,20 @@ def cmd_spawn(
         })
 
         if not result.get("ok"):
-            presence_path.unlink(missing_ok=True)
             print(f"Error: {result.get('error', 'unknown')}")
             sys.exit(1)
 
-        if exec_cmd:
-            program, asked_backend, asked_model, asked_thinking = _spawn_exec_request(model, exec_cmd)
-            if program == "litetui":
-                try:
-                    why = _verify_pty_seat(agent_id, config.get_root(), backend=asked_backend,
-                                           model=asked_model, thinking=asked_thinking)
-                except Exception as exc:
-                    why = f"SEAT FAILED VERIFY: {agent_id}: {exc}"
-                if why:
-                    print(f"SPAWN REFUSED: {why}")
-                    try:
-                        killed = pty_daemon.send_command({
-                            "cmd": "kill", "agent_id": agent_id,
-                            "origin": {"source": "liteharness-spawn-floor", "actor_id": resolved_parent},
-                        })
-                        if not killed.get("ok"):
-                            raise RuntimeError(killed.get("error", "daemon did not confirm kill"))
-                    except Exception as exc:
-                        print(f"FATAL CLEANUP FAILED for PTY {agent_id}: {exc}")
-                    sys.exit(2)
+        # Pre-create presence file with spawn_mode so send-input auto-routes
+        agents_dir = config.get_root() / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        presence_path = agents_dir / f"{agent_id}.json"
+        config.atomic_write_json(presence_path, {
+            "agent_id": agent_id,
+            "spawn_mode": "pty",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "name": name,
+            "model": resolved_model,
+        })
 
         kind = "process" if exec_cmd else "Claude session"
         print(f"Spawned {kind} (PTY mode):")
