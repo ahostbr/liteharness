@@ -69,6 +69,64 @@ def test_owner_launcher_requires_executable_position_not_private_identity(
     if refused:
         assert "[owner-launcher]" in reason
 
+@pytest.mark.parametrize("shell", ["powershell", None])
+@pytest.mark.parametrize("command, refused", [
+    ("Get-ChildItem . | Where-Object Name -Match 'a|run'", False),
+    ('Get-ChildItem . | Where-Object Name -Match "a|run"', False),
+    ("Get-ChildItem . | Where-Object Name -Match 'receipt|run|build'", False),
+    ("run.bat", True),
+    ("& 'run.bat'", True),
+    (". 'run.bat'", True),
+    ('& "run"', True),
+    ('"./run.bat"', True),
+    ("bash -c 'run'", True),
+    ('cmd /c "run.bat"', True),
+    ("Get-ChildItem . | Where-Object Name -Match 'a|run'; run.bat", True),
+    ("Get-ChildItem . | Where-Object Name -Match 'a' | run", True),
+    ('Get-ChildItem . | Where-Object Name -Match "a|$(run)"', True),
+    ("bash -c 'echo a|run'", True),
+    ('cmd /c "echo a|run"', True),
+    ("'x' | & 'run'", True),
+    ("'run'", True),
+    ("Write-Output 'receipt|run|build'", False),
+    ('Select-Object -Property "receipt|run|build"', False),
+    ("Select-Object -Property 'receipt|run|build'", False),
+    ("Invoke-Expression 'echo a|run'", True),
+    ("& 'cmd' /c 'echo a|run'", True),
+    ("Get-ChildItem . | Where-Object Name -Match 'a|run", True),
+    ("helper.cmd 'a|run|build'", True),
+    ("foo.exe 'a|run'", True),
+])
+def test_quoted_match_pattern_is_data_not_a_launcher(tmp_path, command, refused, shell):
+    """T0710: only proven PowerShell can treat apostrophes as literal quotes."""
+    # Unknown shell retains CMD's interpretation: apostrophes do not quote pipes.
+    refused = refused or shell is None
+    reason = deny_floor.refusal(command, tmp_path, shell=shell)
+    assert bool(reason) is refused, reason
+    if refused:
+        assert "[owner-launcher]" in reason
+
+
+@pytest.mark.parametrize("extensions, refused", [
+    ([], True),
+    ([".exe"], False),
+    ([".cmd"], True),
+    ([".exe", ".cmd"], True),
+    ([".exe", ".ps1"], True),
+])
+def test_plain_quoted_pipe_requires_native_argv_proof(tmp_path, monkeypatch, extensions, refused):
+    """Inert PATH fixtures prove forwarding, never execute candidate commands."""
+    monkeypatch.setattr(deny_floor, "_is_windows", lambda: True)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD;.BAT")
+    for extension in extensions:
+        (tmp_path / ("probe" + extension)).write_text("", encoding="utf-8")
+    command = "probe 'a|run|build'"
+    reason = deny_floor.refusal(command, tmp_path, shell="powershell")
+    assert bool(reason) is refused, reason
+    assert "[owner-launcher]" in deny_floor.refusal(command, tmp_path, shell=None)
+
+
 @pytest.mark.parametrize("command, refused", [
     ("@'\nrun = vi.fn();\n'@ | Add-Content tests.ts", False),
     ("@'\nrun\n'@", False),
