@@ -214,11 +214,21 @@ def validate_child(expected, require_marker=True):
 
 
 def run_owned(action, request, expected, require_marker=True):
-    python = validate_environment(expected, require_marker)
-    process = subprocess.run([str(python), '-I', '-m', 'liteharness.memory_semantic', action],
-        input=json.dumps({'base': expected, 'request': request}), text=True, encoding='utf-8',
-        stdout=subprocess.PIPE, stderr=sys.stderr, timeout=900,
-        env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+    validated = False
+    try:
+        python = validate_environment(expected, require_marker)
+        validated = True
+        process = subprocess.run([str(python), '-I', '-m', 'liteharness.memory_semantic', action],
+            input=json.dumps({'base': expected, 'request': request}), text=True, encoding='utf-8',
+            stdout=subprocess.PIPE, stderr=sys.stderr, timeout=900,
+            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+    except Exception as error:
+        # Timeouts/crashes stay child-owned: its capture may already have written.
+        if action == 'search' and (not validated or isinstance(error, OSError)):
+            import lookup_events
+            with lookup_events.capture(request['query'], request.get('mode', 'keyword'), request.get('seat')):
+                raise
+        raise
     if len(process.stdout.encode('utf-8')) > 1024 * 1024:
         raise RuntimeError('Optional semantic reply exceeded bound')
     envelope = json.loads(process.stdout)

@@ -112,6 +112,131 @@ def test_semantic_only_routes_once_through_validated_environment(corpus):
         memory_lookup.dispatch('search', {'query': 'canary', 'mode': 'semantic'}, semantic_child=True)
 
 
+@pytest.mark.parametrize('mode', ['semantic', 'hybrid'])
+@pytest.mark.parametrize('boundary', ['validation', 'spawn'])
+def test_semantic_start_failure_records_one_error_and_preserves_exception(corpus, mode, boundary, capsys):
+    import lookup_events as events
+    root, _ = corpus
+    expected = identity(root)
+    failure = OSError('fixture semantic process could not start')
+    with patch.object(semantic, 'readiness', return_value=(True, None)), \
+            patch.object(semantic, 'base_identity', return_value=expected), \
+            patch.object(semantic, 'validate_environment', side_effect=failure if boundary == 'validation' else None, return_value=Path(sys.executable)), \
+            patch.object(semantic.subprocess, 'run', side_effect=failure) as run:
+        with pytest.raises(OSError) as caught:
+            memory_lookup.dispatch('search', {'query': 'spawn canary', 'mode': mode, 'seat': 'fixture-seat'})
+    assert caught.value is failure
+    assert run.call_count == (boundary == 'spawn')
+    assert capsys.readouterr().out == ''
+    spool = sources.home() / 'lookup-events.jsonl'
+    rows = [json.loads(line) for line in spool.read_text(encoding='utf-8').splitlines()] if spool.exists() else []
+    assert len(rows) == 1, 'pre-child failure must leave exactly one lookup event'
+    event = rows[0]
+    assert events.valid_event(event)
+    assert event['query'] == 'spawn canary'
+    assert event['status'] == 'error'
+    assert event['mode'] == mode
+    assert event['seat'] == 'fixture-seat'
+    assert event['error'] == str(failure)
+    assert event['hits'] == [] and event['fallback'] is None
+
+
+@pytest.mark.parametrize('action', ['identity', 'install'])
+@pytest.mark.parametrize('boundary', ['validation', 'spawn'])
+def test_non_search_start_failure_records_no_lookup(corpus, action, boundary):
+    root, _ = corpus
+    failure = OSError('fixture startup failure')
+    with patch.object(semantic, 'validate_environment', side_effect=failure if boundary == 'validation' else None, return_value=Path(sys.executable)), \
+            patch.object(semantic.subprocess, 'run', side_effect=failure):
+        with pytest.raises(OSError) as caught:
+            semantic.run_owned(action, {}, identity(root))
+    assert caught.value is failure
+    assert not (sources.home() / 'lookup-events.jsonl').exists()
+
+
+@pytest.mark.parametrize('spool_fails', [False, True])
+def test_validation_runtime_error_survives_telemetry_failure(corpus, spool_fails):
+    import lookup_events as events
+    root, _ = corpus
+    failure = RuntimeError('fixture identity changed')
+    with patch.object(semantic, 'validate_environment', side_effect=failure), \
+            patch.object(semantic.subprocess, 'run') as run, \
+            patch.object(events, 'append', wraps=events.append, side_effect=OSError('disk full') if spool_fails else None):
+        with pytest.raises(RuntimeError) as caught:
+            semantic.run_owned('search', {'query': 'validation canary', 'mode': 'semantic'}, identity(root))
+    assert caught.value is failure
+    run.assert_not_called()
+    rows = events.recent()
+    assert len(rows) == (0 if spool_fails else 1)
+    if rows:
+        assert rows[0]['status'] == 'error' and rows[0]['error'] == str(failure)
+
+
+@pytest.mark.parametrize('outcome,child_captured', [
+    ('result', True), ('error', True), ('timeout', True), ('crash', True),
+    ('timeout', False), ('crash', False),
+])
+def test_started_child_remains_only_event_owner(corpus, outcome, child_captured):
+    import lookup_events as events
+    import lookup_evidence
+    root, _ = corpus
+    expected = identity(root)
+    request = {'query': 'child canary', 'mode': 'semantic'}
+    child_failure = RuntimeError('fixture child lookup failed')
+    timeout = semantic.subprocess.TimeoutExpired('fixture child', 900)
+
+    def child_process(argv, **kwargs):
+        envelope = {'type': 'result', 'data': {'results': []}}
+        if child_captured:
+            try:
+                envelope['data'] = memory_lookup.dispatch('search', request, semantic_child=expected)
+            except RuntimeError as error:
+                envelope = {'type': 'error', 'message': str(error)}
+        if outcome == 'timeout':
+            raise timeout
+        return semantic.subprocess.CompletedProcess(argv, 0 if outcome == 'result' else 1,
+                                                     stdout='' if outcome == 'crash' else json.dumps(envelope))
+
+    with patch.object(semantic, 'readiness', return_value=(True, None)), \
+            patch.object(semantic, 'base_identity', return_value=expected), \
+            patch.object(semantic, 'validate_environment', return_value=Path(sys.executable)), \
+            patch.object(semantic, 'validate_child'), \
+            patch.object(lookup_evidence, 'search_evidence', return_value={'results': []}, side_effect=child_failure if outcome == 'error' else None), \
+            patch.object(semantic.subprocess, 'run', side_effect=child_process):
+        if outcome == 'result':
+            assert memory_lookup.dispatch('search', request) == {'results': []}
+        else:
+            error_type = {'error': RuntimeError, 'timeout': semantic.subprocess.TimeoutExpired, 'crash': json.JSONDecodeError}[outcome]
+            with pytest.raises(error_type) as caught:
+                memory_lookup.dispatch('search', request)
+            if outcome == 'timeout':
+                assert caught.value is timeout
+            elif outcome == 'error':
+                assert str(caught.value) == str(child_failure)
+    spool = sources.home() / 'lookup-events.jsonl'
+    rows = [json.loads(line) for line in spool.read_text(encoding='utf-8').splitlines()] if spool.exists() else []
+    assert len(rows) == int(child_captured)
+    if rows:
+        assert rows[0]['status'] == ('error' if outcome == 'error' else 'empty')
+        assert events.valid_event(rows[0])
+
+
+def test_spawn_failure_keeps_one_terminal_stdout_envelope(corpus, capsys):
+    import io
+    root, _ = corpus
+    failure = OSError('fixture spawn failed')
+    request = {'query': 'protocol canary', 'mode': 'semantic'}
+    with patch.object(semantic, 'readiness', return_value=(True, None)), \
+            patch.object(semantic, 'base_identity', return_value=identity(root)), \
+            patch.object(semantic, 'validate_environment', return_value=Path(sys.executable)), \
+            patch.object(semantic.subprocess, 'run', side_effect=failure), \
+            patch.object(sys, 'argv', ['memory_lookup', 'search']), \
+            patch.object(sys, 'stdin', io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))):
+        assert memory_lookup.main() == 1
+    assert [json.loads(line) for line in capsys.readouterr().out.splitlines()] == [
+        {'type': 'error', 'message': str(failure)}]
+
+
 def test_pip_targets_owned_only_and_strips_destination_configuration(corpus):
     root, _ = corpus
     expected = identity(root)
