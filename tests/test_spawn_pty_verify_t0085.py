@@ -51,10 +51,13 @@ def launch(monkeypatch, tmp_path):
 
     monkeypatch.setattr(fleet_policy, "verify_seat", check)
 
-    def run(*, row=None, command=None, kill_result=None, launch_ok=True, delayed=False, duplicate=False):
+    def run(*, row=None, command=None, kill_result=None, launch_ok=True, delayed=False, duplicate=False,
+            name=None, before_presence=None):
         command = command or "litetui --backend codex --model gpt-6.1-sol --thinking-level high"
 
         def publish(agent_id):
+            if before_presence:
+                before_presence()
             directory = tmp_path / "agents"
             directory.mkdir(exist_ok=True)
             data = dict(agent_id="real-seat", provisional_id=agent_id,
@@ -86,7 +89,7 @@ def launch(monkeypatch, tmp_path):
 
         monkeypatch.setattr(pty_daemon, "send_command", daemon)
         try:
-            cli.cmd_spawn(cwd=str(tmp_path), pty_mode=True, exec_cmd=command)
+            cli.cmd_spawn(cwd=str(tmp_path), pty_mode=True, exec_cmd=command, name=name)
         except SystemExit as exc:
             return exc.code, calls, verified, now[0]
         return 0, calls, verified, now[0]
@@ -120,22 +123,24 @@ def test_pty_launch_verifies_the_joined_seat_not_the_provisional_row(launch, cap
     {"agent_id": "other-seat"},  # filename and identity must agree
     {"model": "unknown"},
 ])
-def test_mismatch_or_unverified_seat_is_refused_and_only_minted_pty_is_killed(launch, capsys, row):
+def test_mismatch_or_unverified_seat_is_refused_and_only_minted_pty_is_killed(launch, capsys, row, tmp_path):
     code, calls, verified, elapsed = launch(row=row)
     assert code == 2
     assert [r["cmd"] for r in calls] == ["spawn", "kill"]
     assert calls[1]["agent_id"] == calls[0]["agent_id"]
     assert elapsed <= 90
+    assert not (tmp_path / "agents" / f'{calls[0]["agent_id"]}.json').exists()
     out = capsys.readouterr().out
     assert "SEAT FAILED" in out and "Spawned process" not in out
 
 
-def test_failed_kill_is_reported_not_hidden_as_success(launch, capsys):
+def test_failed_kill_is_reported_not_hidden_as_success(launch, capsys, tmp_path):
     code, calls, verified, elapsed = launch(row={"model": "gpt-6-astra"},
                                          kill_result={"ok": False, "error": "mock kill failed"})
     assert code == 2
     out = capsys.readouterr().out
     assert "FATAL CLEANUP FAILED" in out and "mock kill failed" in out
+    assert not (tmp_path / "agents" / f'{calls[0]["agent_id"]}.json').exists()
 
 
 def test_failed_launch_does_not_verify_or_kill(launch, tmp_path):
@@ -203,3 +208,16 @@ def test_posix_shell_wrappers_judge_the_program_not_the_prompt(shell, command, r
         assert why and why.startswith("SPAWN REFUSED")
     else:
         assert why is None
+
+
+@pytest.mark.parametrize("name", [None, "T0085-Probe-Test"])
+def test_placeholder_does_not_block_strict_owned_registration(launch, tmp_path, name):
+    from liteharness.strict_registration import validate_available_name
+
+    def registration_preflight():
+        validate_available_name(tmp_path, name or "T0085-Probe-Test")
+
+    code, calls, verified, elapsed = launch(name=name, before_presence=registration_preflight)
+    assert code == 0 and verified[0][0] == "real-seat"
+    assert not (tmp_path / "agents" / f'{calls[0]["agent_id"]}.json').exists()
+    assert (tmp_path / "agents" / "real-seat.json").exists()

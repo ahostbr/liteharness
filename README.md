@@ -154,7 +154,29 @@ liteharness pty-list                     # List sessions
 liteharness pty-kill <id>                # Kill session
 ```
 
-**Security:** Bearer token auth, executable whitelist (claude/codex/python only), shell metachar block, agent ID validation, max 20 sessions, input length caps.
+**Security:** Bearer token auth, executable whitelist, shell metachar block, agent ID validation, max 20 sessions, input length caps.
+
+#### LiteTUI seats through `--pty --exec` (Windows)
+
+Use the whitelisted `cmd /c` wrapper for an installed `litetui.cmd` launcher;
+LiteTUI itself is not in the daemon's executable whitelist. A fresh owned seat
+needs an unused name, a fresh UUID, and complete execution settings:
+
+```powershell
+$id = [guid]::NewGuid().ToString()
+liteharness spawn --pty --cwd C:/work/project --name PTY-Worker --exec "cmd /c litetui.cmd --create-agent PTY-Worker --agent-id $id --backend codex --model gpt-6-astra --thinking-level high"
+```
+
+`--exec` stays literal: spawn does not inject creation flags into arbitrary
+wrapped commands or change an existing agent's saved settings. Without explicit
+creation, LiteTUI selects an existing/default owned agent; conflicting execution
+flags are refused by LiteTUI. The launcher waits up to 90 seconds for the seat's
+UUID presence row to report the minted PTY ID as `provisional_id`, then verifies
+its effective model/thinking. A failed join or verification refuses and kills the
+PTY; its temporary presence row is removed even if the kill fails (reported
+separately). A verified join also removes the temporary row, leaving the seat's
+UUID row authoritative. Use `read-output <pty-id>` to inspect startup while it is
+pending, and `pty-kill <pty-id>` to close a verified seat.
 
 ### UIAutomation (Headed Mode)
 

@@ -5257,6 +5257,8 @@ def cmd_spawn(
             brief_path = _write_spawn_brief(bootstrap)
             context_env["LITEHARNESS_SPAWN_BRIEF"] = str(brief_path)
 
+        program, asked_backend, asked_model, asked_thinking = (
+            _spawn_exec_request(model, exec_cmd) if exec_cmd else ("", None, None, None))
         agent_id = f"pty-{int(time.time())}-{os.getpid()}"
         # The daemon session id, passed through so the agent's own presence
         # records it — that link is what lets `kill <UUID>` find the daemon
@@ -5272,7 +5274,9 @@ def cmd_spawn(
             "agent_id": agent_id,
             "spawn_mode": "pty",
             "started_at": datetime.now(timezone.utc).isoformat(),
-            "name": name,
+            # A placeholder must not claim the owned seat's name without its PID:
+            # strict registration would refuse the real child as a conflicting owner.
+            "name": agent_id if program == "litetui" else name,
             "model": resolved_model,
         })
 
@@ -5290,9 +5294,8 @@ def cmd_spawn(
             print(f"Error: {result.get('error', 'unknown')}")
             sys.exit(1)
 
-        if exec_cmd:
-            program, asked_backend, asked_model, asked_thinking = _spawn_exec_request(model, exec_cmd)
-            if program == "litetui":
+        if program == "litetui":
+            try:
                 try:
                     why = _verify_pty_seat(agent_id, config.get_root(), backend=asked_backend,
                                            model=asked_model, thinking=asked_thinking)
@@ -5310,6 +5313,10 @@ def cmd_spawn(
                     except Exception as exc:
                         print(f"FATAL CLEANUP FAILED for PTY {agent_id}: {exc}")
                     sys.exit(2)
+            finally:
+                # The UUID row owns a verified join. On refusal, remove the
+                # launcher's placeholder even when daemon cleanup itself failed.
+                presence_path.unlink(missing_ok=True)
 
         kind = "process" if exec_cmd else "Claude session"
         print(f"Spawned {kind} (PTY mode):")
