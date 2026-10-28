@@ -17,6 +17,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 THIS_PKG_ROOT = Path(__file__).resolve().parents[1]
 DEST_ROOT = THIS_PKG_ROOT / "liteharness" / "catalog"
@@ -273,7 +274,7 @@ def restore_catalog_init(dest_root: Path, preserved: str | None) -> None:
           f"defines {', '.join(REQUIRED_CATALOG_NAMES)})")
 
 
-def assert_catalog_imports(pkg_root: Path) -> None:
+def assert_catalog_imports(pkg_root: Path, catalog_root: Path | None = None) -> None:
     """The gate that would have caught 0.3.1: IMPORT it, in a fresh interpreter.
 
     Reading the file proves the text is right; only an import proves the package is.
@@ -281,8 +282,19 @@ def assert_catalog_imports(pkg_root: Path) -> None:
     `liteharness.catalog` in sys.modules from an earlier import, and a cached module is
     the one thing that could make a broken package look fine.
     """
-    code = (
-        "from liteharness.catalog import " + ", ".join(REQUIRED_CATALOG_NAMES) + "\n"
+    # Validate the selected destination, not an unrelated installed/checkout copy.
+    if catalog_root is None:
+        imports = "from liteharness.catalog import " + ", ".join(REQUIRED_CATALOG_NAMES) + "\n"
+    else:
+        imports = (
+            "import importlib.util, sys\n"
+            f"spec = importlib.util.spec_from_file_location('liteharness.catalog', {str(catalog_root.resolve() / '__init__.py')!r})\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = module\n"
+            "spec.loader.exec_module(module)\n"
+            + "\n".join(f"{name} = module.{name}" for name in REQUIRED_CATALOG_NAMES) + "\n"
+        )
+    code = imports + (
         "r = catalog_root()\n"
         "assert r.is_dir(), f'catalog_root() -> {r} which is not a directory'\n"
         "s = subtree('skills')\n"
@@ -292,8 +304,9 @@ def assert_catalog_imports(pkg_root: Path) -> None:
         "print(f'[gate] catalog imports: {n} skills under {s}')\n"
     )
     r = subprocess.run(
-        [sys.executable, "-c", code], cwd=str(pkg_root),
+        [sys.executable, "-B", "-c", code], cwd=str(pkg_root),
         capture_output=True, text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
     if r.returncode != 0:
         raise SystemExit(
@@ -399,7 +412,7 @@ def sync(src_root: Path, dest_root: Path, clean: bool,
             ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", *PRIVATE_SKILLS),
         )
         n = sum(1 for _ in d.rglob("*") if _.is_file())
-        print(f"[copy] {rel_src} -> {d.relative_to(THIS_PKG_ROOT)} ({n} files)")
+        print(f"[copy] {rel_src} -> {d} ({n} files)")
 
     # Replace each kept skill WHOLE: rmtree first, or the source's stale files would
     # survive beside the kept ones (ls-gen-image-or-video's chatgpt_*.py, deleted in dbaf186).
@@ -429,11 +442,56 @@ def sync(src_root: Path, dest_root: Path, clean: bool,
         "hash": short_sha(dest_root),
     }
     (dest_root / "PROVENANCE.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    restore_catalog_init(DEST_ROOT, preserved_init)
+    restore_catalog_init(dest_root, preserved_init)
     # Text-level checks above prove the FILE is right; this proves the PACKAGE is.
-    assert_catalog_imports(THIS_PKG_ROOT)
+    assert_catalog_imports(THIS_PKG_ROOT, dest_root)
     print(f"[ok] wrote PROVENANCE.json — {file_count} files, hash {manifest['hash']}")
     return manifest
+
+
+def dry_run(src_root: Path, current_root: Path, clean: bool,
+            source_commit: str | None = None) -> list[dict[str, str | None]]:
+    """Vendor only in a disposable copy and return a complete before/after diff.
+
+    Seed the copy with the current catalog so KEEP and --no-clean have exactly
+    the same inputs as a real sync. Neither input tree is ever a destination.
+    Runtime files are included in the diff too; no change is hidden by the
+    release hash projection. Binary/non-UTF-8 contents are represented by size
+    and SHA256 rather than embedding potentially large runtime databases.
+    """
+    if any(THIS_PKG_ROOT.resolve().is_relative_to(root.resolve())
+           for root in (src_root, current_root)):
+        raise SystemExit("[dry-run] temporary workspace must be outside both input trees")
+
+    def contents(root: Path) -> dict[str, tuple[str, str]]:
+        files = {}
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            text = f"[binary: {len(data)} bytes; sha256={digest}]"
+            if b"\0" not in data:
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    pass
+            files[path.relative_to(root).as_posix()] = (digest, text)
+        return files
+
+    before = contents(current_root)
+    # Keep temporary writes local to this checkout, never in the source tree.
+    with TemporaryDirectory(prefix=".catalog-dry-run-", dir=THIS_PKG_ROOT) as temp:
+        staged = Path(temp) / "catalog"
+        shutil.copytree(current_root, staged)
+        sync(src_root, staged, clean=clean, source_commit=source_commit)
+        after = contents(staged)
+    return [
+        {"path": path, "before": before[path][1] if path in before else None,
+         "after": after[path][1] if path in after else None,
+         "verdict": "added" if path not in before else "removed" if path not in after else "changed"}
+        for path in sorted(before.keys() | after.keys()) if before.get(path) != after.get(path)
+    ]
 
 
 def main() -> None:
@@ -459,9 +517,34 @@ def main() -> None:
         "--source-commit",
         help="LiteSuite commit that --source was `git archive`d from; stamped into PROVENANCE.json",
     )
+    p.add_argument(
+        "--dry-run", action="store_true",
+        help="Sync a fresh temporary copy only; print a JSON before/after diff against --dest",
+    )
+    p.add_argument(
+        "--diff-output", type=Path,
+        help="Write the dry-run JSON diff here instead of stdout (outside both input trees)",
+    )
     args = p.parse_args()
+    if args.diff_output:
+        if not args.dry_run:
+            p.error("--diff-output requires --dry-run")
+        output = args.diff_output.resolve()
+        if any(output.is_relative_to(root.resolve())
+               for root in (args.source, args.dest, DEST_ROOT)):
+            p.error("--diff-output must be outside the source and catalog trees")
     try:
-        sync(args.source, args.dest, clean=not args.no_clean, source_commit=args.source_commit)
+        if args.dry_run:
+            changes = dry_run(args.source, args.dest, clean=not args.no_clean,
+                              source_commit=args.source_commit)
+            diff = json.dumps(changes, indent=2, ensure_ascii=False) + "\n"
+            if args.diff_output:
+                args.diff_output.write_text(diff, encoding="utf-8")
+                print(f"[dry-run] {len(changes)} changed files; diff: {args.diff_output}")
+            else:
+                print(diff, end="")
+        else:
+            sync(args.source, args.dest, clean=not args.no_clean, source_commit=args.source_commit)
     except SystemExit:
         raise
     except Exception as exc:
