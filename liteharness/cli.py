@@ -3622,8 +3622,10 @@ SPAWN_FLAGS: tuple[tuple[str, str, bool, str], ...] = (
     ("--resume", "resume_agent_id", True, "resume a named Claude Code or LiteTUI seat (or LiteTUI agent id) with --split; a live seat is messaged, never closed"),
     ("--convo", "resume_convo_id", True, "conversation id; overrides LiteTUI lookup, must match a named Claude seat"),
     ("--kill-old", "kill_old", False, "close the old seat before resuming (requires --resume)"),
-    ("--backend", "backend", True, "LiteTUI backend override when resuming"),
-    ("--thinking-level", "thinking_level", True, "LiteTUI thinking level override when resuming"),
+    ("--backend", "backend", True, "LiteTUI backend for fresh spawn or resume override"),
+    ("--thinking-level", "thinking_level", True, "LiteTUI thinking level for fresh spawn or resume override"),
+    ("--start-server", "start_server", False, "fresh --cli litetui only: forward explicit server-start consent"),
+    ("--model-path", "model_path", True, "fresh --cli litetui only: model/artifact path forwarded unchanged; F: is storage, never a load source"),
     ("--takeover", "takeover", False, "fresh LiteTUI spawn only: take a name already in names.json (default: refused; resume it instead)"),
     ("--spawned-by", "spawned_by", True, "explicit requesting agent id (fresh or resumed spawn)"),
     ("--args", "additional_args", True, "extra arguments appended to the claude command"),
@@ -4145,6 +4147,7 @@ def _spawn_litetui_agent(
     takeover: bool = False,
     owner_title: str | None = None, memory_dir: str | None = None,
     system_prompt_file: str | None = None,
+    start_server: bool = False, model_path: str | None = None,
 ) -> None:
     """One LiteTUI launch owner; the bridge resolves/places but never governs."""
     from . import agent_names, fleet_policy
@@ -4230,6 +4233,10 @@ def _spawn_litetui_agent(
                                       agent_id=resolved.get('agentId'), backend=backend,
                                       model=model, thinking_level=thinking_level, fresh=True,
                                       system_prompt_file=system_prompt_file)
+        if start_server:
+            launch["args"].append("--start-server")
+        if model_path is not None:
+            launch["args"].extend(["--model-path", model_path])
         if owner_title:
             # LiteTUI owner mode creates its own identity from the memory folder.
             # Keep the resolver's agent id in env, not the mutually exclusive argv.
@@ -4477,6 +4484,8 @@ def cmd_spawn(
     owner_title: str | None = None,
     memory_dir: str | None = None,
     system_prompt_file: str | None = None,
+    start_server: bool = False,
+    model_path: str | None = None,
 ) -> None:
     """Spawn a new Claude Code session or resume a Claude Code or LiteTUI split.
 
@@ -4490,6 +4499,17 @@ def cmd_spawn(
     if spawn_cli not in ("claude", "litetui", "codex"):
         print("SPAWN REFUSED: --cli must be claude, litetui or codex. Nothing was spawned.")
         sys.exit(2)
+    if (start_server or model_path is not None) and (
+            spawn_cli != "litetui" or resume_agent_id or resume_convo_id):
+        print("SPAWN REFUSED: --start-server / --model-path require a fresh --cli litetui spawn. "
+              "Nothing was spawned.")
+        sys.exit(2)
+    if model_path is not None:
+        import ntpath
+        # Windows drive syntax must be checked even when the harness runs on POSIX.
+        if ntpath.splitdrive(model_path)[0].lower() in ("f:", "\\\\?\\f:", "\\\\.\\f:"):
+            print("SPAWN REFUSED: --model-path on F: is storage, never a load source. Nothing was spawned.")
+            sys.exit(2)
     if system_prompt_file is not None and (spawn_cli == "codex" or
             (not resume_agent_id and (spawn_cli != "litetui" or resume_convo_id))):
         print("SPAWN REFUSED: --system-prompt-file requires a fresh --cli litetui spawn or "
@@ -4606,7 +4626,8 @@ def cmd_spawn(
                              backend=backend, thinking_level=thinking_level,
                              spawned_by=spawned_by, takeover=takeover,
                              owner_title=owner_title, memory_dir=memory_dir,
-                             system_prompt_file=system_prompt_file)
+                             system_prompt_file=system_prompt_file,
+                             start_server=start_server, model_path=model_path)
         return
 
     if resume_agent_id or resume_convo_id:
