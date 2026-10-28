@@ -99,6 +99,10 @@ proves the interpreter with shell="powershell". Unknown / other shells retain
 full scanning; syntax or a command's shell argument is not proof. Expandable strings,
 execution sinks and ambiguous expression contexts remain scanned; this is a
 small conservative allowlist, not a shell parser or a general quotation filter.
+Under proven PowerShell, pipes in plain quoted arguments to known data cmdlets
+or proven native argv consumers are likewise data, not launch boundaries.
+Quoted command heads, execution sinks, unproven heads and richer quoted syntax
+retain the existing scan; unknown shells never gain this argument exemption.
 The jobs-file ceiling is the same shape: a path in a variable, a write from
 inside a script file or through a reader's own exec feature, an 8.3 short name,
 an admin share or a \\\\?\\ prefix, a link made to jobs.json BEFORE this rule was
@@ -1186,6 +1190,13 @@ _EXECUTION_SINKS = frozenset({
 _PATTERN_HEADS = frozenset({"rg", "grep", "egrep", "findstr", "select-string", "sls"})
 #: PowerShell cmdlets: resolved by PowerShell itself, never a file found on PATH.
 _PATTERN_CMDLETS = frozenset({"select-string", "sls"})
+#: Known PowerShell data consumers; other heads need native argv proof below.
+#: No parameter-specific exception: their plain quoted arguments remain data.
+_LITERAL_ARGUMENT_CMDLETS = _PATTERN_CMDLETS | frozenset({
+    "where-object", "where", "?", "select-object", "select", "measure-object", "measure",
+    "write-output", "echo", "write-host", "get-childitem", "gci", "get-item", "gi",
+    "get-content", "gc", "get-filehash", "test-path",
+})
 #: Options that make a pattern head RUN a program named by an argument.
 _PATTERN_EXEC_OPTIONS = ("--pre", "--hostname-bin")
 #: Heads whose quoted argument is a PROGRAM they run: awk system() and pipes, sed `e`.
@@ -1338,6 +1349,38 @@ def _pattern_literal_spans(command: str, shell: str | None = "powershell") -> li
         quoted = [(a, b) for a, b, quote in statement["args"] if quote == "'"]
         if quoted and native.setdefault(head, _native_head(head)):
             spans.extend(quoted)
+    return spans
+
+
+def _plain_literal_argument_spans(command: str) -> list[tuple[int, int]]:
+    """Plain PowerShell argument text, including pipes that are not syntax.
+
+    Use only with a proven PowerShell. Keep the existing fail-closed treatment
+    of richer strings: no expansion, escapes, nested quotes or other executable
+    punctuation. The statement scanner never excuses quoted argv0; a dot-source
+    head and known runners/evaluators likewise cannot make their arguments data.
+    Only named data cmdlets or proven native argv consumers qualify: unknown
+    heads and batch wrappers may reparse a pipe even under PowerShell.
+    """
+    executing = (_EXECUTION_SINKS | _WRAPPERS | _EXEC_READERS | _SCRIPT_HEADS
+                 | _PURE_RUNNERS | _RUNNER_SPECS.keys()
+                 | {"\0", "command", "time", "python", "python3", "node"})
+    spans = []
+    native: dict[str, bool] = {}
+    for statement in _scan_statements(command) or ():
+        head = statement["head"]
+        if head in executing or not statement["args"]:
+            continue
+        if head not in _LITERAL_ARGUMENT_CMDLETS:
+            if not re.fullmatch(r"[\w-]+", head):
+                continue  # paths, explicit extensions and quoted heads are unproven
+            if head not in native:
+                native[head] = _native_head(head)
+            if not native[head]:
+                continue
+        for start, end, _ in statement["args"]:
+            if re.fullmatch(r"[\w \t./:|=-]*", command[start + 1:end - 1]):
+                spans.append((start, end))
     return spans
 
 
@@ -1513,9 +1556,10 @@ def _owner_launch(command: str, match: re.Match, base: Path | None, home: Path,
     # echo `run.bat`), so it starts a segment too. A `)` ends one: in
     # `if 1==2 (echo a) else run.bat` the command is `else`'s, not echo's (P1).
     boundaries = []
-    # A boundary character INSIDE a literal handed to a pattern-search head is
-    # pattern text, not syntax (trusted PowerShell only; see _pattern_literal_spans).
-    literals = _pattern_literal_spans(command) if shell == "powershell" else []
+    # Proven PowerShell only: boundaries inside pattern literals or plain quoted
+    # arguments are data. Unknown shells keep scanning (CMD does not quote with ').
+    literals = (_pattern_literal_spans(command) + _plain_literal_argument_spans(command)
+                if shell == "powershell" else [])
     openings = [*((m.end() - 1, None) for m in _OWNER_BOUNDARY.finditer(command[:start])
                   if not any(a < m.end() - 1 < b for a, b in literals)),
                 *((m.end() - 1, m.start()) for m in _SWITCH_LABEL_BOUNDARY.finditer(command[:start]))]
