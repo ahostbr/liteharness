@@ -2427,3 +2427,992 @@ def test_a_wrapper_around_something_else_still_passes(checkouts, template):
     home, _, litetui, _ = checkouts
     command = _wrap_spell(template, litetui)
     assert deny_floor.refusal(command, litetui, home) is None, command
+
+@pytest.mark.parametrize("template", [
+    "cp {src}/jobs.json {root}/",
+    "cp -r {src}/. {root}/",
+    "dd of={root}/jobs.json",
+])
+def test_added_recognition_keeps_path_check_failures_closed(roots, monkeypatch, template):
+    """S1's added question must not turn develop's failed path proof into ALLOW."""
+    home, workspace, root, _, src = roots
+    (src / SCHEDULE).write_text("{}", encoding="utf-8")
+    command = template.format(src=src.as_posix(), root=root.as_posix())
+    original = deny_floor.resolve_path
+
+    def failed(path, **kwargs):
+        if Path(path).is_relative_to(root):
+            raise deny_floor.UnresolvablePath(path, "injected filesystem failure")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(deny_floor, "resolve_path", failed)
+    assert deny_floor.jobs_write_target(command, workspace, home) is None
+    with pytest.raises(deny_floor.UnresolvablePath, match="injected filesystem failure"):
+        deny_floor.jobs_write_target(command, workspace, home, more=deny_floor.MORE)
+    assert "[unresolvable-path]" in deny_floor.refusal(command, workspace, home, more=deny_floor.MORE)
+
+
+# ── the recognizer's `more` keyword (T0306-S): recognitions a caller ADDS ──
+#
+# Each is named in MORE and is OFF unless the caller names it. Every row is
+# asked four ways: the default (no), its own class alone (yes), every OTHER class
+# together (no), and MORE (yes). So the default does not see it, the class's own
+# name is what turns it on, and no other class turns it on by accident.
+
+def _more_asked(command, cwd, home, name, under=None, more=frozenset()):
+    return (deny_floor.jobs_git_refusal(command, cwd, home, name=name, under=under, more=more)
+            or deny_floor.jobs_write_target(command, cwd, home, name=name, under=under, more=more))
+
+
+def _four_ways(command, cwd, home, cls, name, under=None):
+    return [bool(_more_asked(command, cwd, home, name, under, more))
+            for more in (frozenset(), frozenset({cls}), deny_floor.MORE - {cls}, deny_floor.MORE)]
+
+
+MORE_FORMS = [   # (class, command): {root} a data root, {src} a plain folder, NAME the file
+    # A: a copy, move or link of a same-named file INTO the folder
+    (deny_floor.COPY_INTO, "cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cp {src}/NAME {root}"),
+    (deny_floor.COPY_INTO, "mv {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cp -t {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp --target-directory={root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "Copy-Item {src}/NAME -Destination {root}"),
+    (deny_floor.COPY_INTO, "Copy-Item -Path {src}/NAME -Destination:{root}"),
+    (deny_floor.COPY_INTO, "Copy-Item {src}/NAME -Dest {root}"),
+    (deny_floor.COPY_INTO, "Copy-Item -Dest {root} {src}/NAME"),       # the abbreviation, not last
+    (deny_floor.COPY_INTO, "Copy-Item -Path:{src}/NAME -Destination {root}"),
+    (deny_floor.COPY_INTO, "Move-Item {src}/NAME {root}"),
+    (deny_floor.COPY_INTO, "mi {src}/NAME {root}"),
+    (deny_floor.COPY_INTO, "copy {src}/NAME {root} /Y"),
+    (deny_floor.COPY_INTO, "xcopy {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cd {root} && cp {src}/NAME ."),
+    (deny_floor.COPY_INTO, "cp {src}/*.json {root}/"),
+    (deny_floor.COPY_INTO, "cp {src}/* {root}/"),
+    (deny_floor.COPY_INTO, "ln -s {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "cd {root} && ln -s {src}/NAME"),
+    (deny_floor.COPY_INTO, "install -m 644 {src}/NAME {root}/"),
+    # fix 1: GNU getopt's grammar, not a list of spellings
+    (deny_floor.COPY_INTO, "cp --target={root} {src}/NAME"),         # a prefix of --target-directory
+    (deny_floor.COPY_INTO, "cp --target {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp --t={root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "mv --targ={root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp -t{root} {src}/NAME"),                # attached
+    (deny_floor.COPY_INTO, "cp -vt{root} {src}/NAME"),               # in a cluster
+    (deny_floor.COPY_INTO, "cp -vt {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "ln -st {root} {src}/NAME"),
+    (deny_floor.COPY_INTO, "install -t {root} -m 644 {src}/NAME"),
+    (deny_floor.COPY_INTO, "cp {src}/NAME -t {root}"),               # an option after the operands
+    (deny_floor.COPY_INTO, "cp -- {src}/NAME {root}/"),
+    # fix 1: a wrapper head in front
+    (deny_floor.COPY_INTO, "env cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "env -i A=1 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "env -C {root} cp {src}/NAME ."),
+    (deny_floor.COPY_INTO, "env -C{root} cp {src}/NAME ."),                # attached
+    (deny_floor.COPY_INTO, "command cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "exec cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "nice -n 5 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "timeout 20 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "timeout -s KILL 20s cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "nohup cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "stdbuf -o0 cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "sudo -u someone cp {src}/NAME {root}/"),
+    (deny_floor.COPY_INTO, "sudo -D {root} cp {src}/NAME ."),
+    (deny_floor.COPY_INTO, "timeout 20 env cp {src}/NAME {root}/"),
+    # fix 1: a PowerShell comma array, the name first
+    (deny_floor.COPY_INTO, "Copy-Item {src}/NAME,{src}/x.json {root}"),
+    (deny_floor.COPY_INTO, "cp -Destination {root} {src}/NAME"),            # PowerShell's cp alias
+    (deny_floor.COPY_INTO, "Copy-Item -Path {src}/x.json,{src}/NAME -Destination {root}"),
+    # G: a stream suffix on a FOLDER of the path word
+    (deny_floor.DOLLAR_PATH, 'echo x > "{root}::$INDEX_ALLOCATION/NAME"'),
+    (deny_floor.DOLLAR_PATH, 'rm "{root}:$I30:$INDEX_ALLOCATION/NAME"'),
+    (deny_floor.DOLLAR_PATH, 'Set-Content "{root}::$INDEX_ALLOCATION/NAME" x'),
+    (deny_floor.DOLLAR_PATH, 'cd "{root}::$INDEX_ALLOCATION" && rm NAME'),
+    # J: a `key=value` word with no dash
+    (deny_floor.KEY_VALUE, "dd if=/dev/null of={root}/NAME"),
+    (deny_floor.KEY_VALUE, "dd of={root}/NAME conv=notrunc"),
+    (deny_floor.KEY_VALUE, "somewriter out={root}/NAME"),
+    # K: a linking copy of the file (a second name that is written through later)
+    (deny_floor.LINK_COPY, "cp -l {root}/NAME {src}/alias"),
+    (deny_floor.LINK_COPY, "cp --link {root}/NAME {src}/alias"),
+    (deny_floor.LINK_COPY, "cp -fl {root}/NAME {src}/alias"),
+    (deny_floor.LINK_COPY, "cp --li {root}/NAME {src}/alias"),        # fix 1: prefixes of --link
+    (deny_floor.LINK_COPY, "cp --lin {root}/NAME {src}/alias"),    # E: the path inside a .NET call is its segment's head word
+    (deny_floor.CALL_PATH, "[IO.File]::WriteAllText('{root}/NAME','x')"),
+    (deny_floor.CALL_PATH, '[System.IO.File]::Delete("{root}/NAME")'),
+    (deny_floor.CALL_PATH, "[IO.File]::WriteAllText( '{root}/NAME', 'x')"),
+    (deny_floor.CALL_PATH, "$null = [IO.File]::WriteAllText('{root}/NAME','x')"),
+    (deny_floor.CALL_PATH, "[IO.File]::Copy('evil.json','{root}/NAME',$true)"),
+    (deny_floor.CALL_PATH, "[IO.File]::ReadAllText('{root}/NAME')"),   # over-block, stated
+]
+MORE_CONTROLS = [   # no class and no combination refuses these
+    "cp {src}/other.json {root}/", "cp {src}/NAME.bak {root}/", "cp {src}/NAME {src}/sub/",
+    "cp {src}/NAME {root}/renamed.json", "cp {root}/NAME {src}/", "mv {root}/other.json {src}/",
+    "robocopy {src} {root} /XF NAME", "robocopy {src} {root}",
+    "robocopy {src} {root} NAME", "rsync {src}/NAME {root}/",        # M forms left to S2 (fix 1)
+    "ln -T {src}/NAME {root}", "install -d {src}/NAME {root}/",       # no target folder; dirs only
+    "command -v cp {src}/NAME {root}/", "env -S 'cp {src}/NAME {root}/'",   # not a run; a string
+    "cp -S .bak {src}/x.json {root}/", "cp --suffix=NAME {src}/x.json {root}/",   # option values
+    "Copy-Item {src}/x.json,{src}/y.json {root}",
+    'echo x > "{root}/$x/NAME"', 'echo x > "{src}::$INDEX_ALLOCATION/NAME"',
+    "dd if={root}/NAME of={src}/copy", "dd if={root}/NAME",
+    "cp {root}/NAME {src}/backup", "cp -r {root}/NAME {src}/backup",
+    "Copy-Item -LiteralPath {root}/NAME -Destination {src}/backup",
+    "Copy-Item -Path {root}/NAME -Filter x -Destination {src}/backup",
+    "[IO.File]::WriteAllText('{src}/NAME','x')", "C:/tools/writer.exe --x",
+    "(Get-Item {root}/NAME).Delete()",   # E, held: the path is a READER's argument (no `shell_commands` change)
+]
+
+
+def _more_command(template, root, src, name):
+    return template.format(root=root.as_posix(), src=src.as_posix()).replace("NAME", name)
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("cls, template", MORE_FORMS)
+def test_more_adds_each_recognition_under_its_own_name_only(roots, cls, template, name):
+    home, workspace, litetui, marked, plain = roots
+    for root in (litetui, marked):
+        command = _more_command(template, root, plain, name)
+        assert _four_ways(command, workspace, home, cls, name) == [False, True, False, True], command
+        target = _more_asked(command, workspace, home, name, more=frozenset({cls}))
+        assert target == root / name or (isinstance(target, str) and "[jobs-file]" in target), command
+        if "*" not in template:   # a glob may match both names, and does
+            assert _more_asked(command, workspace, home, _other(name), more=deny_floor.MORE) is None, \
+                "the recognition follows the name asked about"
+    elsewhere = _more_command(template, plain / "x", plain, name)
+    (plain / "x").mkdir(exist_ok=True)
+    assert _more_asked(elsewhere, workspace, home, name, more=deny_floor.MORE) is None, "not a data root"
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template", MORE_CONTROLS)
+def test_more_leaves_these_alone(roots, template, name):
+    home, workspace, litetui, marked, plain = roots
+    (plain / "sub").mkdir(exist_ok=True)
+    for root in (litetui, marked):
+        command = _more_command(template, root, plain, name)
+        assert _more_asked(command, workspace, home, name, more=deny_floor.MORE) is None, command
+
+
+def test_more_names_seven_recognitions_and_defaults_to_none(roots):
+    assert deny_floor.MORE == {"copy-into", "dollar-path", "short-name", "key-value",
+                               "link-copy", "pathspec", "call-path"}
+    home, workspace, litetui, _, plain = roots
+    command = f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/"
+    assert deny_floor.refusal(command, workspace, home) is None, "default: the copy into is not seen"
+    assert "[jobs-file]" in deny_floor.refusal(command, workspace, home, more=deny_floor.MORE)
+
+
+#: Fix round 2 (R7, R8): (the shell the caller names, command), each really
+#: written in that shell on a temp root (the review's r3b/r3c rows).
+FIX2_FORMS = [
+    # R7: the grammar is the part's shell's, and every meaning a head has there
+    ("bash", "pwsh -NoProfile -c 'Copy-Item {src}/NAME {root}'"),
+    ("bash", "powershell -NoProfile -c 'Copy-Item {src}/NAME {root}'"),
+    ("powershell", "bash -c 'cp -t {root} {src}/NAME'"),
+    ("powershell", "cmd /d /c copy {src}\\NAME {root} /Y"),
+    ("powershell", "xcopy {src}\\NAME {root}\\ /Y /Q"),               # System32's xcopy from pwsh
+    ("powershell", "ln -f {src}/NAME {root}/"),                     # GNU's ln from pwsh
+    ("powershell", "cp.exe {src}/NAME {root}/"),
+    ("cmd", "cp -t {root} {src}/NAME"),                             # GNU's cp from cmd
+    ("cmd", "mv {src}/NAME {root}/"),
+    # R8: wrappers read as getopt clusters, and `time`
+    ("bash", "time cp {src}/NAME {root}/"),
+    ("bash", "time -p cp {src}/NAME {root}/"),
+    ("bash", "env - /usr/bin/cp {src}/NAME {root}/"),
+    ("bash", "env -iu X /usr/bin/cp {src}/NAME {root}/"),
+    ("bash", "timeout -vk 5 20 cp {src}/NAME {root}/"),
+    # R8: a wrapper's long option, by a prefix and with its value in the next word
+    ("bash", "env --chdir {root} cp {src}/NAME ."),
+    ("bash", "env --chd={root} cp {src}/NAME ."),
+    ("bash", "timeout --signal KILL 20 cp {src}/NAME {root}/"),
+    ("bash", "timeout --kill-after 5 20 cp {src}/NAME {root}/"),
+    # R8: PowerShell parameters that take a value; cmd's concatenation and /-Y
+    ("powershell", "Copy-Item {src}/* {root} -Exclude x.json"),
+    ("powershell", "Copy-Item {src}/* {root} -Filter NAME"),
+    ("powershell", "Copy-Item -Exclude x.json -Path {src}/NAME {root}"),
+    ("powershell", "Copy-Item -ea Stop {src}/NAME {root}"),                 # an alias that takes a value
+    ("powershell", "Copy-Item -pv p {src}/NAME {root}"),
+    ("cmd", "cd /d {root} && copy {src}\\NAME"),                            # one word: into the current folder
+    ("cmd", "copy /Y {src}\\NAME+{src}\\x.json {root}"),
+    ("cmd", "copy {src}\\NAME {root} /-Y"),
+    # fix 4 (C2 again): `copy` has PowerShell's reading in cmd now (a third positional is ignored), so only xcopy, which has none,
+    # tells a `/-Y` switch from a path.
+    ("cmd", "xcopy {src}\\NAME {root} /-Y"),
+]
+#: A FOLDER source holding the file, copied so its files land in the root (R8).
+FIX2_TREES = [
+    ("bash", "cp -r {src}/. {root}/"), ("bash", "cp -rT {src} {root}"), ("bash", "cp -a {src}/. {root}"),
+    ("cmd", "xcopy {src} {root} /E /Y /Q"), ("cmd", "copy {src} {root}"),
+    ("powershell", "xcopy {src} {root} /E /Y /Q"),
+]
+FIX2_LEFT = [   # not written into the root, or not this file
+    ("bash", "cp -r {src} {root}/"),            # lands in ROOT/src/, a folder of its own
+    ("bash", "cp -rT {empty} {root}"),          # the folder does not hold the file
+    ("bash", "cp {src}/. {root}/"),             # no -r: a folder is not copied
+    ("cmd", "move {src} {root}"),               # cmd's move renames the folder; not followed
+    ("powershell", "Copy-Item {src}/x.json {root} -Filter NAME"),
+]
+
+
+def _fix2(template, root, src, name, empty=None):
+    return (template.replace("{root}", root.as_posix()).replace("{src}", src.as_posix())
+            .replace("{empty}", (empty or src).as_posix()).replace("NAME", name))
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("shell, template", FIX2_FORMS + FIX2_TREES)
+def test_fix2_every_meaning_a_head_has_in_the_parts_shell(roots, shell, template, name):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / name).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for root in (litetui, marked):
+        command = _fix2(template, root, src, name)
+        for asked_as in (shell, None):
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
+            target = deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name, more=into)
+            assert target is not None, (asked_as, command)
+
+
+def test_fix2_no_refusal_round_0_had_is_lost(roots):
+    """The regression table's two shapes: after `cd $X` the base is unknown, and
+    an absolute destination still answers. Develop now rejects a NUL anywhere
+    in a command, before either copy is examined; that stricter answer stands."""
+    home, workspace, litetui, _, plain = roots
+    root, src = litetui.as_posix(), plain.as_posix()
+    into = frozenset({deny_floor.COPY_INTO})
+    for shell, command in (("bash", f"cd ${{env:TEMP}}; rm -rf x | cp -t {root} {src}/{OTHER_NAME}"),
+                           ("bash", f"cd $X && cp {src}/{OTHER_NAME} {root}/"),
+                           ("cmd", f"cp a {root}/.\x00 && cp {src}/{OTHER_NAME} {root}/"),
+                           ("bash", f"cp -r {src}/\x00x {root}/ ; cp {src}/{OTHER_NAME} {root}/")):
+        if "\x00" in command:
+            for more in (frozenset(), into):
+                with pytest.raises(deny_floor.UnresolvablePath, match="embedded null character"):
+                    deny_floor.jobs_write_target(command, workspace, home, shell=shell,
+                                                 name=OTHER_NAME, more=more)
+                assert "[unresolvable-path]" in deny_floor.refusal(
+                    command, workspace, home, shell=shell, more=more)
+            continue
+        assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME) is None
+        assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME,
+                                            more=into) == litetui / OTHER_NAME, command
+
+
+@pytest.mark.parametrize("shell", ["bash", "powershell", "cmd"])
+def test_fix2_a_linking_cp_is_asked_in_every_shell(roots, shell):
+    """GNU's cp is on PATH from every shell here: `cp -l FILE alias` is a link in each."""
+    home, workspace, litetui, _, plain = roots
+    command = f"cp -l {litetui.as_posix()}/{OTHER_NAME} {plain.as_posix()}/alias"
+    link = frozenset({deny_floor.LINK_COPY})
+    assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME) is None
+    assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME, more=link)
+
+
+@pytest.mark.parametrize("shell, template", FIX2_LEFT)
+def test_fix2_leaves_these_alone(roots, shell, template):
+    home, workspace, litetui, marked, plain = roots
+    src, empty = plain / "src", plain / "empty"
+    src.mkdir(exist_ok=True)
+    empty.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    command = _fix2(template, litetui, src, OTHER_NAME, empty)
+    assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME,
+                                        more=deny_floor.MORE) is None, command
+
+
+#: Fix round 3 (R11, R12): rows the regression gate of fix round 2 had no template
+#: for. (The shell the caller names, command); each really written by PowerShell 7,
+#: refused by the rounds before, so each must be refused again under `more`.
+FIX3_FORMS = [
+    # R11: a PowerShell array written with a space after (or before) its comma is ONE argument
+    ("powershell", "Copy-Item {src}/x.json, {src}/NAME {root}"),
+    ("powershell", "Copy-Item {src}/NAME, {src}/x.json {root}"),            # the name first
+    ("powershell", "Copy-Item {src}/x.json , {src}/NAME {root}"),
+    ("powershell", "Copy-Item {src}/x.json ,{src}/NAME {root}"),
+    ("powershell", "Copy-Item {src}/x.json, {src}/y.json, {src}/NAME {root}"),
+    ("powershell", "Copy-Item 'x.json', '{src}/NAME' {root}"),
+    ("powershell", 'Copy-Item "x.json", "{src}/NAME" {root}'),
+    ("powershell", "Copy-Item -Path {src}/x.json, {src}/NAME -Destination {root}"),
+    ("powershell", "Copy-Item -Destination {root} -Path {src}/x.json, {src}/NAME"),
+    ("powershell", "Copy-Item -Path {src}/x.json , {src}/NAME -Destination {root}"),
+    ("powershell", "Move-Item {src}/x.json, {src}/NAME {root} -Force"),
+    ("powershell", "Move-Item -Path {src}/x.json, {src}/NAME -Destination {root} -Force"),
+    ("powershell", "mi {src}/x.json, {src}/NAME {root} -Force"),
+    ("powershell", "cpi {src}/x.json, {src}/NAME {root} -Force"),
+    ("powershell", "cp {src}/x.json, {src}/NAME {root}"),
+    ("powershell", "copy {src}/x.json, {src}/NAME {root}"),
+    ("bash", "pwsh -NoProfile -c 'Copy-Item {src}/x.json, {src}/NAME {root}'"),
+    # GNU cp reads -Destination as junk and takes the last operand, so only the PowerShell
+    # reading of the nested part (its own shell, not the outer dialect) sees this one.
+    ("bash", "pwsh -NoProfile -c 'cp -Destination {root} {src}/NAME'"),
+    # Fix 4 (Q5 again): `cp`, `copy` are PowerShell's in every shell now, so the row above no longer tells the part's shell from the
+    # outer dialect. A nested `cmd /c` body is a cmd part under any outer dialect, and cmd's `A+B` joins two sources where PowerShell
+    # reads ONE name: only the cmd reading, chosen by the PART's shell, refuses this one.
+    ("bash", 'cmd /c "copy {src}/NAME+{src}/x.json {root}"'),
+    # R12: a PowerShell statement or block around the copy, asked with NO shell (what the hook and the
+    # owner rule pass): the part the splitter cuts out has the shell that was asked, not PowerShell.
+    # Asked as powershell the head of the statement is `if`, `{`; no round saw those.
+    (None, "if ($true) { Copy-Item {src}/NAME {root} }"),
+    (None, "if ($true) { Copy-Item {src}/NAME {root} } else { }"),
+    (None, "if (Test-Path {src}/NAME) { Copy-Item {src}/NAME {root} }"),
+    (None, "foreach ($i in 1..2) { Copy-Item {src}/NAME {root} }"),
+    (None, "1 | ForEach-Object { Copy-Item {src}/NAME {root} }"),
+    (None, "1 | % { Copy-Item {src}/NAME {root} }"),
+    (None, "try { Copy-Item {src}/NAME {root} } catch { }"),
+    (None, "try { } finally { Copy-Item {src}/NAME {root} }"),
+    (None, "while ($true) { Copy-Item {src}/NAME {root}; break }"),
+    (None, "switch (1) { 1 { Copy-Item {src}/NAME {root} } }"),
+    (None, "function f { Copy-Item {src}/NAME {root} }; f"),
+    (None, "$sb = { Copy-Item {src}/NAME {root} }; & $sb"),
+    (None, "Invoke-Command -ScriptBlock { Copy-Item {src}/NAME {root} }"),
+    (None, ". { Copy-Item {src}/NAME {root} }"),
+    (None, "Measure-Command { Copy-Item {src}/NAME {root} } | Out-Null"),
+    (None, "if ($true) { Move-Item {src}/NAME {root} -Force }"),
+    (None, "try { Move-Item {src}/NAME {root} -Force } catch { }"),
+    (None, "foreach ($i in 1) { mi {src}/NAME {root} -Force }"),
+    (None, "if ($true) { cpi {src}/NAME {root} }"),
+    (None, "while ($true) { copy {src}/NAME {root}; break }"),
+    (None, "while ($true) { move {src}/NAME {root} -Force; break }"),
+    (None, "if ($true) { Copy-Item {src}/x.json, {src}/NAME {root} }"),   # R11 inside R12
+    ("bash", "Copy-Item {src}/NAME {root}"),     # the names PowerShell alone has, asked in every shell
+    ("bash", "Move-Item {src}/NAME {root} -Force"),
+    ("cmd", "Copy-Item {src}/NAME {root}"),
+    ("cmd", "cpi {src}/NAME {root}"),
+]
+FIX3_LEFT = [   # R11/R12 controls: the same words that copy something else, or nothing of this name
+    ("powershell", "Copy-Item {src}/x.json, {src}/y.json {root}"),
+    ("powershell", "Copy-Item -Path {src}/x.json, {src}/y.json -Destination {root}"),
+    ("powershell", "Copy-Item {src}/x.json, {src}/y.json, {src}/z.json {root}"),
+    ("powershell", "if ($true) { Copy-Item {src}/x.json {root} }"),
+    ("powershell", "if ($true) { Copy-Item {src}/NAME {src}/elsewhere }"),
+    ("powershell", "Copy-Item {src}/NAME, {src}/x.json {src}/elsewhere"),
+    ("bash", "copy {src}/x.json {root}"),
+    ("bash", "if ($true) { Copy-Item {src}/x.json, {src}/y.json {root} }"),
+]
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("shell, template", FIX3_FORMS)
+def test_fix3_arrays_with_a_space_and_copies_inside_a_statement(roots, shell, template, name):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    (src / "elsewhere").mkdir(parents=True, exist_ok=True)
+    (src / name).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for root in (litetui, marked):
+        command = _fix2(template, root, src, name)
+        for asked_as in (shell, None):
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
+            target = deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name, more=into)
+            assert target is not None, (asked_as, command)
+
+
+@pytest.mark.parametrize("shell, template", FIX3_LEFT)
+def test_fix3_leaves_these_alone(roots, shell, template):
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    (src / "elsewhere").mkdir(parents=True, exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    command = _fix2(template, litetui, src, OTHER_NAME)
+    for asked_as in (shell, None):
+        assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=OTHER_NAME,
+                                            more=deny_floor.MORE) is None, (asked_as, command)
+
+
+@pytest.mark.parametrize("command", [
+    "cp -r //no-such-host/share/dir {dest}/", "cp -a //no-such-host/share/dir {dest}/",
+    "cp -rT //no-such-host/share/dir {dest}", "env cp -r //no-such-host/share/dir {dest}/",
+    "xcopy \\\\no-such-host\\share\\dir {dest} /E", "copy \\\\no-such-host\\share\\dir {dest}",
+    "cp -r \\\\no-such-host\\share\\dir {dest}/",
+])
+def test_fix3_a_folder_source_on_the_network_is_never_looked_at(roots, monkeypatch, command):
+    """R13: a tree grammar tests each folder source on disk; a source that begins
+    with two slashes may be a host that does not answer, so it is skipped (a stated
+    limit) before anything is resolved. CONTROL: a local folder source is resolved."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    deny_floor.jobs_write_target(command.format(dest=plain.as_posix()), workspace, home, name=OTHER_NAME,
+                                 more=deny_floor.MORE)
+    assert not any(raw.startswith(("\\\\", "//")) for raw in resolved), resolved
+    deny_floor.jobs_write_target(f"cp -r {plain.as_posix()} {litetui.as_posix()}/", workspace, home,
+                                 name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(plain.as_posix() in raw for raw in resolved), "CONTROL: a local folder source is resolved"
+
+
+#: Fix round 4 (R18): a copy written in PowerShell inside a block, behind a nested
+#: `pwsh -c` or direct. The nested body is cut only in PowerShell's dialect (the head
+#: is `{`, `if`, `$sb`), so the one part with the head `copy` is the cmd dialect's
+#: and `cp`/`mv` get PowerShell's meaning only from a powershell part: every head
+#: the PowerShell cmdlet is called by must be read as PowerShell reads it, in every
+#: shell. Each cell really writes in PowerShell 7 and was refused by round 0.
+FIX4_BLOCKS = ["if ($true) { CMD }", "foreach ($i in 1) { CMD }", "try { CMD } catch { }",
+               "function f { CMD }; f", "$sb = { CMD }; & $sb"]
+FIX4_WRAPS = {
+    "direct": "{body}",
+    "pwsh": "pwsh -NoProfile -c '{body}'",
+    "powershell": "powershell -NoProfile -Command '{body}'",
+}
+FIX4_HEADS = ["Copy-Item", "Move-Item", "cpi", "mi", "copy", "move", "cp", "mv"]
+FIX4_TRAILING = ["", "-Force", "-Verbose", "-Recurse", "-PassThru", "-ea Stop", "-Confirm:$false"]
+
+
+@pytest.mark.parametrize("wrap", FIX4_WRAPS)
+def test_fix4_r18_a_copy_in_a_block_is_read_as_powershell_in_every_shell(roots, wrap):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    open_ = []
+    for block in FIX4_BLOCKS:
+        for head in FIX4_HEADS:
+            for trailing in FIX4_TRAILING:
+                body = block.replace("CMD", f"{head} {src.as_posix()}/{OTHER_NAME} {litetui.as_posix()} {trailing}".rstrip())
+                command = FIX4_WRAPS[wrap].replace("{body}", body)
+                # Asked as bash, a quoted `pwsh -c` body is not entered: allowed at every round (a stated limit).
+                for asked_as in (None, "cmd") + (("bash",) if wrap == "direct" else ()):
+                    if not deny_floor.jobs_write_target(command, workspace, home, shell=asked_as,
+                                                         name=OTHER_NAME, more=into):
+                        open_.append((asked_as, command))
+    assert not open_, (len(open_), open_[:6])
+
+
+@pytest.mark.parametrize("command", [
+    "pwsh -NoProfile -c 'if ($true) { move -Path {src}/NAME -Destination {root} -Force }'",
+    "pwsh -NoProfile -c '1 | % { move {src}/NAME {root} -Force }'",
+    "pwsh -NoProfile -c 'if ($true) { mv {src}/NAME {root} -Force -PassThru }'",
+    "if ($true) { mv {src}/NAME {root} -Force -PassThru }",
+    "try { cp {src}/NAME {root} -PassThru } catch { }",
+])
+def test_fix4_r18_rows_of_the_review(roots, command):
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    command = _fix2(command, litetui, src, OTHER_NAME)
+    assert deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME) is None
+    assert deny_floor.jobs_write_target(command, workspace, home, name=OTHER_NAME, more=into), command
+
+
+#: Fix round 4 (R20): a backtick-newline between the words of a copy leaves an EMPTY
+#: word in PowerShell's dialect; it was bound as the destination and the folder fell
+#: off. Each really writes in PowerShell 7; round 0 and fix 1 refused it.
+FIX4_CONTINUED = [
+    "Copy-Item {src}/NAME `\n {root}",
+    "Copy-Item {src}/x.json `\n , {src}/NAME {root}",
+    "Move-Item {src}/NAME `\n {root} -Force",
+    "cpi {src}/NAME `\n {root}",
+    "mi {src}/NAME `\n {root} -Force",
+    "copy {src}/NAME `\n {root}",
+    "move {src}/NAME `\n {root} -Force",
+    "Copy-Item `\n {src}/NAME `\n {root}",
+    "Copy-Item {src}/x.json, `\n {src}/NAME {root}",
+    "Copy-Item -Path {src}/NAME -Destination `\n {root}",   # fell out of the same change
+]
+#: NOT closed (open at every round, stated limits): a CRLF (the splitter cuts the statement at
+#: the newline), a bare newline after a comma, the continuation inside a block, and bash's
+#: backslash-newline between `-t` and its value. No second mechanism was built for them.
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("template", FIX4_CONTINUED)
+def test_fix4_r20_a_backtick_newline_between_the_words_of_a_copy(roots, template, name):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / name).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for root in (litetui, marked):
+        command = _fix2(template, root, src, name)
+        for asked_as in ("powershell", None):
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name,
+                                                more=into), (asked_as, command)
+
+
+@pytest.mark.parametrize("source", [
+    "\\/no-such-host/share/dir", "/\\no-such-host\\share\\dir", "'//no-such-host/share/dir'",
+    "\"//no-such-host/share/dir\"", "'\\\\no-such-host\\share\\dir'",
+    "\\\"//no-such-host/share/dir\\\"",   # bash keeps the double quotes of an escaped pair on the word "//no-such-host/share/dir",
+    "\\\\no-such-host\\share\\dir", "//?/UNC/no-such-host/share/dir", "\\/?/UNC/no-such-host/share/dir",
+])
+@pytest.mark.parametrize("head", ["cp -r {s} {dest}/", "cp -a {s} {dest}/", "cp -rT {s} {dest}",
+                                  "env cp -r {s} {dest}/", "xcopy {s} {dest} /E", "copy {s} {dest}"])
+def test_fix4_r21_any_spelling_windows_reads_as_a_network_folder_is_never_looked_at(roots, monkeypatch,
+                                                                                     source, head):
+    """R21: R13 skipped `//host/share` and `\\\\host\\share` only. Mixed separators and a quote left on
+    the word (cmd keeps single quotes) name the same host; none may reach a stat. CONTROL: R13's
+    control, a local folder source IS resolved."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    for asked_as in (None, "bash", "cmd", "powershell"):
+        command = head.format(s=source, dest=plain.as_posix())
+        if (os.name == "nt" and source == "\\/?/UNC/no-such-host/share/dir"
+                and asked_as in (None, "bash") and not head.startswith("copy ")):
+            # Bash removes the first backslash: /?/UNC is a malformed LOCAL
+            # path. Develop refuses that failed proof; no network stat occurs.
+            with pytest.raises(deny_floor.UnresolvablePath, match="invalid Windows path character"):
+                deny_floor.jobs_write_target(command, workspace, home, shell=asked_as,
+                                             name=OTHER_NAME, more=deny_floor.MORE)
+        else:
+            deny_floor.jobs_write_target(command, workspace, home, shell=asked_as,
+                                         name=OTHER_NAME, more=deny_floor.MORE)
+    assert not [raw for raw in resolved
+                if raw.strip("'\"").replace("/", "\\").startswith("\\\\")], resolved
+    deny_floor.jobs_write_target(f"cp -r {plain.as_posix()} {litetui.as_posix()}/", workspace, home,
+                                 name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(plain.as_posix() in raw for raw in resolved), "CONTROL: a local folder source is resolved"
+
+
+def test_fix4_r21_a_lone_quote_is_no_layer(roots, monkeypatch):
+    """CONTROL: one quote layer is stripped only when both ends carry it. `'//host/share` (a quote at the start only) names a
+    folder in the current directory, not a network path, so it IS looked at."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    deny_floor.jobs_write_target(f"cp -r \"'//no-such-host/share/dir\" {plain.as_posix()}/", workspace, home,
+                                 shell="bash", name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(raw.startswith("'//no-such-host") for raw in resolved), resolved
+
+
+#: Fix round 5: the rows of re-check 4 (review/r3i_empty_rc4.txt, r3i_seen_rc4.txt), verbatim but for the
+#: folders: (shell the row was written in, refused in its own slot, refused with no shell, command). Each
+#: really writes in PowerShell 7; round 0 and fix 1 refused it in the slots marked True.
+#: R26: an EMPTY value (`""`, `''`) after a valued parameter is an argument; fix 4 dropped every empty word
+#: (R20's backtick-newline leaves one too) and the parameter ate the source.
+FIX5_R26 = [
+    ("powershell", True, True, 'Copy-Item -Exclude "" {src}/NAME {root}'),
+    ("powershell", True, True, 'Copy-Item -Filter "" {src}/NAME {root}'),
+    ("powershell", True, True, 'Copy-Item -Include "" {src}/NAME {root}'),
+    ("powershell", True, True, 'Copy-Item -OutBuffer "" {src}/NAME {root}'),
+    ("powershell", True, False, "Copy-Item -Exclude '' {src}/NAME {root}"),
+    ("powershell", True, False, "Copy-Item -Filter '' {src}/NAME {root}"),
+    ("powershell", True, True, 'Move-Item -Exclude "" {src}/NAME {root} -Force'),
+    ("powershell", True, True, 'cpi -Exclude "" {src}/NAME {root}'),
+    ("powershell", True, True, 'mi -Exclude "" {src}/NAME {root} -Force'),
+    ("powershell", True, False, 'copy -Exclude "" {src}/NAME {root}'),
+    ("powershell", True, True, 'move -Exclude "" {src}/NAME {root} -Force'),
+    ("powershell", False, True, 'if ($true) { Copy-Item -Exclude "" {src}/NAME {root} }'),
+    ("powershell", False, True, 'foreach ($i in 1) { Copy-Item -Filter "" {src}/NAME {root} }'),
+    ("powershell", True, True, 'echo a; Copy-Item -Exclude "" {src}/NAME {root}'),
+    ("bash", True, True, 'pwsh -NoProfile -c \'Copy-Item -Exclude "" {src}/NAME {root}\''),
+    ("bash", True, True, 'pwsh -NoProfile -c "Copy-Item -Exclude \'\' {src}/NAME {root}"'),
+]
+#: R27: `-Name:` then a space: the parameter takes the NEXT word as its value.
+FIX5_R27 = [
+    ("powershell", True, True, "Copy-Item -Path: {src}/NAME {root}"),
+    ("powershell", True, True, "Move-Item -Path: {src}/NAME {root} -Force"),
+    ("powershell", True, True, "cpi -LiteralPath: {src}/NAME {root}"),
+    ("powershell", True, False, "copy -Path: {src}/NAME {root}"),
+    ("bash", True, True, "pwsh -NoProfile -c 'Copy-Item -Path: {src}/NAME {root}'"),
+]
+#: R28: U+2013, U+2014 and U+2015 are the dash of a PowerShell parameter.
+FIX5_R28 = [
+    ("powershell", True, True, "Copy-Item {src}/NAME –Destination {root}"),
+    ("powershell", True, True, "Copy-Item –Path {src}/NAME –Destination {root}"),
+    ("powershell", True, True, "Copy-Item {src}/NAME —Destination {root}"),
+    ("powershell", True, True, "Copy-Item {src}/NAME ―Destination {root}"),
+    ("powershell", True, True, "cpi {src}/NAME –Destination {root}"),
+    ("powershell", True, True, "Copy-Item –Exclude x.json {src}/NAME {root}"),
+    ("bash", True, True, "pwsh -NoProfile -c 'Copy-Item {src}/NAME –Destination {root}'"),
+]
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+@pytest.mark.parametrize("shell, own, none, template", FIX5_R26 + FIX5_R27 + FIX5_R28)
+def test_fix5_rows_of_the_review(roots, shell, own, none, template, name):
+    home, workspace, litetui, marked, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / name).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    # A row lost only with no shell keeps its own slot open (a copy in a block asked AS PowerShell: stated).
+    for root in (litetui, marked):
+        command = _fix2(template, root, src, name)
+        for asked_as in ((shell,) if own else ()) + (None,):
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name) is None
+            assert deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=name,
+                                                more=into), (asked_as, command)
+
+
+#: The same three spellings over every head and both orders of the words (generated, fix 5): an empty
+#: value after each valued parameter, `-P: value`, and each Unicode dash, the destination named first too
+#: (R29's `-Destination: ROOT` and `–Destination ROOT` first, open at every round, fall out of R27/R28).
+#: And the spellings the splitter makes ONE word with R27's: `-P:''` / `-P:""` (an empty value, the next
+#: word free), which fix 4 refused and must still refuse; `-Force: $false` (a switch takes the next word).
+FIX5_MOVERS = {"Move-Item", "mi", "move", "mv"}
+
+
+def _fix5_forms():
+    forms = []
+    for head in FIX4_HEADS:
+        f = " -Force" if head in FIX5_MOVERS else ""
+        for param in ("-Exclude", "-Include", "-Filter", "-OutBuffer"):
+            for empty in ('""', "''", ":''", ': ""', ':""'):
+                sep = "" if empty.startswith(":") else " "
+                forms.append(f"{head} {param}{sep}{empty} {{src}}/NAME {{root}}{f}")
+        forms += [f"{head} -Path: {{src}}/NAME {{root}}{f}", f"{head} -LiteralPath: {{src}}/NAME {{root}}{f}",
+                  f"{head} {{src}}/NAME -Destination: {{root}}{f}", f"{head} -Destination: {{root}} {{src}}/NAME{f}",
+                  f"{head} -Path: {{src}}/NAME -Destination: {{root}}{f}", f"{head} -Exclude: x.json {{src}}/NAME {{root}}{f}",
+                  f"{head} -Force: $true {{src}}/NAME {{root}}", f"{head} {{src}}/NAME {{root}} -Force: $true"]
+        for dash in "–—―":
+            forms += [f"{head} {{src}}/NAME {dash}Destination {{root}}{f}",
+                      f"{head} {dash}Destination {{root}} {{src}}/NAME{f}",
+                      f"{head} {dash}Path {{src}}/NAME {dash}Destination {{root}}{f.replace('-', dash)}",
+                      f"{head} {dash}Exclude x.json {{src}}/NAME {{root}}{f}",
+                      f"{head} {dash}LiteralPath {{src}}/NAME {{root}}{f}"]
+    return forms
+
+
+def test_fix5_the_three_spellings_over_every_head(roots):
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    forms = _fix5_forms()
+    assert len(forms) == 8 * (4 * 5 + 8 + 3 * 5) == 344, len(forms)
+    open_ = []
+    for template in forms:
+        command = _fix2(template, litetui, src, OTHER_NAME)
+        for asked_as in ("powershell", None):
+            if not deny_floor.jobs_write_target(command, workspace, home, shell=asked_as, name=OTHER_NAME, more=into):
+                open_.append((asked_as, command))
+    assert not open_, (len(open_), open_[:6])
+
+
+def test_fix5_the_readings_are_capped_at_four():
+    """The union binds every combination of the two ambiguous readings (empty words kept or dropped; a
+    `-P:` word taking the next word or not), not every subset of the words: 6 empty words and 2
+    trailing-colon parameters still give at most 4 readings, and a plain line gives exactly 1."""
+    words = ["", "-Exclude:", "", "SRC", "", "", "-Destination:", "", "ROOT", ""]
+    assert len(deny_floor._ps_binding(words)) <= 4
+    assert deny_floor._ps_binding(["SRC", "ROOT"]) == [("ROOT", ["SRC"])]
+
+
+def test_fix5_a_glued_value_never_takes_the_next_word(roots):
+    """Only a `-P:` with NOTHING after the colon takes the next word: `-Path:SRC ROOT` keeps ROOT as the destination even when
+    another word of the line ends in a colon (that word's reading is the one that takes the next word)."""
+    home, workspace, litetui, _, plain = roots
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for head in FIX4_HEADS:
+        command = f"{head} -Exclude: x.json -Path:{src.as_posix()}/{OTHER_NAME} {litetui.as_posix()}"
+        assert deny_floor.jobs_write_target(command, workspace, home, shell="powershell", name=OTHER_NAME,
+                                            more=into) == litetui / OTHER_NAME, command
+
+
+def test_fix5_only_a_parameters_first_dash_is_read(roots):
+    """The Unicode dash is read as `-` only as the first character of a word: a folder whose name holds U+2013 is that folder."""
+    home, workspace, _, _, plain = roots
+    dashed = plain.parent / "LORA–SET"
+    dashed.mkdir()
+    (dashed / ".litetui-data.json").write_text("{}", encoding="utf-8")
+    src = plain / "src"
+    src.mkdir(exist_ok=True)
+    (src / OTHER_NAME).write_text("{}", encoding="utf-8")
+    into = frozenset({deny_floor.COPY_INTO})
+    for command in (f"Copy-Item {src.as_posix()}/{OTHER_NAME} {dashed.as_posix()}",
+                    f"Copy-Item {src.as_posix()}/{OTHER_NAME} –Destination {dashed.as_posix()}"):
+        assert deny_floor.jobs_write_target(command, workspace, home, shell="powershell", name=OTHER_NAME,
+                                            more=into) == dashed / OTHER_NAME, command
+
+
+def test_fix5_a_unicode_dash_is_powershells_only(roots):
+    """CONTROL: the dash is read as `-` only in PowerShell's reading. GNU's cp takes `–t` for a file name."""
+    home, workspace, litetui, _, plain = roots
+    into = frozenset({deny_floor.COPY_INTO})
+    gnu = deny_floor._gnu_options("cp", ["–t", "DIR", "SRC"])
+    assert gnu["target"] is None and gnu["operands"] == ["–t", "DIR", "SRC"]
+    assert deny_floor._ps_binding(["SRC", "—Destination", "DIR"]) == [("DIR", ["SRC"])]
+
+
+def test_the_gnu_grammar_alone_in_bash(roots):
+    """Asked as bash only: `--` ends the options and the words after it are operands,
+    even one that looks like `-t`. (Since fix 4 the PowerShell reading of `cp` is asked
+    in bash too, so only a row it does not refuse tells the GNU reading apart.)"""
+    home, workspace, litetui, _, plain = roots
+    into = frozenset({deny_floor.COPY_INTO})
+    for command, written in ((f"cp -- {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}/", True),
+                             (f"cp -v -- {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}", True),
+                             (f"cp -T {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}", False),
+                             # fix 4 (G5 again): PowerShell's reading of `cp` is asked in bash too and takes `-Destination` for
+                             # its parameter; GNU, after `--`, takes it for a file name and the last operand for the folder.
+                             (f"cp -- -Destination {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}/", True)):
+        target = deny_floor.jobs_write_target(command, workspace, home, shell="bash", name=OTHER_NAME, more=into)
+        assert (target == litetui / OTHER_NAME) is written, command
+
+
+def test_copy_into_looks_at_the_destination_only_when_a_source_has_the_name(roots, monkeypatch):
+    """R5: a copy whose sources do not carry the name never resolves or stats its
+    destination (a UNC folder on a host that does not answer can outlast the hook)."""
+    home, workspace, litetui, _, plain = roots
+    resolved = []
+    real = deny_floor._resolve
+    monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
+    deny_floor.jobs_write_target("cp notes.md //no-such-host/share/", workspace, home, name=OTHER_NAME,
+                                 more=deny_floor.MORE)
+    assert not any("no-such-host" in raw for raw in resolved), resolved
+    deny_floor.jobs_write_target(f"cp {plain.as_posix()}/{OTHER_NAME} {litetui.as_posix()}/", workspace, home,
+                                 name=OTHER_NAME, more=deny_floor.MORE)
+    assert any(litetui.as_posix() in raw for raw in resolved), "CONTROL: a match does resolve it"
+
+
+def test_refusal_hands_more_to_both_jobs_questions(roots, monkeypatch):
+    """refusal() asks the Git question and the shell question without `more`
+    first, then (the default allowing) with it (each also asks a pathspec, so a
+    verdict alone cannot show which did)."""
+    home, workspace, _, _, _ = roots
+    seen = []
+    for fn in ("_jobs_git_refusal", "_jobs_write_target"):
+        real = getattr(deny_floor, fn)
+        monkeypatch.setattr(deny_floor, fn, lambda *a, _real=real, _fn=fn:
+                            seen.append((_fn, a[-1])) or _real(*a))
+    deny_floor.refusal("echo x", workspace, home, more=deny_floor.MORE)
+    none = frozenset()
+    assert seen == [("_jobs_git_refusal", none), ("_jobs_write_target", none),
+                    ("_jobs_git_refusal", deny_floor.MORE), ("_jobs_write_target", deny_floor.MORE)]
+
+
+NUL_MORE_ONLY = [   # a NUL in a word only an added recognition reads (fix 1, R3)
+    "cp {src}/NAME {root}\x00/", "cp a b\x00", "Copy-Item {src}/NAME -Destination {root}\x00",
+    'echo x > "{root}::$INDEX\x00/NAME"', 'cd "{root}::$INDEX_ALLOCATION" && echo x > a\x00/NAME',
+"rm {root}/SETTIN~1\x00.JSO", "dd of={root}/x\x00/NAME",
+    "git checkout HEAD -- :/x\x00/NAME", "[IO.File]::Delete('{root}/x\x00/NAME')",
+]
+
+
+@pytest.mark.parametrize("template", NUL_MORE_ONLY)
+def test_a_nul_only_more_reads_is_no_answer_and_never_an_error(roots, template):
+    """`more` may only add a refusal: where the default answers, `more` answers the
+    same or refuses; it never raises instead (R3: `cp a b<NUL>; echo x > FILE`)."""
+    home, workspace, litetui, _, plain = roots
+
+    def answer(ask):
+        try:
+            return ("answer", bool(ask()))
+        except ValueError:
+            return ("raised", None)
+
+    asked = 0
+    for name in (SCHEDULE, OTHER_NAME):
+        command = template.format(src=plain.as_posix(), root=litetui.as_posix()).replace("NAME", name)
+        for text in (command, f"{command} ; echo x > {litetui.as_posix()}/{name}"):
+            for ask in (lambda more: _more_asked(text, workspace, home, name, more=more),
+                        lambda more: deny_floor.refusal(text, workspace, home, more=more)):
+                default = answer(lambda: ask(frozenset()))
+                if default[0] == "raised":
+                    continue   # the base's own exception, unchanged
+                asked += 1
+                for more in (deny_floor.MORE, *(frozenset({cls}) for cls in deny_floor.MORE)):
+                    with_more = answer(lambda: ask(more))
+                    assert with_more[0] == "answer", (text, sorted(more), "raised where the default answered")
+                    assert with_more[1] or not default[1], (text, sorted(more), "refuse -> allow")
+    assert asked, "every form raised at the default: the row tests nothing"
+
+
+@pytest.mark.parametrize("template", JOBS_WRITES)
+def test_more_never_takes_a_refusal_away(roots, template):
+    home, workspace, litetui, marked, plain = roots
+    command = _jobs(template, litetui, marked, plain)
+    assert "[jobs-file]" in (deny_floor.refusal(command, workspace, home, more=deny_floor.MORE) or "")
+
+
+@pytest.mark.parametrize("template", JOBS_READS)
+def test_more_still_lets_the_reads_pass(roots, template):
+    home, workspace, litetui, marked, plain = roots
+    command = _jobs(template, litetui, marked, plain)
+    assert deny_floor.refusal(command, workspace, home, more=deny_floor.MORE) is None, command
+
+
+def test_copy_into_a_folder_below_under(roots):
+    """A, with `under`: the copy into a folder below `.agents` is judged there."""
+    home, workspace, litetui, _, plain = roots
+    seat = litetui / UNDER / "Seat"
+    seat.mkdir(parents=True)
+    for dest in (f"{seat.as_posix()}/", seat.as_posix()):
+        command = f"cp {plain.as_posix()}/{OTHER_NAME} {dest}"
+        assert _four_ways(command, workspace, home, deny_floor.COPY_INTO, OTHER_NAME, UNDER) == \
+            [False, True, False, True], command
+        assert _more_asked(command, workspace, home, OTHER_NAME, more=deny_floor.MORE) is None, \
+            "without `under` a folder below `.agents` is not the data root"
+    # A folder that does not exist yet is a folder when the word ends in a
+    # separator (the copy makes it); without one the copy makes a FILE of that name.
+    new = (litetui / UNDER / "NewSeat").as_posix()
+    into = f"cp {plain.as_posix()}/{OTHER_NAME} {new}/"
+    assert _four_ways(into, workspace, home, deny_floor.COPY_INTO, OTHER_NAME, UNDER) == [False, True, False, True]
+    assert _more_asked(f"cp {plain.as_posix()}/{OTHER_NAME} {new}", workspace, home, OTHER_NAME, UNDER,
+                       deny_floor.MORE) is None
+
+
+def test_dollar_path_reaches_the_tool_path_and_the_delete_rules(roots):
+    """G: the tool question, and the recursive-delete rules, which take the same keyword."""
+    home, workspace, litetui, _, _ = roots
+    spelled = f"{litetui.as_posix()}::$INDEX_ALLOCATION/{OTHER_NAME}"
+    assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME) is None
+    assert deny_floor.write_refusal(spelled, workspace, home, name=OTHER_NAME,
+                                    more=frozenset({deny_floor.DOLLAR_PATH}))
+    git = f'git checkout HEAD -- "{spelled}"'   # the Git question hands `more` on
+    assert deny_floor.jobs_git_refusal(git, workspace, home, name=OTHER_NAME) is None
+    assert deny_floor.jobs_git_refusal(git, workspace, home, name=OTHER_NAME,
+                                       more=frozenset({deny_floor.DOLLAR_PATH}))
+    for command in (f'rm -rf "{home.as_posix()}::$INDEX_ALLOCATION"',
+                    f'Remove-Item -Recurse "{home.as_posix()}:$I30:$INDEX_ALLOCATION"',
+                    f'cd "{home.as_posix()}::$INDEX_ALLOCATION"; Remove-Item * -Recurse',
+                    f'rm -rf "{home.as_posix()}/.claude::$INDEX_ALLOCATION"'):
+        assert deny_floor.refusal(command, workspace, home) is None, command
+        assert deny_floor.refusal(command, workspace, home, more=deny_floor.MORE - {deny_floor.DOLLAR_PATH}) is None
+        reason = deny_floor.refusal(command, workspace, home, more=frozenset({deny_floor.DOLLAR_PATH}))
+        assert reason and "[protected-root-delete]" in reason, command
+    # A `$` left after the cut is still a variable: no answer, so no refusal.
+    assert deny_floor.refusal(f'rm -rf "{home.as_posix()}/$x"', workspace, home, more=deny_floor.MORE) is None
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_short_name_resolves_an_existing_file_for_the_writers(roots, name):
+    """H: the file's 8.3 short name in an argument word, writer heads only, on disk.
+    Skipped where the volume gives the file no short name."""
+    if os.name != "nt":
+        pytest.skip("short names are a Windows volume feature")
+    import ctypes
+    home, workspace, litetui, _, plain = roots
+    (litetui / name).write_text("{}", encoding="utf-8")
+    buffer = ctypes.create_unicode_buffer(600)
+    ctypes.windll.kernel32.GetShortPathNameW(str(litetui / name), buffer, 600)
+    short = Path(buffer.value).name
+    if not short or short.lower() == name:
+        pytest.skip("this volume gives the file no short name")
+    spelled = f"{litetui.as_posix()}/{short}"
+    for writer in (f"rm {spelled}", f"env rm {spelled}", f"Remove-Item {spelled}", f"mv {spelled} {plain.as_posix()}/x",
+                   f"sed -i s/a/b/ {spelled}", f"Set-Content {spelled} x", f"cp x.json {spelled}"):
+        assert _four_ways(writer, workspace, home, deny_floor.SHORT_NAME, name) == \
+            [False, True, False, True], writer
+    for left in (f"cat {spelled}", f"python tool.py {spelled}", f"cp {spelled} {plain.as_posix()}/x",
+                 f"rm {litetui.as_posix()}/{short[:-5]}9{short[-4:]}"):
+        assert _more_asked(left, workspace, home, name, more=deny_floor.MORE) is None, left
+
+
+@pytest.mark.parametrize("name", [SCHEDULE, OTHER_NAME])
+def test_pathspec_magic_names_the_file_from_the_repository_root(roots, monkeypatch, name):
+    """N: `:/REL` and `:(top)REL` from a subfolder of the repository; other long
+    magic is from the current folder; an exclude names nothing written."""
+    home, _, litetui, _, plain = roots
+    (litetui / ".git").mkdir()
+    sub = litetui / "sub"
+    sub.mkdir()
+    for form in (":/NAME", "':(top)NAME'", "':(top,icase)NAME'", ":/:NAME"):
+        command = f"git checkout HEAD -- {form}".replace("NAME", name)
+        assert _four_ways(command, sub, home, deny_floor.PATHSPEC, name) == [False, True, False, True], command
+        moved = f"cd {sub.as_posix()} && {command}"   # from another folder: the `cd` is followed
+        assert _four_ways(moved, plain, home, deny_floor.PATHSPEC, name) == [False, True, False, True], moved
+    assert _four_ways(f"git checkout HEAD -- ':(icase)sub/../{name}'", litetui, home,
+                      deny_floor.PATHSPEC, name)[1], "other magic: from the current folder"
+    for left in (f"git checkout HEAD -- ':(icase){name}'", f"git checkout HEAD -- ':!{name}'",
+                 f"git checkout HEAD -- ':(exclude){name}'", f"git diff -- :/{name}"):
+        assert _more_asked(left, sub, home, name, more=deny_floor.MORE) is None, left
+    # An exclude names the file NOT written, even with top magic that would name
+    # the protected file. (From inside the root the default already refuses
+    # `':!NAME'`, an older over-block this keyword does not change.)
+    for left in (f"git checkout HEAD -- ':/!{name}'", f"git checkout HEAD -- ':/^{name}'",
+                 f"git checkout HEAD -- ':(top,exclude){name}'"):
+        assert _more_asked(left, sub, home, name, more=deny_floor.MORE) is None, left
+    # The Git question alone, as LiteTUI's rule and refusal() ask it first.
+    command = f"git checkout HEAD -- :/{name}"
+    assert deny_floor.jobs_git_refusal(command, sub, home, name=name) is None
+    assert deny_floor.jobs_git_refusal(command, sub, home, name=name, more=frozenset({deny_floor.PATHSPEC}))
+
+
+# ── the hook's COUNT-ONLY opt-in for the added recognitions (T0306-S) ──
+#
+# Off by default. On ("1"), a call the added recognitions would refuse and the
+# default does not is logged, one line, and ALLOWED. Nothing is ever refused by it.
+
+def _count_lines(harness):
+    log = harness / "deny_gate.log"
+    return [line for line in log.read_text(encoding="utf-8").splitlines()
+            if "count-only" in line] if log.exists() else []
+
+
+@pytest.fixture
+def counted(roots, tmp_path, monkeypatch):
+    harness = tmp_path / "harness-home"
+    monkeypatch.setenv("LITEHARNESS_HOME", str(harness))
+    monkeypatch.delenv(deny_gate.COUNT_ONLY_ENV, raising=False)
+    return (*roots, harness)
+
+
+def test_count_only_is_off_by_default(counted):
+    home, workspace, litetui, _, plain, harness = counted
+    command = f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/"
+    assert deny_gate.decide(_payload("Bash", command, workspace)) is None
+    assert _count_lines(harness) == []
+
+
+@pytest.mark.parametrize("value", ["0", "", "true", "yes"])
+def test_count_only_is_on_for_one_value_only(counted, monkeypatch, value):
+    home, workspace, litetui, _, plain, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, value)
+    deny_gate.decide(_payload("Bash", f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/", workspace))
+    assert _count_lines(harness) == []
+
+
+@pytest.mark.parametrize("template", [
+    "cp {src}/jobs.json {root}/", "cp -t{root} {src}/jobs.json", "dd if=/dev/null of={root}/jobs.json",
+    "cp -l {root}/jobs.json {src}/alias", "[IO.File]::WriteAllText('{root}/jobs.json','x')",
+    'echo x > "{root}::$INDEX_ALLOCATION/jobs.json"', 'rm -rf "{home}::$INDEX_ALLOCATION"',
+])
+def test_count_only_logs_one_line_and_allows(counted, monkeypatch, template):
+    home, workspace, litetui, _, plain, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    command = template.format(src=plain.as_posix(), root=litetui.as_posix(), home=Path.home().as_posix())
+    assert deny_gate.decide(_payload("Bash", command, workspace)) is None, "count-only refused"
+    lines = _count_lines(harness)
+    assert len(lines) == 1 and "would refuse" in lines[0] and "DENY FLOOR" in lines[0], lines
+
+
+def test_count_only_logs_a_file_tool_write_too(counted, monkeypatch):
+    home, workspace, litetui, _, _, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    spelled = f"{litetui.as_posix()}::$INDEX_ALLOCATION/{SCHEDULE}"
+    assert deny_gate.decide(_write("Write", spelled, workspace)) is None
+    assert len(_count_lines(harness)) == 1
+
+
+def test_count_only_leaves_a_refusal_and_an_ordinary_call_alone(counted, monkeypatch):
+    home, workspace, litetui, _, _, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    out = deny_gate.decide(_payload("Bash", f"echo x > {litetui.as_posix()}/{SCHEDULE}", workspace))
+    assert out and "[jobs-file]" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert deny_gate.decide(_payload("Bash", "git status", workspace)) is None
+    assert deny_gate.decide(_write("Write", litetui / SCHEDULE, workspace))
+    assert _count_lines(harness) == [], "only a call the default allows is counted"
+
+
+def test_count_only_cannot_change_a_verdict_when_it_breaks(counted, monkeypatch):
+    """An error inside the count-only branch is swallowed: the call is allowed
+    exactly as the default allows it."""
+    home, workspace, litetui, _, plain, harness = counted
+    monkeypatch.setenv(deny_gate.COUNT_ONLY_ENV, "1")
+    real = deny_gate._load_floor
+
+    def broken():
+        floor = real()
+        floor.MORE = 1   # `more=1` makes the added question raise (TypeError)
+        return floor
+
+    monkeypatch.setattr(deny_gate, "_load_floor", broken)
+    command = f"cp {plain.as_posix()}/{SCHEDULE} {litetui.as_posix()}/"
+    assert deny_gate.decide(_payload("Bash", command, workspace)) is None
+    lines = _count_lines(harness)   # R4: the failure is said, so a quiet log means "nothing"
+    assert len(lines) == 1 and "count-only: error TypeError" in lines[0], lines
+    assert "would refuse" not in lines[0]
