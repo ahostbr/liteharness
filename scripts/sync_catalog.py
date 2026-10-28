@@ -409,7 +409,10 @@ def sync(src_root: Path, dest_root: Path, clean: bool,
         shutil.copytree(
             s,
             d,
-            ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", *PRIVATE_SKILLS),
+            ignore=lambda directory, names: (
+                shutil.ignore_patterns(".git", *PRIVATE_SKILLS)(directory, names)
+                | {name for name in names if is_runtime_catalog_path(name)}
+            ),
         )
         n = sum(1 for _ in d.rglob("*") if _.is_file())
         print(f"[copy] {rel_src} -> {d} ({n} files)")

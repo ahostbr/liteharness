@@ -10,6 +10,21 @@ dist/
 venv/
 env/
 
+# Catalog runtime databases are never public source (including SQLite sidecars).
+# Wheel exclusions alone cannot prevent an accidental git add after a sync.
+/liteharness/catalog/**/*.[dD][bB]
+/liteharness/catalog/**/*.[dD][bB]-[wW][aA][lL]
+/liteharness/catalog/**/*.[dD][bB]-[sS][hH][mM]
+/liteharness/catalog/**/*.[dD][bB]-[jJ][oO][uU][rR][nN][aA][lL]
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]-[wW][aA][lL]
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]-[sS][hH][mM]
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]-[jJ][oO][uU][rR][nN][aA][lL]
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]3
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]3-[wW][aA][lL]
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]3-[sS][hH][mM]
+/liteharness/catalog/**/*.[sS][qQ][lL][iI][tT][eE]3-[jJ][oO][uU][rR][nN][aA][lL]
+
 # Test
 .pytest_cache/
 .coverage

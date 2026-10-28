@@ -164,3 +164,60 @@ def test_dry_run_honors_clean_option(sync_module, trees, clean):
     rows = {row['path']: row for row in sync_module.dry_run(source, current, clean=clean)}
     assert ('local-resource.txt' in rows) is clean
     assert (hashes(source), hashes(current)) == before
+
+
+def test_sync_excludes_source_runtime_and_keeps_release_resources(sync_module, trees, tmp_path):
+    import shutil
+
+    source, current = trees
+    runtime = ['fixture.db', 'fixture.sqlite', 'fixture.sqlite3']
+    runtime += [name + suffix for name in runtime[:] for suffix in ('-wal', '-shm', '-journal')]
+    runtime += ['.last_indexed', 'index.lock', 'loose.pyc', '__pycache__/module.pyc']
+    # Separate directory avoids Windows aliasing lower/upper fixture names.
+    runtime += ['upper/' + name.upper() for name in runtime[:]]
+    for name in runtime:
+        put(source, 'skills/ordinary/' + name, b'synthetic runtime fixture')
+    resources = ['config.json', 'asset.lock', 'fixture.db-wal.example', 'ring.png']
+    for name in resources:
+        put(source, 'skills/ordinary/' + name, b'release resource')
+    private = sync_module.PRIVATE_SKILLS[0]
+    put(source, f'skills/{private}/SKILL.md', b'private fixture')
+    put(source, 'skills/ordinary/.git/config', b'git metadata fixture')
+    before = hashes(source), hashes(current)
+    destination = tmp_path / 'staged/catalog'
+    shutil.copytree(current, destination)
+    sync_module.sync(source, destination, clean=True)
+    for name in runtime:
+        assert not (destination / 'skills/ordinary' / name).exists(), name
+    for name in resources:
+        assert (destination / 'skills/ordinary' / name).read_bytes() == b'release resource'
+    assert not (destination / 'skills' / private).exists()
+    assert not (destination / 'skills/ordinary/.git').exists()
+    assert (hashes(source), hashes(current)) == before
+
+
+def test_catalog_database_gitignore_defense(tmp_path):
+    # Plant only synthetic files in a disposable repo, never the real catalog.
+    (tmp_path / '.gitignore').write_bytes((ROOT / '.gitignore').read_bytes())
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+    subprocess.run(['git', 'init', '--quiet', str(tmp_path)], check=True,
+                   capture_output=True, creationflags=flags)
+    names = ['fixture.db', 'fixture.sqlite', 'fixture.sqlite3']
+    names += [name + suffix for name in names[:] for suffix in ('-wal', '-shm', '-journal')]
+    names += [name.upper() for name in names[:]]
+    paths = [prefix + name for prefix in ('liteharness/catalog/', 'liteharness/catalog/skills/a/deep/')
+             for name in names]
+    for path in paths:
+        put(tmp_path, path, b'synthetic database fixture')
+    result = subprocess.run(['git', 'check-ignore', '-v', '-z', '--stdin'], cwd=tmp_path,
+                            input='\0'.join(paths) + '\0', text=True, capture_output=True,
+                            creationflags=flags)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # -z avoids Windows text-mode CRLF becoming part of the queried filename.
+    assert set(result.stdout.split('\0')[3::4]) == set(paths)
+    for path in ('liteharness/catalog/skills/a/config.json',
+                 'liteharness/catalog/skills/a/fixture.db-wal.example', 'elsewhere/fixture.db'):
+        put(tmp_path, path, b'positive control: not a catalog database')
+        result = subprocess.run(['git', 'check-ignore', '-v', path], cwd=tmp_path,
+                                capture_output=True, creationflags=flags)
+        assert result.returncode == 1, result.stdout + result.stderr
