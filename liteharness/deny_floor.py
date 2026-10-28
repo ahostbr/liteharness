@@ -538,13 +538,15 @@ def _more_adds(ask, more: frozenset):
     """`more` only ever adds a refusal (T0306-S, fix round 1): the question is
     asked without it first, and that answer stands, a refusal or an exception
     exactly as without `more`. Only when it allows is the question asked again
-    with `more`, and an error there (a NUL in a word only `more` reads) is no
-    answer."""
+    with `more`. Legacy ValueError/OSError readings give no answer, but a failed
+    literal path proof (UnresolvablePath) keeps develop's fail-closed contract."""
     answer = ask(frozenset())
     if answer or not more:
         return answer
     try:
         return ask(more)
+    except UnresolvablePath:
+        raise
     except (ValueError, OSError):
         return None
 
@@ -1049,6 +1051,7 @@ def _jobs_write_target(command, workspace, home, shell, name, under, more) -> Pa
         raise UnresolvablePath("<shell command>", "embedded null character in command")
     home = Path(home) if home is not None else Path.home()
     streams = DOLLAR_PATH in more
+    copy_error = None
     # Unknown shells are independent interpretations, not three consecutive cwd changes.
     dialects = (shell,) if shell in {"bash", "powershell", "cmd"} else ("bash", "powershell", "cmd")
     for dialect in dialects:
@@ -1134,8 +1137,15 @@ def _jobs_write_target(command, workspace, home, shell, name, under, more) -> Pa
             if COPY_INTO in more:
                 copy_base = target_base if chdir is None else _resolve(chdir, target_base, home, streams=streams)
                 # An unknown base (after `cd $X`) still answers for an absolute destination.
-                if target := _copied_into(part["shell"], inner, inner_args, copy_base, home, name, under, streams):
-                    return target
+                try:
+                    if target := _copied_into(part["shell"], inner, inner_args, copy_base, home, name, under, streams):
+                        return target
+                except UnresolvablePath as error:
+                    # Another dialect may identify the write. If none does,
+                    # the failed proof still refuses; it never becomes ALLOW.
+                    copy_error = error
+    if copy_error is not None:
+        raise copy_error
     return None
 
 
@@ -1423,6 +1433,7 @@ def _copied_into(shell, head, args, base, home, name, under, streams) -> Path | 
     put SRC's files in DIR itself: judged on disk, refused when SRC holds the
     name."""
     bare = head.removesuffix(".exe")
+    path_error = None
     for grammar in _meanings(shell, head):
         tree = False
         if grammar == "gnu":
@@ -1450,14 +1461,18 @@ def _copied_into(shell, head, args, base, home, name, under, streams) -> Path | 
         for dest, sources in readings:
             if dest is None:
                 continue
-            try:   # a NUL here is no answer for this reading, not for the whole command (fix 2)
+            try:   # legacy reading errors stay local; failed path proofs must propagate
                 if by_name and (target := _named_into(dest, sources, base, home, name, under, streams)):
                     return target
                 if tree and (target := _tree_into(grammar, dest, sources, base, home, name, under, streams,
                                                   no_target=grammar == "gnu" and gnu["no_target"])):
                     return target
+            except UnresolvablePath as error:
+                path_error = error
             except (ValueError, OSError):
                 continue
+    if path_error is not None:
+        raise path_error
     return None
 
 

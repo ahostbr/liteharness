@@ -2428,6 +2428,30 @@ def test_a_wrapper_around_something_else_still_passes(checkouts, template):
     command = _wrap_spell(template, litetui)
     assert deny_floor.refusal(command, litetui, home) is None, command
 
+@pytest.mark.parametrize("template", [
+    "cp {src}/jobs.json {root}/",
+    "cp -r {src}/. {root}/",
+    "dd of={root}/jobs.json",
+])
+def test_added_recognition_keeps_path_check_failures_closed(roots, monkeypatch, template):
+    """S1's added question must not turn develop's failed path proof into ALLOW."""
+    home, workspace, root, _, src = roots
+    (src / SCHEDULE).write_text("{}", encoding="utf-8")
+    command = template.format(src=src.as_posix(), root=root.as_posix())
+    original = deny_floor.resolve_path
+
+    def failed(path, **kwargs):
+        if Path(path).is_relative_to(root):
+            raise deny_floor.UnresolvablePath(path, "injected filesystem failure")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(deny_floor, "resolve_path", failed)
+    assert deny_floor.jobs_write_target(command, workspace, home) is None
+    with pytest.raises(deny_floor.UnresolvablePath, match="injected filesystem failure"):
+        deny_floor.jobs_write_target(command, workspace, home, more=deny_floor.MORE)
+    assert "[unresolvable-path]" in deny_floor.refusal(command, workspace, home, more=deny_floor.MORE)
+
+
 # ── the recognizer's `more` keyword (T0306-S): recognitions a caller ADDS ──
 #
 # Each is named in MORE and is OFF unless the caller names it. Every row is
@@ -2654,8 +2678,8 @@ def test_fix2_every_meaning_a_head_has_in_the_parts_shell(roots, shell, template
 
 def test_fix2_no_refusal_round_0_had_is_lost(roots):
     """The regression table's two shapes: after `cd $X` the base is unknown, and
-    an absolute destination still answers; a NUL in one copy's words is no
-    answer for that copy, not for the copy after it."""
+    an absolute destination still answers. Develop now rejects a NUL anywhere
+    in a command, before either copy is examined; that stricter answer stands."""
     home, workspace, litetui, _, plain = roots
     root, src = litetui.as_posix(), plain.as_posix()
     into = frozenset({deny_floor.COPY_INTO})
@@ -2663,6 +2687,14 @@ def test_fix2_no_refusal_round_0_had_is_lost(roots):
                            ("bash", f"cd $X && cp {src}/{OTHER_NAME} {root}/"),
                            ("cmd", f"cp a {root}/.\x00 && cp {src}/{OTHER_NAME} {root}/"),
                            ("bash", f"cp -r {src}/\x00x {root}/ ; cp {src}/{OTHER_NAME} {root}/")):
+        if "\x00" in command:
+            for more in (frozenset(), into):
+                with pytest.raises(deny_floor.UnresolvablePath, match="embedded null character"):
+                    deny_floor.jobs_write_target(command, workspace, home, shell=shell,
+                                                 name=OTHER_NAME, more=more)
+                assert "[unresolvable-path]" in deny_floor.refusal(
+                    command, workspace, home, shell=shell, more=more)
+            continue
         assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME) is None
         assert deny_floor.jobs_write_target(command, workspace, home, shell=shell, name=OTHER_NAME,
                                             more=into) == litetui / OTHER_NAME, command
@@ -2921,8 +2953,17 @@ def test_fix4_r21_any_spelling_windows_reads_as_a_network_folder_is_never_looked
     real = deny_floor._resolve
     monkeypatch.setattr(deny_floor, "_resolve", lambda raw, *a, **k: resolved.append(raw) or real(raw, *a, **k))
     for asked_as in (None, "bash", "cmd", "powershell"):
-        deny_floor.jobs_write_target(head.format(s=source, dest=plain.as_posix()), workspace, home,
-                                     shell=asked_as, name=OTHER_NAME, more=deny_floor.MORE)
+        command = head.format(s=source, dest=plain.as_posix())
+        if (os.name == "nt" and source == "\\/?/UNC/no-such-host/share/dir"
+                and asked_as in (None, "bash") and not head.startswith("copy ")):
+            # Bash removes the first backslash: /?/UNC is a malformed LOCAL
+            # path. Develop refuses that failed proof; no network stat occurs.
+            with pytest.raises(deny_floor.UnresolvablePath, match="invalid Windows path character"):
+                deny_floor.jobs_write_target(command, workspace, home, shell=asked_as,
+                                             name=OTHER_NAME, more=deny_floor.MORE)
+        else:
+            deny_floor.jobs_write_target(command, workspace, home, shell=asked_as,
+                                         name=OTHER_NAME, more=deny_floor.MORE)
     assert not [raw for raw in resolved
                 if raw.strip("'\"").replace("/", "\\").startswith("\\\\")], resolved
     deny_floor.jobs_write_target(f"cp -r {plain.as_posix()} {litetui.as_posix()}/", workspace, home,
