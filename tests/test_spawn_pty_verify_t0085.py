@@ -179,3 +179,10 @@ def test_ambiguous_join_is_refused_instead_of_selecting_a_seat(launch, capsys):
     assert code == 2 and verified == []
     assert [r["cmd"] for r in calls] == ["spawn", "kill"]
     assert "multiple seats claim" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("program", ["litetui", "codex"])
+@pytest.mark.parametrize("wrapper", ["cmd /c", "pwsh -c"])
+def test_wrapper_keeps_a_quoted_executable_path_as_one_program(program, wrapper):
+    command = rf'{wrapper} "C:\Program Files\Seat\{program}.exe"'
+    assert cli._spawn_floor_refusal(None, command).startswith("SPAWN REFUSED")

@@ -3747,7 +3747,11 @@ def _spawn_exec_request(model: str | None, exec_cmd: str) -> tuple[str, str | No
               or (program in ("pwsh", "powershell") and flag in ("-c", "-command"))):
             tokens = tokens[2:]
             if len(tokens) == 1:
-                tokens = shlex.split(tokens[0], posix=False)
+                # A quoted seat executable path (possibly containing spaces)
+                # is already one program token, not a quoted command to split.
+                executable = re.split(r"[\\/]", tokens[0])[-1].lower()
+                if executable not in ("litetui", "litetui.exe", "codex", "codex.exe"):
+                    tokens = shlex.split(tokens[0], posix=False)
         else:
             break
     else:
