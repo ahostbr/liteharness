@@ -1,4 +1,29 @@
+import os
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _environment_ends_as_it_began():
+    """No test leaves `os.environ` changed for the tests that run after it.
+
+    The hook entry points write the environment directly (`hooks._apply_hook_context` sets the
+    hook event, source, payload session id, transcript path and agent id; `_adopt_pid_owner` sets
+    the agent id), which is right for a hook process that lives for one event and wrong inside
+    one long test process. `monkeypatch` only restores what was set THROUGH it, so those keys
+    stayed. Measured 2026-11-12 with a logging plugin over the whole suite: 54 tests in 6 files
+    left such keys behind, and four tests of test_resume_does_not_evict_takeover.py, which copy
+    the ambient environment, then resolved the wrong session id. They passed alone and failed
+    only in full-suite order.
+    """
+    before = dict(os.environ)
+    yield
+    for key in set(os.environ) - set(before):
+        if key != "PYTEST_CURRENT_TEST":  # pytest's own bookkeeping, removed by pytest itself
+            del os.environ[key]
+    for key, value in before.items():
+        if key != "PYTEST_CURRENT_TEST" and os.environ.get(key) != value:
+            os.environ[key] = value
 
 
 @pytest.fixture(autouse=True)
