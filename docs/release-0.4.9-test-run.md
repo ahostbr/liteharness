@@ -10,6 +10,10 @@ was fixed by that card.
 
 **Result:** 37 failed, 7350 passed, 7 skipped, 46 subtests passed, 900 s.
 
+**Now (2026-11-12, card LH-RELEASE-RED-20261112): 0 failed, 7422 passed, 7 skipped.** What
+changed between the two runs is in the last section. The lists below are the 2026-11-11 run, kept
+as the record of what was red.
+
 ## 33 that fail the same on untouched develop
 
 Measured by running these eleven files alone on develop `e443c13`: 33 failed, 133 passed.
@@ -69,3 +73,32 @@ tests/test_resume_does_not_evict_takeover.py::ResumeEvictionTests::test_the_adop
 In the full run each resolved the session to the payload's id where the test expects the
 takeover's id (`test_resume_does_not_evict_takeover.py:181`), which points at state left by an
 earlier test, not at this file.
+
+## After: all 37 accounted for (2026-11-12)
+
+Same command and environment as the run above. Counts, in order:
+
+| When | Failed | Passed |
+|---|---|---|
+| 2026-11-11, the run above | 37 | 7350 |
+| 2026-11-12 at `66efa99`: the catalog re-stamped (`03d1621`), clerk tests added | 35 | 7369 |
+| Start of card LH-RELEASE-RED-20261112 (`62440dd`, 17 more tests from two fixes) | 35 | 7386 |
+| End of that card | 0 | 7422 |
+
+None of the 35 was a regression in the product. Each was a test that an intended change had left
+behind, or a defect in the test itself. No product code changed; one test was added.
+
+| Tests | Why they were red | Commit that made them stale | Fixed in |
+|---|---|---|---|
+| 2 catalog provenance | The catalog changed after its last stamp | (stamp only) | `03d1621` |
+| 20: resume bridge data root 12, owned launch 3, cognitive t0465 4, roles 1 | Every resume now asks the host for a reserved slot first; a launch is reported only after the new runtime is read back; a Claude resume needs a registry row and a transcript | `0121393`, `ba9351f` | `285a732` |
+| 4 tab rename | The same runtime read-back after a spawn | `ba9351f` | `9e9f2b1` |
+| 4 fleet brief | The role-line requirement on a subagent brief was dropped on purpose | `367a49f` | `f58eaaa` |
+| 1 register preamble | The paragraph the test anchored on was replaced by the peer charter | `d64affa` | `08d67f0` |
+| 1 Claude identity, wrong cwd | A Claude seat's launch directory now comes from its transcript | `8d3b3d7` | `29a35d3` |
+| 1 concurrent hooks | The test's child processes could not import the test folder | `a39eac5` (test defect) | `34efe36` |
+| 4 resume does not evict takeover (full-suite order only) | 54 tests in 6 files left hook variables in `os.environ`; these four copy the ambient environment | (test isolation) | `55b4f31` |
+
+The order-dependent four were found by measuring, not by reading: a scratch plugin logged every
+test that ended with `os.environ` changed and restored it, and with it the full run was green.
+The fix is one fixture in `tests/conftest.py` that restores the environment after every test.
