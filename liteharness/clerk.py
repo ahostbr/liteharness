@@ -50,6 +50,8 @@ def _remember(cfg: dict, orchestrator_id: str) -> None:
     name = _registrations().get(orchestrator_id, {}).get("name")
     if isinstance(name, str) and name.strip():
         cfg["orchestrator_name"] = name.splitlines()[0][:128]
+    else:  # a name kept from the previous orchestrator would outrank the id just recorded
+        cfg.pop("orchestrator_name", None)
 
 
 def enable(orchestrator_id: str | None = None) -> None:

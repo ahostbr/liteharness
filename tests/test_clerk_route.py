@@ -1,5 +1,6 @@
 """T0678 WS1: routing must be observable in the recipient's isolated maildir."""
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -9,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from liteharness import config, inbox
-from liteharness.clerk_route import load_clerk_config, route_recipient, _agent_record_live
+from liteharness.clerk_route import (load_clerk_config, live_orchestrators, resolve_orchestrator,
+                                     route_recipient, routing_config, _agent_record_live)
 
 CFG = {"enabled": True, "orchestrator_id": "sentinel", "clerk_id": "clerk",
        "direct_senders": ["orchestrator-chat", "ryan-literec", "Theater"]}
@@ -144,6 +146,124 @@ def test_cli_recipient_maildir(home, case, expected):
     assert receipt.get("forwarded_for") == ("original-worker" if case == "forward" else None)
     assert len(inbox.poll(expected, include_broadcast=False)) == 1
     assert inbox.poll("sentinel" if expected == "clerk" else "clerk", include_broadcast=False) == []
+
+def receipts(home):
+    """Every delivered message, by body: where it actually landed."""
+    files = (home / ".liteharness/inbox/new").glob("*.json")
+    return {m["body"]: m for m in (json.loads(f.read_text(encoding="utf-8")) for f in files)}
+
+
+def test_orchestrator_restart_keeps_routing_with_the_config_untouched(home):
+    """The orchestrator gets a new id on every restart. Nobody edits clerk.json; routing must follow."""
+    configure(home)
+    presence(home)
+    orchestrator(home)
+    stored = (home / ".liteharness" / "clerk.json").read_bytes()
+    inbox.send("worker", "sentinel", "before the restart")
+
+    orchestrator(home, exited_at="gone")  # the old session ends ...
+    orchestrator(home, "sentinel-2")      # ... and the same seat registers under a new id
+    assert resolve_orchestrator(load_clerk_config()) == "sentinel-2"
+    inbox.send("worker", "sentinel-2", "after the restart")
+
+    seen = receipts(home)
+    assert (seen["before the restart"]["to"], seen["before the restart"]["original_to"]) == ("clerk", "sentinel")
+    assert (seen["after the restart"]["to"], seen["after the restart"]["original_to"]) == ("clerk", "sentinel-2")
+    assert (home / ".liteharness" / "clerk.json").read_bytes() == stored
+    assert len(inbox.poll("clerk", include_broadcast=False)) == 2
+    assert inbox.poll("sentinel-2", include_broadcast=False) == []
+
+
+@pytest.mark.parametrize("registry", ["exited", "empty"])
+def test_no_live_orchestrator_fails_open(home, registry):
+    """With nobody to report to, the clerk takes nothing: mail lands exactly where it was addressed."""
+    configure(home)
+    presence(home)
+    if registry == "exited":
+        orchestrator(home, exited_at="gone")
+    assert resolve_orchestrator(load_clerk_config()) is None
+    assert routing_config("sentinel")["orchestrator_id"] is None
+    inbox.send("worker", "sentinel", "to the stale id")
+    inbox.send("worker", "someone-else", "to a peer")
+    seen = receipts(home)
+    assert seen["to the stale id"]["to"] == "sentinel"
+    assert "original_to" not in seen["to the stale id"]
+    assert seen["to a peer"]["to"] == "someone-else"
+    assert inbox.poll("clerk", include_broadcast=False) == []
+
+
+@pytest.mark.parametrize("recent", ["first", "second"])
+def test_two_live_orchestrators_pick_the_most_recent_heartbeat_and_say_so(home, sleeper, caplog, recent):
+    configure(home)
+    presence(home)
+    now = datetime.now(timezone.utc)
+    older, newer = (now - timedelta(minutes=5)).isoformat(), now.isoformat()
+    orchestrator(home, "first", last_seen=newer if recent == "first" else older)
+    orchestrator(home, "second", session_pid=sleeper, last_seen=newer if recent == "second" else older)
+    other = "second" if recent == "first" else "first"
+    cfg = load_clerk_config()
+    assert live_orchestrators(cfg) == [recent, other]
+    with caplog.at_level(logging.WARNING, logger="liteharness.clerk_route"):
+        assert resolve_orchestrator(cfg) == recent
+        assert resolve_orchestrator(cfg) == recent  # same answer every time
+    logged = [r for r in caplog.records if r.name == "liteharness.clerk_route"]
+    assert len(logged) == 2
+    text = logged[0].getMessage()
+    assert "2 live orchestrators" in text and "first" in text and "second" in text
+    assert text.endswith(f"using {recent}, the most recent heartbeat")
+    # Mail addressed to EITHER live orchestrator is screened for the one it was addressed to.
+    inbox.send("worker", "first", "for first")
+    inbox.send("worker", "second", "for second")
+    seen = receipts(home)
+    assert (seen["for first"]["to"], seen["for first"]["original_to"]) == ("clerk", "first")
+    assert (seen["for second"]["to"], seen["for second"]["original_to"]) == ("clerk", "second")
+
+
+def test_one_live_orchestrator_is_not_logged(home, caplog):
+    configure(home)
+    orchestrator(home)
+    with caplog.at_level(logging.WARNING, logger="liteharness.clerk_route"):
+        assert resolve_orchestrator(load_clerk_config()) == "sentinel"
+    assert [r for r in caplog.records if r.name == "liteharness.clerk_route"] == []
+
+
+STALE = {"enabled": True, "orchestrator_id": "old-id", "clerk_id": "clerk",
+         "direct_senders": ["my-voice-source"]}
+
+
+@pytest.mark.parametrize("live_role", ["orchestrator", "builder"])
+def test_a_config_written_with_a_stale_id_routes_to_the_live_orchestrator(home, live_role):
+    """The file an earlier version wrote, never edited: its id names a session that ended.
+
+    `builder` is the measured case: a resumed orchestrator can register with another role while it
+    keeps its name, so the name on the stored id's old row is what finds it."""
+    configure(home, STALE)
+    stored = (home / ".liteharness" / "clerk.json").read_bytes()
+    presence(home)
+    orchestrator(home, "old-id", name="Lead", exited_at="gone")
+    orchestrator(home, "new-id", name="Lead", role=live_role, tier="worker")
+    presence(home, "bystander", name="Other", role="builder", session_pid=None)
+
+    assert load_clerk_config() == STALE
+    assert resolve_orchestrator(load_clerk_config()) == "new-id"
+    inbox.send("worker", "new-id", "for the live one")
+    inbox.send("worker", "old-id", "for the dead id")
+    inbox.send("my-voice-source", "new-id", "from a direct sender")
+    seen = receipts(home)
+    assert (seen["for the live one"]["to"], seen["for the live one"]["original_to"]) == ("clerk", "new-id")
+    assert seen["for the dead id"]["to"] == "old-id" and "original_to" not in seen["for the dead id"]
+    assert seen["from a direct sender"]["to"] == "new-id"
+    assert (home / ".liteharness" / "clerk.json").read_bytes() == stored
+
+
+def test_the_clerk_is_never_taken_for_the_orchestrator(home):
+    """Even holding the orchestrator's name or the stored id, the clerk's own seat is excluded."""
+    configure(home, {**CFG, "orchestrator_id": "clerk", "orchestrator_name": "Lead"})
+    presence(home, name="Lead", role="orchestrator")
+    assert resolve_orchestrator(load_clerk_config()) is None
+    inbox.send("worker", "clerk", "to the clerk itself")
+    assert "original_to" not in receipts(home)["to the clerk itself"]
+
 
 @pytest.mark.parametrize("age,expected", [(43200, True), (43200.001, False)])
 def test_name_holder_age_boundary(home, monkeypatch, age, expected):

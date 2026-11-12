@@ -39,6 +39,16 @@ touched. Lines marked **[opt-in]** do nothing until you switch them on.
   `--pane`, so the clerk can never be split into the orchestrator's own pane, and runs on
   a Claude seat or a LiteTUI seat. `scripts/clerk_audit.py` exits 1 on any never-list item
   that was answered instead of forwarded, over every action in the append-only digest.
+  Who the orchestrator is gets decided when each message is routed, from the live
+  registry: an agent whose row declares the orchestrator role, else the live holder of
+  the orchestrator's recorded name, else the stored id if that agent is live. The
+  `orchestrator_id` in `clerk.json` is advisory, so an orchestrator that restarts under a
+  new id keeps its clerk with no edit, `clerk enable` no longer needs `--for`, and a
+  configuration written with an id that has since gone stale works as it is. With no
+  live orchestrator the clerk takes no mail (it lands where it was addressed) and
+  `clerk forward` refuses instead of sending to a dead id; with several, the most recent
+  heartbeat is used and the choice is logged. `clerk status` prints the orchestrator it
+  resolves next to the stored id, and the audit reads the digest of every orchestrator id.
 - **Deny floor: file writes into protected folders that never name the file (T0306-S).
   [opt-in]** Copy-into and move-into (`cp`, `mv`, `Copy-Item`, `Move-Item`, `xcopy`, `dd
   of=`, hard links, a git pathspec, a .NET file write, an 8.3 short name, an NTFS stream

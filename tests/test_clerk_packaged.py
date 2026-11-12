@@ -1,6 +1,7 @@
 """Prove the role ships and is read from a locally installed wheel, not source."""
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -48,6 +49,13 @@ assert len(seen) == 1
 assert seen[0]["split_pane"] == "installed-clerk-pane"
 print(json.dumps({"module": str(Path(clerk.__file__).resolve()), "role": str(role.resolve()), "spawn_substituted": True}))
 '''
+    # The Clerk only starts for a LIVE orchestrator: this test process is its owner, alive for the probe.
+    now = datetime.now(timezone.utc).isoformat()
+    agents = home / ".liteharness" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "coordinator.json").write_text(json.dumps({
+        "agent_id": "coordinator", "role": "orchestrator", "tier": "orchestrator",
+        "session_pid": os.getpid(), "last_seen": now, "registered_at": now}), encoding="utf-8")
     env = {**os.environ, "PYTHONPATH": str(target), "HOME": str(home), "USERPROFILE": str(home),
            "EXPECTED_TARGET": str(target)}
     result = subprocess.run([sys.executable, "-c", probe], cwd=tmp_path, env=env,

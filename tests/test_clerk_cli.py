@@ -181,6 +181,71 @@ def test_cli_explicit_pane_reaches_existing_spawn_argument(root, monkeypatch):
     assert cfg(root)["clerk_id"] == "clerk-seat"
 
 
+def test_enable_without_an_id_replaces_a_stale_one_and_keeps_the_local_list(root):
+    """The configuration an earlier version left behind: a stored id whose agent is long gone."""
+    (root / "clerk.json").write_text(json.dumps({
+        "enabled": False, "orchestrator_id": "gone-id", "clerk_id": "clerk-seat",
+        "direct_senders": ["my-voice-source"]}), encoding="utf-8")
+    clerk.enable()
+    data = cfg(root)
+    assert data["enabled"] is True
+    assert data["orchestrator_id"] == "orch", "the live orchestrator is recorded, not the stale id"
+    assert data["orchestrator_name"] == "Coordinator"
+    assert data["direct_senders"] == ["my-voice-source"]
+    assert data["clerk_id"] == "clerk-seat"
+
+
+def test_enable_for_another_id_is_never_refused_and_drops_the_old_name(root):
+    enable_with_seat(root)
+    assert cfg(root)["orchestrator_name"] == "Coordinator"
+    clerk.enable("other")  # no row, no name: the stored id is advisory, so this is not an error
+    data = cfg(root)
+    assert data["orchestrator_id"] == "other"
+    assert "orchestrator_name" not in data, "the previous orchestrator's name must not outrank the new id"
+    assert data["clerk_id"] == "clerk-seat"
+    assert clerk.status()["orchestrator_id"] == "orch", "routing still finds the live one by its role"
+
+
+def test_enable_with_no_orchestrator_online_switches_on_and_records_none(root):
+    orchestrator(root, exited_at="gone")
+    clerk.enable()
+    assert cfg(root)["enabled"] is True
+    assert "orchestrator_id" not in cfg(root)
+    assert clerk.status()["orchestrator_id"] is None
+
+
+def test_start_is_refused_while_no_orchestrator_is_live(root, monkeypatch):
+    clerk.enable("orch")
+    orchestrator(root, exited_at="gone")
+    monkeypatch.setattr(cli, "cmd_spawn", lambda **kw: pytest.fail("a Clerk was started for nobody"))
+    with pytest.raises(ValueError, match="No live orchestrator found"):
+        clerk.start(pane="clerk-pane", cwd=str(root.parent))
+
+
+def test_forward_follows_the_orchestrator_across_a_restart_and_refuses_with_none(root):
+    enable_with_seat(root)
+    msg_id = inbox.send("worker", "orch", "MR ready; please decide\n")
+    assert len(inbox.poll("clerk-seat", include_broadcast=False)) == 1
+
+    orchestrator(root, exited_at="gone")  # the orchestrator stops; nobody is live
+    with pytest.raises(ValueError, match="No live orchestrator to forward to"):
+        clerk.forward(msg_id)
+    assert inbox.poll("orch", include_broadcast=False) == [], "nothing may go to the dead id"
+    assert cfg(root)["orchestrator_id"] == "orch"
+
+    orchestrator(root, "orch-2")  # it comes back under a new id; clerk.json is not edited by hand
+    status = clerk.status()
+    assert (status["orchestrator_id"], status["stored_orchestrator_id"]) == ("orch-2", "orch")
+    forwarded_id = clerk.forward(msg_id)
+    received = inbox.poll("orch-2", include_broadcast=False)
+    assert [m["id"] for m in received] == [forwarded_id]
+    assert received[0]["forwarded_for"] == "worker"
+    assert inbox.poll("orch", include_broadcast=False) == []
+    assert cfg(root)["orchestrator_id"] == "orch-2", "other readers of clerk.json get the live id"
+    rows = (root / "clerk/digest-orch-2.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(rows[0])["forwarded_id"] == forwarded_id
+
+
 def test_start_refuses_disallowed_model_before_spawn(root, monkeypatch):
     clerk.enable("orch")
     monkeypatch.setattr(cli, "cmd_spawn", lambda **kw: pytest.fail("disallowed model launched"))
