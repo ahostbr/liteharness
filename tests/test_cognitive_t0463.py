@@ -133,6 +133,10 @@ def split(monkeypatch, tmp_path, lib):
             return {"activePanes": [{"id": "canvas-pane-26", "leafCount": 1}]}
         if path == "/canvas/split":
             return {"ok": True, "newLeafId": "leaf-9", "newSessionId": MINTED}
+        if path.startswith("/harness/recovered-agent/locate?"):
+            # Since 0121393 (original-slot recovery) a resume asks the host for a reserved slot
+            # first; a bare {"ok": True} reads as "inspection unavailable" and nothing launches.
+            return {"ok": True, "found": False}
         return {"ok": True}
 
     monkeypatch.setattr(cli, "_bridge_request", fake)

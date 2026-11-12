@@ -26,6 +26,10 @@ def world(tmp_path, monkeypatch, runtime_observer):
     monkeypatch.setattr(agent_names, 'resolve_name', lambda _: None)
     calls = []
     def bridge(method, path, body=None):
+        # Since 0121393 (original-slot recovery) an owned resume first asks the host whether the
+        # seat has a reserved slot; here it has none, so the ordinary launch under test follows.
+        if (method, path) == ('GET', f'/harness/recovered-agent/locate?agentId={AID}'):
+            return {'ok': True, 'found': False}
         calls.append((method, path, body))
         if path == '/pty/list':
             return {'sessions': list(runtime_observer.sessions)}

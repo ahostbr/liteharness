@@ -16,7 +16,7 @@ NAME = 'Owned-Only'
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, runtime_observer):
     data = tmp_path / 'authoritative'
     data.mkdir()
     harness = tmp_path / 'harness'
@@ -46,16 +46,31 @@ def world(tmp_path, monkeypatch):
     calls = []
 
     def bridge(method, path, body=None):
+        # Since 0121393 (original-slot recovery) every resume first asks the host whether the seat
+        # has a reserved slot. This file is about discovery and launch text: the host answers "none
+        # reserved", and the question is not counted among the calls under test.
+        if (method, path) == ('GET', f'/harness/recovered-agent/locate?agentId={AID}'):
+            return {'ok': True, 'found': False}
         calls.append((method, path, body))
         if path == '/pty/list':
-            return {'sessions': []}
+            return {'sessions': list(runtime_observer.sessions)}
         assert (method, path) == ('POST', '/harness/spawn/resolve')
         return {'ok': True, 'agentId': PARENT, 'liteTuiDataRoot': str(data),
                 'request': {'args': [], 'env': {'LITETUI_DATA_ROOT': str(data)},
                             'harnessAgentId': PARENT}}
 
     monkeypatch.setattr(cli, '_bridge_request', bridge)
-    place = Mock(return_value={'newSessionId': 'new-session'})
+    retired = harness / 'retired-agents' / registry.name
+
+    def placed(*args, **kwargs):
+        # Since ba9351f a resume is only reported once the exact new runtime is read back from the
+        # registry and the native session list. The child's own registration is what writes that
+        # row, so the registry is photographed here, at launch, before the child "registers".
+        place.registry_at_launch = {path: path.read_bytes() for path in (registry, retired) if path.exists()}
+        runtime_observer.publish(AID, 'new-session')
+        return {'newSessionId': 'new-session'}
+
+    place = Mock(side_effect=placed)
     monkeypatch.setattr(cli, '_place_split', place)
     kwargs = dict(split_mode=True, resume_agent_id=NAME, cwd=str(tmp_path),
                   tier='builder', spawned_by=PARENT)
@@ -91,7 +106,7 @@ def test_plain_shell_resume_uses_bridge_root_and_folder_execution(world, monkeyp
     for flag, expected in (('--agent', NAME), ('--convo', CID), ('--model', 'folder-model')):
         assert launch['args'][launch['args'].index(flag) + 1] == expected
     assert '--create-agent' not in launch['args']
-    assert registry.read_bytes() == before
+    assert place.registry_at_launch == {registry: before}  # the parent never rewrote it
     assert (data / '.agents' / NAME / 'settings.json').read_bytes() == settings
     assert agent_names.resolve_name(NAME) is None
 
@@ -180,9 +195,15 @@ def test_corruption_keeps_fail_closed_rules(world, monkeypatch, corruption):
     place.assert_not_called()
 
 
-def test_claude_resume_without_root_does_not_discover_litetui(world, monkeypatch):
+def test_claude_resume_without_root_does_not_discover_litetui(world, monkeypatch, tmp_path):
     _, registry, calls, place, kwargs, _ = world
-    registry.unlink()
+    # Since ba9351f a Claude resume needs more than a name-index entry: a registry row that says
+    # the seat is Claude's, and the native transcript that proves the conversation and its cwd.
+    registry.write_text(json.dumps(dict(agent_id=AID, name=NAME, cli='claude-code')))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude'))
+    transcript = tmp_path / 'claude' / 'projects' / 'project' / f'{CID}.jsonl'
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({'type': 'user', 'sessionId': CID, 'cwd': kwargs['cwd']}) + '\n')
     agent_names.record_name(NAME, AID, CID, kwargs['cwd'], backend='claude', model='claude-opus')
     entrypoint = cli.cmd_spawn
     launches = []

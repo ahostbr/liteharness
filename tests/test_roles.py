@@ -239,13 +239,22 @@ def test_resume_takes_the_role_from_a_role_only_registry_row(monkeypatch, tmp_pa
     from liteharness import resume_seat
     monkeypatch.setattr(cli.config, "get_root", lambda: tmp_path / "h")
     (tmp_path / "h" / "agents").mkdir(parents=True)
+    convo = "11111111-2222-3333-4444-555555555555"
+    # The row still carries `role` and no `tier`. Since ba9351f a Claude resume also requires the
+    # row to say the seat is Claude's and a native transcript that proves conversation and cwd;
+    # since 0121393 it asks the host for a reserved slot first (none here).
     (tmp_path / "h" / "agents" / "seat-1.json").write_text(
-        json.dumps({"agent_id": "seat-1", "role": "owner"}), encoding="utf-8")
+        json.dumps({"agent_id": "seat-1", "role": "owner", "cli": "claude-code"}), encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    transcript = tmp_path / "claude" / "projects" / "project" / f"{convo}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({"type": "user", "sessionId": convo, "cwd": str(tmp_path)}) + "\n",
+                          encoding="utf-8")
+    monkeypatch.setattr(cli, "_bridge_request", lambda *a, **kw: {"ok": True, "found": False})
     monkeypatch.setattr(cli, "_live_owner_pid", lambda _: None)
     captured = {}
     monkeypatch.setattr(cli, "cmd_spawn", lambda **kw: captured.update(kw))
-    entry = {"agent_id": "seat-1", "name": "Alpha", "cwd": str(tmp_path),
-             "convo_id": "11111111-2222-3333-4444-555555555555"}
+    entry = {"agent_id": "seat-1", "name": "Alpha", "cwd": str(tmp_path), "convo_id": convo}
     resume_seat._spawn_claude_resume(entry, convo_id=None, cwd=None, pane=None, direction=None, name=None,
                                      tier=None, model=None, backend=None, thinking_level=None,
                                      spawned_by=None, prompt=None)
