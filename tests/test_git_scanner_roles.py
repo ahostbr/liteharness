@@ -112,6 +112,8 @@ def test_fleet_brief_accepts_either_trailer(line):
     "Agent-Role: owner\nAgent-Tier: leader",
     "Agent-Role: owner\nAgent-Role: scout",
 ])
-def test_fleet_brief_still_refuses_missing_unknown_or_duplicate(prompt):
-    denial = _denial(prompt)
-    assert denial and "Agent-Role" in denial
+def test_fleet_brief_no_longer_requires_a_role_line(prompt):
+    """367a49f dropped the role-line requirement on purpose ("Agent() subagents run; accept the
+    host's model values, drop the role-line requirement"): an in-session helper is not a fleet seat
+    and carries no role. This test used to assert the refusal that commit removed."""
+    assert _denial(prompt) is None
