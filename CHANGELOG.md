@@ -5,6 +5,111 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.9] — 2026-11-11
+
+Everything merged since 0.4.8: 87 commits before this release's own. The maintainer has
+checked one piece of it end to end: the checkpoint save and restore, on 2026-11-11 ("save restore works i confirm").
+Everything else below was merged on its tests and has not been checked by him.
+
+Lines marked **[default changes]** behave differently after an upgrade with no setting
+touched. Lines marked **[opt-in]** do nothing until you switch them on.
+
+### Added
+- **Fleet checkpoint: one-call save and restore, back into the old panes (T0558-F).
+  Checked by the maintainer, 2026-11-11.** A save freezes the exact renderer slots of the
+  selected seats, requires a recoverable identity in every layout receipt and keeps the
+  evidence of the layout flush. A restore puts each seat back into its saved slot once,
+  verifies where the receiver landed, carries the saved cognitive method, uses the seat's
+  recorded launch directory, and says why a reserved-slot restore stopped instead of
+  "allocation outcome unknown". An idle seat stays idle and a seat that was mid-work is
+  held. The save dry run shows the pane a real save would record and blocks a seat that
+  would not resolve; the full-fleet dry run finishes. A LiteTUI home that would refuse its
+  resume gets its own role or a named stop before any PTY exists. Commands:
+  `docs/checkpoint-commands.md`.
+- **Mail clerk (T0678). [opt-in]** With no `~/.liteharness/clerk.json`, or an invalid or
+  disabled one, every message is addressed exactly as before. Enabled, a message to the
+  orchestrator goes to a live clerk seat first; with the clerk offline it goes straight
+  through, and a malformed presence file fails open to direct delivery. `--direct` (MCP
+  `direct: true`) bypasses the clerk. The clerk acknowledges, answers facts only from a
+  quoted live command, relays only when asked and forwards everything on its never-list
+  with the original body unchanged. `liteharness clerk start` requires an explicit
+  `--pane`, so the clerk can never be split into the orchestrator's own pane, and runs on
+  a Claude seat or a LiteTUI seat. `scripts/clerk_audit.py` exits 1 on any never-list item
+  that was answered instead of forwarded, over every action in the append-only digest.
+- **Deny floor: file writes into protected folders that never name the file (T0306-S).
+  [opt-in]** Copy-into and move-into (`cp`, `mv`, `Copy-Item`, `Move-Item`, `xcopy`, `dd
+  of=`, hard links, a git pathspec, a .NET file write, an 8.3 short name, an NTFS stream
+  spelling) are recognised only when a caller passes the added recognitions (`more`). With
+  none passed, every such row gets the verdict it got before.
+- **Deny gate: count-only mode for those recognitions. [opt-in]**
+  `LITEHARNESS_FLOOR_COUNT_ONLY=1` logs one "would refuse" line for a command the default
+  allows and the added recognitions would refuse, and allows it. Unset, nothing differs.
+- **`spawn --start-server` / `--model-path` for a fresh LiteTUI seat (T0654). [opt-in]**
+  Forwarded unchanged; refused for other CLIs and for any resume. An `F:` model path is
+  refused in every drive spelling.
+- **`sync_catalog --dry-run` (T0040-A).** Syncs into a temporary copy of the catalog and
+  reports before, after and a verdict per changed file; `--diff-output` writes it to a
+  file outside both trees. The import check runs in a child with no console window.
+
+### Changed
+- **Deny floor: a reader excuses the owner launcher only in a read position (T0105).
+  [default changes]** `git -c alias.x="!<launcher>"`, `git -c core.pager=<launcher>`,
+  `git rebase -x`, `vim -c "!..."`, `less +!...` and their kin are now refused. One
+  legitimate read is refused with them: `bat --style=plain <launcher>`.
+- **Deny floor: a wrapper that runs its argument puts the wrapped command in command
+  position (T0105 round 2). [default changes]** `xargs`, `find -exec`, `nice`, `env`,
+  `timeout`, `start`, `sudo` and other runner heads in front of the launcher are now
+  refused; a wrapper around a read is still a read. Newly refused legitimate spellings
+  include `start notepad <launcher>` and `explorer /select,<launcher>`.
+- **Deny floor: a pipe inside a plain quoted argument to a PowerShell data cmdlet is data
+  (T0710). [default changes]** `Where-Object Name -Match 'a|run'` is no longer refused as
+  a launch when the shell is proven PowerShell. With an unknown shell it is still refused,
+  and so is every quoted path behind the call operator.
+- **Deny floor: two stricter answers. [default changes]** A path holding a NUL and a
+  source in a network folder now refuse as an unresolvable path instead of giving no
+  answer.
+- **`spawn --pty --exec litetui` verifies that the seat joined (T0085). [default
+  changes]** The spawn waits for the seat to register under its provisional pty id. If it
+  has not joined within 90 seconds the spawn is refused with exit 2, the pty is killed and
+  its placeholder row is removed; an unverified seat is never reported as spawned.
+- **Spawn applies the seat floor through `bash -c` and `sh -c` wrappers, keeps quoted seat
+  paths inside a wrapper whole, and skips protected panes after a pre-creation refusal.
+  [default changes]** A spawn that would land in the orchestrator's own pane is refused.
+- **`send` to an alias is delivered or refused (T0226). [default changes]** A non-force
+  send addressed to a seat's session alias used to print "Sent" and be claimed by nobody.
+  It now goes to the one live agent that holds the alias, with a second line naming the
+  id; with several live holders, or none, it exits 1 and sends nothing. An exact id and
+  `--force` are unchanged.
+- **A live name holder is no longer read as a reused PID (T0103). [default changes]** A
+  registration stamp up to 20 ms earlier than the process's creation time is accepted as
+  the same process. Stated cost: a PID reused within 20 ms of the old registration would
+  be read as the owner.
+- **`sync_catalog` can no longer copy a runtime database into the public catalog
+  (T0040-A). [default changes]** Databases, their sidecar files and index markers are
+  skipped by the copy and git-ignored under the catalog.
+- **`ls-youtube`: Whisper is opt-in, the agent summarises by default, and an empty caption
+  body is named. [default changes]**
+- **`ls-tts`: version numbers are spoken as "point"**, which one voice engine stuttered on.
+- **The session-start cheatsheet names `/canvas/split {paneId, sessionId}` and
+  `GET /pty/orphans` (T0065).**
+- **Public shipping guard: names are allowed.** `scripts/check_pii.py` and the two tree
+  tests no longer refuse a person's or a seat's name. They still refuse one project's
+  vocabulary, machine paths, the hashed private identifiers and personal emails, and the
+  private-drive pattern now matches any drive letter, not one.
+
+### Fixed
+- **Memory lookup: a semantic lookup whose child fails to start records one lookup event
+  with status `error` (T0585-J)** instead of none. A failure after the child starts is
+  still the child's to record.
+- **Librarian tick (T0487):** the failure text can no longer raise, the ledger entry is
+  capped at 300 characters, and a spawn with invalid arguments is recorded instead of
+  crashing the tick. `KeyboardInterrupt` still propagates.
+- **`clerk start --cli claude-code`** no longer passes a LiteTUI-only option that a fresh
+  Claude spawn refuses.
+- **Checkpoint roster:** LiteTUI seats get a launch directory the roster can read, and the
+  roster finds the LiteTUI data root through the LiteSuite bridge when the resolver is
+  absent. A save no longer blocks a LiteTUI seat on a former holder's name row.
+
 ## [0.4.8] — 2026-10-22
 
 Four locally merged cards that the maintainer has not yet checked end to end.
