@@ -10,7 +10,7 @@ SEAT_ID = "11111111-1111-4111-8111-111111111111"
 
 
 @pytest.fixture
-def world(monkeypatch, tmp_path):
+def world(monkeypatch, tmp_path, runtime_observer):
     calls = []
     state = {"rename_failures": 0, "rename_exception": None}
     monkeypatch.setenv("LITEHARNESS_AGENT_ID", "caller-1")
@@ -26,8 +26,14 @@ def world(monkeypatch, tmp_path):
             return {"ok": True, "agentId": SEAT_ID, "request": {
                 "shell": "litetui.exe", "args": [], "env": {}, "harnessAgentId": SEAT_ID}}
         if path in ("/pty/create", "/canvas/split"):
+            if path == "/canvas/split":
+                # Since ba9351f a spawn is reported only after the exact new runtime is read back
+                # from the registry and the native session list: the child "registers" here.
+                runtime_observer.publish(SEAT_ID, "pty-9")
             return ({"session_id": "pty-7", "pid": 1} if path == "/pty/create"
                     else {"ok": True, "newLeafId": "leaf-9", "newSessionId": "pty-9"})
+        if path == "/pty/list":
+            return {"sessions": list(runtime_observer.sessions)}
         if path == "/canvas/rename-terminal":
             if state["rename_exception"]:
                 raise state["rename_exception"]
