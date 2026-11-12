@@ -119,7 +119,13 @@ with network_fence(guard_bridge=False) as attempts:
  hooks.register_presence()
  assert not attempts,attempts
 '''
+    # The children run `-c` from the project folder, so nothing puts this test folder or this
+    # checkout on their path: the guard module was unimportable (the test has failed with
+    # ModuleNotFoundError since a39eac5 added that import) and `liteharness` came from whatever
+    # copy the interpreter had installed, not from the tree under test.
+    here = Path(__file__).resolve().parent
     env = {**os.environ, 'LITETUI_NO_HARNESS': '1', 'PYTHONDONTWRITEBYTECODE': '1',
+           'PYTHONPATH': os.pathsep.join((str(here.parent), str(here))),
            'T0589_CONCURRENT': json.dumps(dict(root=str(root), project=str(project), owner=os.getpid(),
                cid=Path(row['transcript_path']).stem, transcript=row['transcript_path'], marker=str(marker), barrier=str(barrier)))}
     children = [subprocess.Popen([sys.executable, '-X', 'utf8', '-u', '-c', script, str(index)],
