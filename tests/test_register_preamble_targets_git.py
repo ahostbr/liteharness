@@ -26,8 +26,10 @@ class RegisterPreambleTargetsGitTests(unittest.TestCase):
     def test_the_preamble_is_actually_in_this_function(self) -> None:
         # Control. Every assertion below is a substring check over `self.src`,
         # and all of them pass trivially if the block has merely MOVED to another
-        # function. This anchors them to a known-present neighbour.
-        self.assertIn("CHAIN OF COMMAND", self.src)
+        # function. This anchors them to a known-present neighbour. (The anchor was the
+        # "CHAIN OF COMMAND" paragraph until d64affa replaced that paragraph with the peer
+        # charter on purpose; the paragraph before the durable-knowledge block is the anchor now.)
+        self.assertIn("CLAIM YOUR WORK", self.src)
         self.assertGreater(len(self.src), 2000)
 
     def test_it_does_not_send_agents_to_a_memory_file(self) -> None:
