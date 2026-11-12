@@ -1675,7 +1675,8 @@ def cmd_register(
     registration(presence, "liteharness-cli-register")
     try:
         from .claude_identity import record_registered_name
-        record_registered_name(presence)
+        # --takeover reaches the resume index too, or it keeps naming the dead holder it was taken from.
+        record_registered_name(presence, takeover=takeover and not name_refused)
     except (ValueError, OSError) as exc:
         print(f"Warning: registered but Claude resume index unavailable: {exc}", file=sys.stderr)
     if presence.get("canvas_session_id"):

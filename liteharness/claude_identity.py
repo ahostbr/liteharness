@@ -76,8 +76,14 @@ def transcript_identity(row: dict, *, native_id: str | None = None,
     return native_id, found_cwd, path
 
 
-def record_registered_name(presence: dict) -> None:
-    """After actual registration, use the existing atomic collision-protected writer."""
+def record_registered_name(presence: dict, *, takeover: bool = False) -> None:
+    """After actual registration, use the existing atomic collision-protected writer.
+
+    `takeover` is the caller's EXPLICIT `register --takeover`, never implied by a session hook.
+    It moves the name in the index off a holder that is not live: the registry had already given
+    the name to the new seat, while the index kept naming the dead one, so a resume by name
+    reopened a conversation nobody was in (measured 2026-11-12). A LIVE holder is still refused.
+    """
     if presence.get('cli') not in ('claude-code', 'claude'):
         return
     from . import agent_names
@@ -87,8 +93,13 @@ def record_registered_name(presence: dict) -> None:
         raise ValueError('Claude registration lacks its actual resolved name/agent identity')
     # This also runs in a SPAWNER: its ambient native session is not the child.
     native_id, cwd, _ = transcript_identity(presence)
+    if takeover:
+        from .clerk_route import clerk_is_live
+        held = agent_names.resolve_name(presence['name'])
+        holder = (held or {}).get('agent_id')
+        takeover = bool(holder) and holder != presence['agent_id'] and not clerk_is_live(str(holder))
     agent_names.record_name(presence['name'], presence['agent_id'], native_id, cwd,
-                            backend='claude', model=presence.get('model'))
+                            backend='claude', model=presence.get('model'), takeover=takeover)
 
 
 def real_model(value) -> str | None:

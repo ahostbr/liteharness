@@ -129,6 +129,11 @@ touched. Lines marked **[opt-in]** do nothing until you switch them on.
   archive, and after `/clear` (a new session id in the same terminal) from the row the same
   process registered last. The role a spawner sets still wins. A seat whose archive was
   already written with the wrong role registers its role once more; after that it survives.
+- **`register --takeover` moves the name in the resume index too.** The registry gave the
+  name to the new seat while `names.json`, which a resume by name reads, kept the previous
+  holder, and the command warned "already belongs to agent ... resume it instead" about an
+  agent that was gone. With `--takeover` the index entry now moves when its holder is not
+  live. A live holder is still refused, and a session hook never replaces a saved binding.
 
 ## [0.4.8] — 2026-10-22
 
