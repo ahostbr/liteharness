@@ -12,7 +12,10 @@ from . import config, inbox
 from .clerk_route import clerk_is_live
 
 DEFAULT_MODELS = ["gpt-6-astra", "gpt-6.1-sol", "claude-sonnet-5-5", "claude-haiku-5-5"]
-DIRECT_SENDERS = ["orchestrator-chat", "ryan-literec", "Theater"]
+# Shipped empty on purpose: which senders are a human's own sources is a fact about one machine,
+# so it lives in that machine's clerk.json ("direct_senders"), never in the package. `enable`
+# keeps a list that is already there.
+DIRECT_SENDERS: list[str] = []
 ACTIONS = ("acked", "answered", "forwarded", "relayed", "digested")
 SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 
@@ -122,6 +125,9 @@ def start(*, pane: str, spawn_cli: str = "litetui", model: str | None = None,
             raise ValueError("Clerk is already online; use its normal inbox, not a second start")
     role = (Path(__file__).parent / "prompts/clerk.md").read_text(encoding="utf-8")
     role = role.replace("<orchestrator name>", _name(orchestrator)).replace("<orchestrator-id>", orchestrator)
+    senders = cfg.get("direct_senders")
+    senders = [s for s in senders if isinstance(s, str)] if isinstance(senders, list) else []
+    role = role.replace("<direct senders>", ", ".join(f"`{s}`" for s in senders) or "none configured")
     role_file = config.get_root() / "clerk" / f"role-{orchestrator}.md"
     role_file.parent.mkdir(parents=True, exist_ok=True)
     role_file.write_text(role, encoding="utf-8")

@@ -30,7 +30,10 @@ touched. Lines marked **[opt-in]** do nothing until you switch them on.
   disabled one, every message is addressed exactly as before. Enabled, a message to the
   orchestrator goes to a live clerk seat first; with the clerk offline it goes straight
   through, and a malformed presence file fails open to direct delivery. `--direct` (MCP
-  `direct: true`) bypasses the clerk. The clerk acknowledges, answers facts only from a
+  `direct: true`) bypasses the clerk, and so does any sender listed in `direct_senders` in
+  `clerk.json`. That list ships empty: which senders are your own sources is a fact about
+  your machine, so you add them there, and `clerk enable` keeps a list that already exists.
+  The clerk's role text names the configured senders, or says none are configured. The clerk acknowledges, answers facts only from a
   quoted live command, relays only when asked and forwards everything on its never-list
   with the original body unchanged. `liteharness clerk start` requires an explicit
   `--pane`, so the clerk can never be split into the orchestrator's own pane, and runs on

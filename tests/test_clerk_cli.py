@@ -48,9 +48,55 @@ def test_off_by_default_enable_disable_does_not_spawn(root, monkeypatch):
     clerk.enable("orch")
     assert cfg(root)["enabled"] is True
     assert not cfg(root).get("clerk_id")
-    assert cfg(root)["direct_senders"] == ["orchestrator-chat", "ryan-literec", "Theater"]
+    assert cfg(root)["direct_senders"] == []
     clerk.disable()
     assert cfg(root)["enabled"] is False
+
+
+def test_the_shipped_default_names_no_direct_sender_and_a_local_list_is_kept(root, monkeypatch):
+    """Whose sources bypass the clerk is one machine's fact: the package ships none (maintainer, 2026-11-11: "blank")."""
+    from pathlib import Path
+    assert clerk.DIRECT_SENDERS == []
+    shipped = Path(clerk.__file__).read_text(encoding="utf-8")
+    assert "DIRECT_SENDERS: list[str] = []" in shipped, "the default must be an empty literal, not a computed list"
+    clerk.enable("orch")
+    assert cfg(root)["direct_senders"] == []
+    assert clerk_route_accepts(root), "an empty list is a valid configuration, not a disabled clerk"
+
+    # A machine that already lists its own sources keeps them through enable and disable.
+    data = cfg(root)
+    data["direct_senders"] = ["my-voice-source", "my-page-source"]
+    (root / "clerk.json").write_text(json.dumps(data), encoding="utf-8")
+    clerk.disable()
+    clerk.enable("orch")
+    assert cfg(root)["direct_senders"] == ["my-voice-source", "my-page-source"]
+
+
+def clerk_route_accepts(root):
+    from liteharness import clerk_route
+    data = cfg(root)
+    data["clerk_id"] = "clerk-seat"
+    (root / "clerk.json").write_text(json.dumps(data), encoding="utf-8")
+    loaded = clerk_route.load_clerk_config()
+    (root / "clerk.json").write_text(json.dumps({k: v for k, v in data.items() if k != "clerk_id"}), encoding="utf-8")
+    return loaded is not None and loaded["direct_senders"] == []
+
+
+@pytest.mark.parametrize("senders,expected", [([], "(none configured)"),
+                                              (["my-voice-source", "my-page-source"], "(`my-voice-source`, `my-page-source`)")])
+def test_the_role_names_this_machines_direct_senders_and_no_one_elses(root, monkeypatch, senders, expected):
+    clerk.enable("orch")
+    data = cfg(root)
+    data["direct_senders"] = senders
+    (root / "clerk.json").write_text(json.dumps(data), encoding="utf-8")
+    seen = []
+    def spawn(**kw):
+        seen.append(kw["prompt"])
+        register(root)
+    monkeypatch.setattr(cli, "cmd_spawn", spawn)
+    clerk.start(pane="clerk-pane", spawn_cli="litetui", model="gpt-6-astra", cwd=str(root.parent))
+    assert "configuration " + expected + ";" in " ".join(seen[0].split())
+    assert "<direct senders>" not in seen[0]
 
 
 @pytest.mark.parametrize("route,model,backend", [("litetui", "gpt-6-astra", "codex"),

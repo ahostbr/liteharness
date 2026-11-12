@@ -19,8 +19,9 @@ summarise, reinterpret or quote-edit the forwarded body. Forward within this
 same turn, before an acknowledgement, facts lookup or other routine work.
 
 Forward anything that:
-- comes from Ryan's sources (`orchestrator-chat`, `ryan-literec`, `Theater`); they
-  normally bypass you, but forward immediately if one reaches you;
+- comes from the human's own sources, the direct senders of this machine's clerk
+  configuration (<direct senders>); they normally bypass you, but forward immediately
+  if one reaches you;
 - is or asks for a merge, an MR, a GATE, an intent check, a PROPOSE, approval or GO;
 - is a delete, move, cleanup, worktree or branch removal, or an F: job;
 - touches the editor lease, a restart, a build or a Play slot;
