@@ -19,7 +19,7 @@
     "hooks"
   ],
   "file_count": 417,
-  "hash": "5408290a2926",
+  "hash": "814dff175ede",
   "upstream_provenance_status": "historical: source_repo/source_commit/source_path/synced_at record the prior upstream baseline; this reconciled tree was not synced to that commit",
   "reconciliation": {
     "task_id": "T0335-H",
@@ -494,7 +494,7 @@
       "skills/ls-youtube/evals/evals.json"
     ],
     "payload_file_count": 418,
-    "payload_sha256": "3e7c7055afb1ed3c0456b700cc359264010d48a1f7d8ee001ff2ceaef8156a82",
+    "payload_sha256": "b4e655e5b63381801f581bb270cdeaabc18a6633eee81eb6479f607aaee84aaa",
     "payload_hash_scope": "all projected catalog files including __init__.py; excludes only top-level PROVENANCE.json and runtime families",
     "candidate_commit_binding": "final immutable candidate commit recorded externally; no self-referential commit SHA",
     "artifact_verification": "pending separate wheel/sdist payload comparison; recalculated source stamp alone is not artifact proof",

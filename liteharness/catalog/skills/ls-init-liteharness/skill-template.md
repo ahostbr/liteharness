@@ -107,8 +107,6 @@ Never replace a seat under a fresh name. Every fresh fleet spawn
 has an explicit `--cwd <repo root>`; `liteharness names --list` shows the saved
 identity, conversation and cwd.
 
-**Closing terminals:** Close a terminal only when the human explicitly asks.
-
 
 ## Merge and human-look gate
 

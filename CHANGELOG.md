@@ -5,6 +5,14 @@ All notable changes to **liteharness** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+- The rule "close a terminal only when the human asks" is dropped from the shipped skills
+  (`ls-liteharness`, `ls-init-liteharness`, `ls-sentinel`). `liteharness pty-kill` and
+  `DELETE /pty/<sessionId>` stay documented as plain commands. The shipped prompts dropped
+  the rule earlier.
+
 ## [0.4.9] — 2026-11-11
 
 Everything merged since 0.4.8: 87 commits before this release's own. The maintainer has

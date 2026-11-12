@@ -105,7 +105,7 @@ curl -X POST http://127.0.0.1:7423/canvas/focus \
   -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)" \
   -d '{"paneId": "'$LITESUITE_PANE_ID'", "leafId": "<leafId>"}'
 
-# Close the terminal only when the human explicitly asks
+# Close the terminal
 curl -X DELETE http://127.0.0.1:7423/pty/<sessionId> \
   -H "Authorization: Bearer $(cat ~/.litesuite/bridge-token)"
 
@@ -115,8 +115,6 @@ liteharness send <agent-id> "<follow-up task>" --from <your-agent-id>
 liteharness spawn --split --resume <Name>
 ```
 
-
-**Closing terminals:** Close a terminal only when the human explicitly asks.
 
 **Spatial observation:** A hidden pane is retained layout, not a missing or dead seat.
 Multiple leaves can display the same session; a view is not an agent identity.
