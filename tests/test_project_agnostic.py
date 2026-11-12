@@ -1,4 +1,5 @@
-"""The shipped harness is project-agnostic: it carries mechanism, never a project's vocabulary.
+"""The shipped harness is project-agnostic: it carries mechanism, never a project's vocabulary
+or a machine's own folders. People's and seats' names are allowed (ruling of 2026-11-11).
 
 Three arms, all case-insensitive and path-separator-insensitive:
   - the lines this branch adds (committed, staged, unstaged and untracked) and its commit messages;
@@ -15,52 +16,28 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
-WORDS = ["Kub" + "rick", "SO" + "TS", "Shad" + "ows", "Shu" + "rikens", "Ry" + "an", "Senti" + "nel"]
-PATHS = ["c:/" + "projects", "e:/" + "sas", "users/" + "ry" + "an"]
+# What is refused, since the maintainer's ruling of 2026-11-11: one project's vocabulary and a
+# machine's own paths. What is NOT refused any more: people's and seats' names. His words: names
+# are fine; folders, keys, build logs and emails are what must not ship. Keys, emails and the
+# hashed private identifiers are scripts/check_pii.py's job (tests/test_ships_no_personal_default.py).
+NAMES_ALLOWED = ["Kub" + "rick", "Ry" + "an", "Senti" + "nel"]
+WORDS = ["SO" + "TS", "Shad" + "ows", "Shu" + "rikens"]
+RUN_TOGETHER = ["shad" + "owsand" + "shu" + "rikens"]  # the project's folder name, wherever it sits in a word
+PATHS = ["c:/" + "projects", "e:/" + "sas", "g:/" + "sas", "users/" + "ry" + "an"]
 PATTERN = re.compile("|".join([r"\b%s\b" % re.escape(w.lower()) for w in WORDS]
-                              + [re.escape(p) for p in PATHS]))
+                              + [re.escape(p) for p in RUN_TOGETHER + PATHS]))
 
-# The whole-tree arm cannot use every word: some are ordinary English or a real polymath's name.
+# The whole-tree arm cannot use every word: one is ordinary English.
 # A tracked file may carry a matching LINE only if that exact line is listed here, by a hash of
 # its stripped text (so this file does not itself contain the words). The exemption is per line,
 # never per file: a new line, or an edit to an allowed one, in any of these files is a finding.
-# Carriers: a shipped polymath agent whose subject shares a famous director's name, the
-# provenance stamp that records it, the author line in LICENSE and pyproject, and two fixture
-# files that exercise the handoff-audit and deny-floor word lists.
-TREE_WORDS = [w for w in WORDS if w not in ("Shad" + "ows", "Senti" + "nel")]
+# Carriers: two fixture files that exercise the handoff-audit and deny-floor word lists. The
+# lines that were listed only for a person's or a seat's name (the author line in LICENSE and
+# pyproject, a polymath agent and its provenance stamp) need no exemption now and are gone.
+TREE_WORDS = [w for w in WORDS if w != "Shad" + "ows"]
 TREE_PATTERN = re.compile("|".join([r"\b%s\b" % re.escape(w.lower()) for w in TREE_WORDS]
-                                   + [re.escape(p) for p in PATHS]))
+                                   + [re.escape(p) for p in RUN_TOGETHER + PATHS]))
 TREE_ALLOWED_LINES = {
-    "LICENSE": frozenset({
-        "4c9fc40fc8b51da2",
-    }),
-    "liteharness/catalog/PROVENANCE.json": frozenset({
-        "5a040f8fa9334537",
-    }),
-    "liteharness/catalog/agents/polymathic-ive.md": frozenset({
-        "8f8b39de53e029b5",
-        "b6151eaf960a244a",
-    }),
-    "liteharness/catalog/agents/polymathic-" + "kub" + "rick.md": frozenset({
-        "2697abf1b7f5b902",
-        "39e09acf32c77848",
-        "3aaf7d247c694457",
-        "46fb174cbb2d77f2",
-        "5151885965024e5d",
-        "814fc4ce2b2313ec",
-        "861487c731904921",
-        "90dc544e43a2419b",
-        "98d1f9b846a043ce",
-        "9f14240573c1120b",
-        "a43c8814336ab343",
-        "a8f0232d7e8f7906",
-        "e673b236d58d8dfb",
-        "eca201a2c6681d0d",
-    }),
-    "pyproject.toml": frozenset({
-        "83063798b1dea405",
-        "c759fec564c823bc",
-    }),
     "tests/test_deny_floor.py": frozenset({
         "58877c2352d03de6",
     }),
@@ -126,15 +103,25 @@ def _text(path: Path) -> str | None:
 
 def test_the_scan_catches_planted_leaks_in_any_case():
     diff = "\n".join([
-        "+++ b/x.py", "+ok line", "+" + "SO" + "TS roster", "+" + "kub" + "rick in lower case",
-        "+path C:\\" + "Projects\\x", "+" + "Senti" + "nel", "-" + "Ry" + "an removed", "+" + "Ry" + "an" + "ish is fine",
+        "+++ b/x.py", "+ok line", "+" + "SO" + "TS roster", "+" + "so" + "ts in lower case",
+        "+path C:\\" + "Projects\\x", "+cwd G:\\" + "SAS\\x", "+cwd e:/" + "sas/x",
+        "+docs in My" + "Shad" + "owsAnd" + "Shu" + "rikens" + "Docs", "+home C:\\Users\\" + "Ry" + "an\\x",
+        "-" + "SO" + "TS removed", "+" + "SO" + "TSish is fine",
     ])
     assert hits(added_lines(diff)) == [
-        "SO" + "TS roster", "kub" + "rick in lower case", "path C:\\" + "Projects\\x", "Senti" + "nel"]
+        "SO" + "TS roster", "so" + "ts in lower case", "path C:\\" + "Projects\\x", "cwd G:\\" + "SAS\\x",
+        "cwd e:/" + "sas/x", "docs in My" + "Shad" + "owsAnd" + "Shu" + "rikens" + "Docs", "home C:\\Users\\" + "Ry" + "an\\x"]
+
+
+def test_names_of_people_and_seats_are_not_a_leak():
+    """The maintainer's ruling of 2026-11-11: names are fine. A name inside a personal path is still the path."""
+    lines = ["asked " + name for name in NAMES_ALLOWED] + [name.lower() + " said so" for name in NAMES_ALLOWED]
+    assert hits(lines) == [] and hits(lines, TREE_PATTERN) == []
+    assert hits(["C:/Users/" + NAMES_ALLOWED[1] + "/notes"]) != [], "a home folder is a path, whoever it names"
 
 
 def test_removed_and_header_lines_are_not_scanned():
-    assert added_lines("+++ b/Ry" + "an.py\n-" + "SO" + "TS\n context\n") == []
+    assert added_lines("+++ b/" + "SO" + "TS.py\n-" + "SO" + "TS\n context\n") == []
 
 
 def test_the_tree_scan_catches_a_planted_leak_and_honours_the_allowlist():
