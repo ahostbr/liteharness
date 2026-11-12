@@ -1684,6 +1684,75 @@ def _print_lore(agent_id: str) -> None:
         print(f"[LITEHARNESS] lore unavailable ({_lore_exc!r})")
 
 
+def _archived_role(agent_id: str) -> str | None:
+    """The role this SAME id held when its session last ended, from the row `deregister` archived
+    (`seat_lifecycle.preserve_before_delete` -> retired-agents/<id>.json). None: no archive of it."""
+    own = _read_presence(config.get_root() / "retired-agents" / f"{agent_id}.json")
+    return _roles.row_role(own, "") if own.get("agent_id") == agent_id else None
+
+
+def _process_role(agent_id: str) -> str:
+    """The role of the seat this live Claude process was until now, for a NEW id in it (a /clear
+    gives the same terminal a new session id). "" when unknown.
+
+    The row that process registered last, live or archived, matched by pid AND process start time:
+    a pid alone can be a reused one. Only a session hook may ask this. `liteharness register` can
+    name ANY id from inside a seat, and must not hand that id the caller's role.
+    """
+    retired = config.get_root() / "retired-agents"
+    session_pid = _resolve_session_pid()
+    if not session_pid or config.get_cli() != "claude-code":
+        return ""
+    try:
+        import psutil
+
+        started_ms = psutil.Process(session_pid).create_time() * 1000
+    except Exception:  # noqa: BLE001 - no process identity means no inheritance, never a guess
+        return ""
+    best = ("", "")
+    for folder in (config.get_root() / "agents", retired):
+        try:
+            # A file last written before this process existed cannot describe it: skip those unread.
+            entries = [e for e in os.scandir(folder) if e.name.endswith(".json") and e.name[:-5] != agent_id
+                       and e.stat().st_mtime >= started_ms / 1000 - 5]
+        except OSError:
+            continue
+        for entry in entries:
+            row = _read_presence(entry.path)
+            try:
+                same_process = abs(float(row.get("session_process_started_at")) - started_ms) <= 1.0
+            except (TypeError, ValueError):
+                continue
+            if (same_process and row.get("cli") == "claude-code"
+                    and _parse_positive_int(row.get("session_pid")) == session_pid):
+                stamp = str(row.get("registered_at") or "")
+                if stamp > best[0]:
+                    best = (stamp, _roles.row_role(row, ""))
+    return best[1]
+
+
+def _registration_role(agent_id: str, existing: dict) -> str:
+    """The role a registration writes: the environment, else the live row, else what the seat was.
+
+    🔴 A RESUMED ORCHESTRATOR CAME BACK AS A BUILDER (measured 2026-11-12). `deregister` deletes
+    the row when a session ends, so the next SessionStart for the same id found no row and wrote
+    the default role. The NAME survived that (it has its own store, `names/`); the role had none
+    that registration read, though the archive beside it held the answer. Everything keyed on the
+    orchestrator role (the clerk's routing, the pane kept clear for the orchestrator, the
+    registration announcements) then found nobody.
+
+        A ROW IS REBUILT FROM NOTHING AT EVERY RESUME. Whatever must outlive a session has to be
+        read back from somewhere that outlives the row.
+    """
+    role = _roles.env_role()
+    if role:
+        return role
+    if existing:
+        return _roles.row_role(existing)
+    archived = _archived_role(agent_id)
+    return (_process_role(agent_id) if archived is None else archived) or _roles.DEFAULT_ROLE
+
+
 def register_presence() -> None:
     """
     Write a presence file and output agent identity block.
@@ -1702,7 +1771,7 @@ def register_presence() -> None:
     # it prints) can carry the agent's resolved tier. SessionStart can fire
     # multiple times (resume, compaction) — never downgrade known values.
     existing: dict = _read_presence(path)
-    tier = _roles.env_role() or _roles.row_role(existing)
+    tier = _registration_role(agent_id, existing)
     # Who spawned this agent, so it can report in to its LEADER rather than guessing
     # the orchestrator. Same never-downgrade rule as tier: a re-register (resume,
     # compaction) must not erase a known parent by arriving with an empty env.
@@ -1968,7 +2037,7 @@ def register_presence() -> None:
         return new_value or old_value or "unknown"
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    tier = _roles.env_role() or _roles.row_role(existing)
+    tier = _registration_role(agent_id, existing)
     team = os.environ.get("LITEHARNESS_TEAM") or existing.get("team") or ""
     thread_id = os.environ.get("LITEHARNESS_THREAD_ID") or existing.get("thread_id") or ""
     workspace_id = os.environ.get("LITEHARNESS_WORKSPACE_ID") or existing.get("workspace_id") or ""

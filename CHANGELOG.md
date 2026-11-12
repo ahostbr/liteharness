@@ -122,6 +122,13 @@ touched. Lines marked **[opt-in]** do nothing until you switch them on.
 - **Checkpoint roster:** LiteTUI seats get a launch directory the roster can read, and the
   roster finds the LiteTUI data root through the LiteSuite bridge when the resolver is
   absent. A save no longer blocks a LiteTUI seat on a former holder's name row.
+- **A resumed seat keeps its role. [default changes]** A session end archives and deletes
+  the registry row, and the next session start for the same id used to write the default
+  role, so a resumed orchestrator came back as a builder and everything that looks for the
+  orchestrator by role stopped finding it. Registration now reads the role back from that
+  archive, and after `/clear` (a new session id in the same terminal) from the row the same
+  process registered last. The role a spawner sets still wins. A seat whose archive was
+  already written with the wrong role registers its role once more; after that it survives.
 
 ## [0.4.8] — 2026-10-22
 

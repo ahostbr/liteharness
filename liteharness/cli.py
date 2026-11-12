@@ -1573,7 +1573,9 @@ def cmd_register(
         if _roles.deprecation_note(tier):
             print(_roles.deprecation_note(tier), file=sys.stderr)
     elif "tier" not in presence and "role" not in presence:
-        presence.update(_roles.presence_fields(_roles.DEFAULT_ROLE))
+        # No row and no --tier: what this seat was when its session last ended, else the default.
+        from .hooks import _archived_role
+        presence.update(_roles.presence_fields(_archived_role(agent_id) or _roles.DEFAULT_ROLE))
 
     if team:
         presence["team"] = team
