@@ -9,7 +9,7 @@ from liteharness import agent_names, cli, hooks, seat_lifecycle
 from test_claude_registration_resume_t0589 import AID, CID, NAME, registered  # noqa: F401
 
 
-def resume(target, monkeypatch):
+def resume(target, monkeypatch, **spawn_options):
     entrypoint = cli.cmd_spawn
     launches = []
     original_bridge = cli._bridge_request
@@ -18,7 +18,8 @@ def resume(target, monkeypatch):
         else original_bridge(method, path, body, **kw))
     monkeypatch.setattr(cli, 'cmd_spawn', lambda **kwargs: launches.append(kwargs))
     try:
-        entrypoint(split_mode=True, resume_agent_id=target, tier='worker', spawned_by='parent-589')
+        entrypoint(split_mode=True, resume_agent_id=target, tier='worker', spawned_by='parent-589',
+                   **spawn_options)
     except SystemExit as exc:
         code = exc.code
     else:
@@ -43,9 +44,24 @@ def test_uuid_never_launches_a_missing_foreign_ambiguous_or_live_native_session(
         duplicate = transcript.parent.parent / 'duplicate-project' / transcript.name
         duplicate.parent.mkdir()
         duplicate.write_bytes(transcript.read_bytes())
-    code, launches = resume(AID, monkeypatch)
+    # Since 8d3b3d7 the transcript's first cwd IS the launch directory and the registry's cwd is
+    # only a locator (a seat that ever changed directory was being refused). What still refuses
+    # is a caller who asks for a directory the transcript contradicts.
+    asked = {'cwd': str(project)} if fault == 'wrong-cwd' else {}
+    code, launches = resume(AID, monkeypatch, **asked)
     assert code == 2 and launches == []
     assert 'SPAWN REFUSED' in capsys.readouterr().out
+
+
+def test_a_registry_cwd_that_drifted_from_the_transcript_launches_from_the_transcript(registered, monkeypatch):
+    """The other half of 8d3b3d7: with no directory asked for, the drifted registry cwd is ignored."""
+    _, project, row_path, row = registered
+    row.update(exited_at=datetime.now(timezone.utc).isoformat(), status='offline')
+    row_path.write_text(json.dumps(row), encoding='utf-8')
+    Path(row['transcript_path']).write_text(
+        json.dumps({'sessionId': CID, 'cwd': str(project.parent)}) + '\n', encoding='utf-8')
+    code, launches = resume(AID, monkeypatch)
+    assert code == 0 and [launch['cwd'] for launch in launches] == [str(project.parent)]
 
 
 def test_raw_uuid_uses_real_retired_identity_without_a_names_index(registered, monkeypatch):
