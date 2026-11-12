@@ -2518,7 +2518,13 @@ def cmd_record_pattern(
     # and surrounding space are not a different ANSWER, they are the same answer
     # typed by a human.
     schema_outcome = str(outcome).strip().lower()
-    if schema_outcome in ("stuck", "unknown", "blocked"):
+    # The word the caller gave, kept only when it is one this mapping is about to
+    # replace. `unknown` ("not measured yet") and `failure` ("it failed") are
+    # different answers; the stored enum has room for one of them, so the row
+    # carries the other beside it instead of losing it (2026-11-12: a record sent
+    # as `unknown` read back as a plain failure, with no trace of the word).
+    outcome_given = schema_outcome if schema_outcome in ("stuck", "unknown", "blocked") else None
+    if outcome_given:
         schema_outcome = "failure"
 
     # 🔴 T884 — THE WRITER ACCEPTED WHAT THE READER REFUSES, AND SAID IT HAD
@@ -2555,7 +2561,7 @@ def cmd_record_pattern(
                 "  only by an attestation (`verify-pattern`), which carries its own\n"
                 "  evidence. Leave it alone and pass the result of the work instead:\n"
                 "  --outcome success|failure (also accepted: stuck|unknown|blocked,\n"
-                "  which are recorded as failure).",
+                "  which are recorded as failure with the word kept as outcome_given).",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -2568,7 +2574,8 @@ def cmd_record_pattern(
             "  That text is the pattern's analysis and it belongs in --task (the\n"
             "  `approach`/`description` field), which has no length limit and is what\n"
             "  `query-patterns` searches. `outcome` is one of:\n"
-            "      success | failure        (also stuck|unknown|blocked -> failure)\n"
+            "      success | failure        (also stuck|unknown|blocked -> failure,\n"
+            "                                with the word kept as outcome_given)\n"
             "  Written as-is, this row would be ACCEPTED here and REFUSED by every\n"
             "  reader — recorded, and unrecallable. 40 such rows already exist.",
             file=sys.stderr,
@@ -2594,8 +2601,12 @@ def cmd_record_pattern(
 
     if supersedes:
         entry["supersedes"] = supersedes
-    if outcome in ("failure", "stuck"):
-        entry["reason"] = f"Outcome was {outcome}"
+    if outcome_given:
+        # An extra key: readers that know only `outcome` ignore it (the desktop
+        # schema is a plain z.object, which drops unknown keys).
+        entry["outcome_given"] = outcome_given
+    if outcome in ("failure", "stuck") or outcome_given:
+        entry["reason"] = f"Outcome was {outcome_given or outcome}"
     if git_summary:
         entry["description"] = f"{task_desc}\n\nGit diff summary:\n{git_summary}"
 
@@ -2616,6 +2627,15 @@ def cmd_record_pattern(
     # file — so `stuck` prints as `failure`, which is the normalisation actually
     # performed, and any future silent mapping shows up here instead of hiding.
     print(f"Recorded pattern: {entry['outcome']} for {entry['task_id']}")
+    # Same rule for the second line: it reads the key that reached the file, so
+    # it can only appear when the word was really kept. Without it the first
+    # line tells a caller who said `unknown` that a failure was recorded, and
+    # nothing says why.
+    if entry.get("outcome_given"):
+        print(
+            f"  Stored as failure because only success and failure are stored. "
+            f"The word given, {entry['outcome_given']!r}, is kept on the row as outcome_given."
+        )
 
 
 def _scope_note(path: Path, project: str | None) -> str:

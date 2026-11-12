@@ -152,9 +152,53 @@ class OutcomeRefusal(unittest.TestCase):
         code, out = _record(self.root, outcome="stuck")
 
         self.assertIsNone(code)
-        self.assertIn("failure", out)
-        self.assertNotIn("stuck", out)
+        first = out.splitlines()[0]
+        self.assertIn("failure", first)
+        # The first line is the stored outcome and nothing else. The word given
+        # may appear only on the second line, which is read from the row too.
+        self.assertNotIn("stuck", first)
         self.assertEqual([r["outcome"] for r in _rows(self.root)], ["failure"])
+
+    def test_the_word_given_is_kept_beside_the_stored_outcome(self):
+        """🔴 2026-11-12: a record sent as `unknown` ("compile-level only, nothing
+        measured yet") read back as a plain failure. The mapping is deliberate,
+        because the reader accepts two values; losing the word was not. `stuck`
+        at least left a reason line; `unknown` and `blocked` left nothing."""
+        for value in ("stuck", "unknown", "blocked", " Unknown "):
+            with self.subTest(outcome=value):
+                root = Path(tempfile.mkdtemp(dir=self._tmp.name))
+                code, out = _record(root, outcome=value)
+                word = value.strip().lower()
+                row = _rows(root)[0]
+
+                self.assertIsNone(code)
+                self.assertEqual(row["outcome"], "failure", "the reader's enum is unchanged")
+                self.assertEqual(row["outcome_given"], word)
+                self.assertEqual(row["reason"], f"Outcome was {word}")
+                lines = out.splitlines()
+                self.assertTrue(lines[0].startswith("Recorded pattern: failure for "))
+                self.assertIn(repr(word), lines[1])
+                self.assertIn("outcome_given", lines[1])
+
+    def test_a_plain_success_or_failure_gains_no_extra_key_or_line(self):
+        """CONTROL. The key marks a REPLACED word; a row that was not mapped must
+        not grow one, or it stops meaning anything."""
+        for value in ("success", "failure"):
+            with self.subTest(outcome=value):
+                root = Path(tempfile.mkdtemp(dir=self._tmp.name))
+                code, out = _record(root, outcome=value)
+
+                self.assertIsNone(code)
+                self.assertNotIn("outcome_given", _rows(root)[0])
+                self.assertEqual(len(out.splitlines()), 1)
+
+    def test_the_task_id_is_still_the_last_word_of_the_first_line(self):
+        """Callers take the id from the receipt (`--supersedes`); the second line
+        must not move it."""
+        code, out = _record(self.root, outcome="unknown")
+
+        self.assertIsNone(code)
+        self.assertEqual(out.splitlines()[0].rsplit(" ", 1)[-1], _rows(self.root)[0]["task_id"])
 
 
 if __name__ == "__main__":
