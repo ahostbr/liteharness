@@ -42,6 +42,22 @@ def presence(home, agent="clerk", **overrides):
     return record
 
 
+def orchestrator(home, agent="sentinel", **overrides):
+    """A LIVE orchestrator row, owned by this process's parent: alive, and not the clerk rows' pid
+    (two rows on one pid supersede each other)."""
+    return presence(home, agent, **{"role": "orchestrator", "tier": "orchestrator",
+                                    "session_pid": os.getppid(), **overrides})
+
+
+@pytest.fixture
+def sleeper():
+    """One more live process of our own, for a second orchestrator row."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    yield child.pid
+    child.kill()
+    child.wait(timeout=10)
+
+
 @pytest.mark.parametrize("frm,to,direct,forwarded,cfg,live,expected", [
     ("worker", "sentinel", False, None, None, True, ("sentinel", None)),
     ("worker", "sentinel", False, None, CFG, True, ("clerk", "sentinel")),
@@ -98,6 +114,7 @@ def test_presence_semantics(home, state):
 ])
 def test_cli_recipient_maildir(home, case, expected):
     if case != "absent": configure(home, {**CFG, "enabled": case != "disabled"})
+    orchestrator(home)  # live in every case, so each case's own reason decides the route
     if case == "dead":
         child = subprocess.Popen([sys.executable, "-c", "pass"])
         child.wait(timeout=10)
@@ -157,6 +174,7 @@ def test_process_start_boundary_and_unknown_leniency(home, monkeypatch, offset, 
 def test_malformed_presence_still_delivers_direct(home, identity, malformed):
     configure(home)
     presence(home)
+    orchestrator(home)  # live, so the malformed row is the only reason the mail goes direct
     (home / ".liteharness/agents" / f"{identity}.json").write_text(json.dumps(malformed), encoding="utf-8")
     env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home), "PYTHONPATH": str(ROOT)}
     result = subprocess.run([sys.executable, "-m", "liteharness.cli", "send", "sentinel", "never lose this body",

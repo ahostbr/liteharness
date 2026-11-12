@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, inbox
-from .clerk_route import clerk_is_live
+from .clerk_route import clerk_is_live, is_live_orchestrator, resolve_orchestrator
 
 DEFAULT_MODELS = ["gpt-6-astra", "gpt-6.1-sol", "claude-sonnet-5-5", "claude-haiku-5-5"]
 # Shipped empty on purpose: which senders are a human's own sources is a fact about one machine,
@@ -43,12 +43,23 @@ def _id(value: str) -> str:
     return value
 
 
-def enable(orchestrator_id: str) -> None:
-    orchestrator_id = _id(orchestrator_id)
+def _remember(cfg: dict, orchestrator_id: str) -> None:
+    """Record who the orchestrator is NOW. Advisory only: nothing routes on it (clerk_route decides live).
+    Other readers of clerk.json get a current id, and the name outlives the row it was read from."""
+    cfg["orchestrator_id"] = orchestrator_id
+    name = _registrations().get(orchestrator_id, {}).get("name")
+    if isinstance(name, str) and name.strip():
+        cfg["orchestrator_name"] = name.splitlines()[0][:128]
+
+
+def enable(orchestrator_id: str | None = None) -> None:
+    """Switch routing on. `orchestrator_id` is optional: without it the live orchestrator is recorded if
+    there is one. A stored id that has gone stale never refuses this and is simply replaced."""
     cfg = _read_config()
-    if cfg.get("clerk_id") and cfg.get("orchestrator_id") != orchestrator_id:
-        raise ValueError("Existing Clerk belongs to another orchestrator; do not rebind its identity")
-    cfg.update(enabled=True, orchestrator_id=orchestrator_id)
+    target = _id(orchestrator_id) if orchestrator_id else resolve_orchestrator(cfg)
+    cfg["enabled"] = True
+    if target:
+        _remember(cfg, target)
     cfg.setdefault("direct_senders", list(DIRECT_SENDERS))
     cfg.setdefault("allowed_models", list(DEFAULT_MODELS))
     _save(cfg)
@@ -65,7 +76,9 @@ def status() -> dict:
     seat = cfg.get("clerk_id")
     return {"enabled": cfg.get("enabled") is True,
             "online": bool(seat and SAFE_ID.fullmatch(str(seat)) and clerk_is_live(seat)),
-            "clerk_id": seat, "model": cfg.get("model")}
+            "clerk_id": seat, "model": cfg.get("model"),
+            # Read-only: who mail would be treated as "the orchestrator" right now, and the stored value.
+            "orchestrator_id": resolve_orchestrator(cfg), "stored_orchestrator_id": cfg.get("orchestrator_id")}
 
 
 def _registrations() -> dict[str, dict]:
@@ -94,7 +107,13 @@ def start(*, pane: str, spawn_cli: str = "litetui", model: str | None = None,
     cfg = _read_config()
     if cfg.get("enabled") is not True:
         raise ValueError("Clerk is disabled; enable --for <orchestrator-id> first")
-    orchestrator = _id(cfg.get("orchestrator_id"))
+    orchestrator = resolve_orchestrator(cfg)
+    if not orchestrator:
+        raise ValueError("No live orchestrator found; start the orchestrator seat first. "
+                         "The Clerk reports to whichever live agent holds the orchestrator role")
+    if orchestrator != cfg.get("orchestrator_id"):
+        _remember(cfg, orchestrator)
+        _save(cfg)
     if spawn_cli not in ("litetui", "claude-code"):
         raise ValueError("Clerk supports --cli litetui or claude-code")
     model = model or ("gpt-6-astra" if spawn_cli == "litetui" else "claude-sonnet-5-5")
@@ -158,11 +177,19 @@ def start(*, pane: str, spawn_cli: str = "litetui", model: str | None = None,
 
 def _owned_config() -> dict:
     cfg = _read_config()
-    _id(cfg.get("orchestrator_id"))
     seat = _id(cfg.get("clerk_id"))
-    if seat == cfg["orchestrator_id"] or config.get_agent_id() != seat:
+    if config.get_agent_id() != seat:
         raise ValueError("Forward/digest requires the Clerk's own identity")
     return cfg
+
+
+def _target(cfg: dict, msg: dict) -> str | None:
+    """The orchestrator a message is for: the one it was addressed to if that agent is still a live
+    orchestrator, else the live orchestrator now. None when there is none: never the stored id."""
+    addressed = msg.get("original_to")
+    if addressed != cfg.get("clerk_id") and is_live_orchestrator(addressed, cfg):
+        return addressed
+    return resolve_orchestrator(cfg)
 
 
 def _messages():
@@ -198,8 +225,9 @@ def message_body(msg: dict) -> str:
     raise ValueError("Original message has no textual body; inspect its payload, do not paraphrase")
 
 
-def _digest(cfg: dict, msg: dict, action: str, summary: str, **extra) -> None:
-    path = config.get_root() / "clerk" / f"digest-{cfg['orchestrator_id']}.jsonl"
+def _digest(orchestrator: str, msg: dict, action: str, summary: str, **extra) -> None:
+    # One digest per orchestrator id the mail was for; scripts/clerk_audit.py reads all of them.
+    path = config.get_root() / "clerk" / f"digest-{_id(orchestrator)}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     row = {"ts": datetime.now(timezone.utc).isoformat(), "msg_id": msg["id"],
            "from": msg["from"], "from_name": _name(msg["from"]),
@@ -218,7 +246,13 @@ def record_digest(msg_id: str, action: str, summary: str) -> None:
     if action not in ACTIONS or action == "forwarded":
         raise ValueError("Use clerk forward for forwarded receipts, not a claimed digest action")
     cfg = _owned_config()
-    _digest(cfg, _original(msg_id, cfg), action, summary)
+    msg = _original(msg_id, cfg)
+    # A routine receipt must not be lost while the orchestrator is offline: the stored id is good
+    # enough to NAME the digest file, though never to address mail.
+    orchestrator = _target(cfg, msg) or cfg.get("orchestrator_id")
+    if not orchestrator:
+        raise ValueError("No orchestrator is live or recorded; cannot name the digest")
+    _digest(orchestrator, msg, action, summary)
 
 
 def forward(msg_id: str) -> str:
@@ -234,18 +268,30 @@ def forward(msg_id: str) -> str:
 def _forward(msg_id: str, cfg: dict) -> str:
     msg = _original(msg_id, cfg)
     body = message_body(msg)
-    forwarded_body = (f"Clerk (not {_name(cfg['orchestrator_id'])}):\n"
+    orchestrator = _target(cfg, msg)
+    if not orchestrator:
+        # Sending to the stored id would be the silent loss this rule exists to end.
+        raise ValueError("No live orchestrator to forward to; the original stays in the Clerk's "
+                         "mailbox. Retry when an orchestrator is online")
+    if orchestrator != cfg.get("orchestrator_id"):
+        try:  # keep the advisory record current for other readers; never worth failing a forward
+            current = _read_config()
+            _remember(current, orchestrator)
+            _save(current)
+        except (OSError, ValueError):
+            pass
+    forwarded_body = (f"Clerk (not {_name(orchestrator)}):\n"
                       f"[FWD from {_name(msg['from'])} · msg {msg_id}]\n" + body)
     # Recover a sequential retry after send succeeded but digest append failed.
     existing = [m for m in _messages() if m.get("from") == cfg["clerk_id"]
-                and m.get("to") == cfg["orchestrator_id"] and m.get("reply_to") == msg_id
+                and m.get("to") == orchestrator and m.get("reply_to") == msg_id
                 and m.get("forwarded_for") == msg["from"] and m.get("body") == forwarded_body]
     forwarded_id = existing[0]["id"] if existing else inbox.send(
-        cfg["clerk_id"], cfg["orchestrator_id"], forwarded_body,
+        cfg["clerk_id"], orchestrator, forwarded_body,
         forwarded_for=msg["from"], reply_to=msg_id,
         thread_id=msg.get("thread_id"), priority=msg.get("priority", "normal"))
     try:
-        _digest(cfg, msg, "forwarded", body, forwarded_id=forwarded_id)
+        _digest(orchestrator, msg, "forwarded", body, forwarded_id=forwarded_id)
     except OSError as exc:
         raise ValueError(f"Forward {forwarded_id} delivered, but digest failed: {exc}") from exc
     return forwarded_id
@@ -255,7 +301,8 @@ def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="liteharness clerk", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     on = commands.add_parser("enable")
-    on.add_argument("--for", dest="orchestrator", required=True)
+    on.add_argument("--for", dest="orchestrator", default=None,
+                    help="Optional and advisory: the live orchestrator is found at routing time")
     commands.add_parser("disable")
     commands.add_parser("status")
     launch = commands.add_parser("start")

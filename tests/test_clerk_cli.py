@@ -17,8 +17,18 @@ def root(tmp_path, monkeypatch):
     for name in ("new", "cur", "done", "tmp"):
         monkeypatch.setattr(inbox, "INBOX_" + name.upper(), root / "inbox" / name)
     (root / "agents").mkdir()
-    (root / "agents/orch.json").write_text(json.dumps({"agent_id": "orch", "name": "Coordinator"}), encoding="utf-8")
+    orchestrator(root)
     return root
+
+
+def orchestrator(root, agent="orch", **changes):
+    """A LIVE orchestrator row. Its owning pid is this process's parent, so it is alive and is not
+    the pid the clerk rows use (two rows on one pid would supersede each other)."""
+    now = datetime.now(timezone.utc).isoformat()
+    row = {"agent_id": agent, "name": "Coordinator", "role": "orchestrator", "tier": "orchestrator",
+           "session_pid": os.getppid(), "registered_at": now, "last_seen": now}
+    row.update(changes)
+    (root / "agents" / f"{agent}.json").write_text(json.dumps(row), encoding="utf-8")
 
 
 def cfg(root):
@@ -335,6 +345,8 @@ def test_real_cli_dispatch_status_enable_disable_and_forward(tmp_path):
         assert result.returncode == 0, result.stderr
         return result.stdout
     assert json.loads(run("status"))["enabled"] is False
+    (root / "agents").mkdir(parents=True, exist_ok=True)
+    orchestrator(root, session_pid=os.getpid())  # alive for as long as the child commands below run
     run("enable", "--for", "orch")
     data = json.loads((root / "clerk.json").read_text())
     data["clerk_id"] = "clerk-seat"

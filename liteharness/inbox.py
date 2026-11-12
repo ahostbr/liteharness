@@ -99,10 +99,12 @@ def send(
     msg_id = str(uuid.uuid4())
     filename = make_filename(priority)
 
-    from .clerk_route import load_clerk_config, route_recipient, clerk_is_live
+    from .clerk_route import routing_config, route_recipient, clerk_is_live
 
+    # routing_config decides at this moment whether the addressee is a live orchestrator; a stored
+    # orchestrator id is never what routes a message.
     to_agent, original_to = route_recipient(
-        from_agent, to_agent, direct, forwarded_for, load_clerk_config(), clerk_is_live,
+        from_agent, to_agent, direct, forwarded_for, routing_config(to_agent), clerk_is_live,
     )
     message = {
         "id": msg_id,
