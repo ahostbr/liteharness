@@ -71,13 +71,13 @@ def test_host_refusal_reason_reaches_the_caller(world, monkeypatch, capsys, stat
 def test_cwd_disagreement_is_reported_not_refused(world, monkeypatch, capsys):
     _host(monkeypatch, {'ok': True, 'status': 'bound', 'requestId': 'request-589', 'agentId': AID,
                         'sessionId': SESSION, 'paneId': 'saved-pane', 'slotId': 'saved-slot',
-                        'leafId': 'saved-agent-leaf', 'placeholderCwd': 'G:\\SAS\\ShadowsAndShurikens',
-                        'authorityCwd': 'G:\\SAS\\ShadowsAndShurikens\\.worktrees\\Seat'})
+                        'leafId': 'saved-agent-leaf', 'placeholderCwd': 'D:\\work\\project',
+                        'authorityCwd': 'D:\\work\\project\\.worktrees\\Seat'})
     assert launch(world, 'owned-resume') == 0
     output = capsys.readouterr().out
     assert 'saved-agent-leaf' in output
-    assert 'placeholder cwd G:\\SAS\\ShadowsAndShurikens' in output
-    assert 'used the seat\'s recorded cwd G:\\SAS\\ShadowsAndShurikens\\.worktrees\\Seat' in output
+    assert 'placeholder cwd D:\\work\\project' in output
+    assert 'used the seat\'s recorded cwd D:\\work\\project\\.worktrees\\Seat' in output
 
 
 SEED = {'version': 1, 'path': os.path.abspath('library/tesla.md'), 'bodySha256': 'a' * 64}

@@ -49,7 +49,9 @@ _USER_SEGMENT = 'Users'
 HOME_RE = re.compile(r'(?:[A-Za-z]:[\\/]' + _USER_SEGMENT + r'[\\/]|/c/' + _USER_SEGMENT + r'/)([^\\/\s\"\'<>]+)', re.I)
 PLACEHOLDERS = {'testuser', 'user', 'username', 'youruser', 'you', 'example', 'name', 'me', 'yourname', 'public', 'default'}
 PATH_PATTERNS = [
-    ('private drive', re.compile(r'E:[\\/]SAS', re.I)),
+    # Any drive letter: the folder has already moved drives once, and a guard that knew only the
+    # old letter passed four lines carrying the new one.
+    ('private drive', re.compile(r'(?<![A-Za-z0-9])[A-Za-z]:[\\/]SAS(?![A-Za-z0-9_])', re.I)),
     ('machine project root', re.compile(r'C:[\\/]Projects(?:[\\/]|\b)', re.I)),
 ]
 WORD_RE = re.compile(r'[A-Za-z0-9]+')
@@ -256,7 +258,12 @@ def selftest() -> int:
     assert scan_text('actor = ' + actor)
     assert scan_file('image.bin', b'\0' + actor.encode())
     assert not scan_text('LiteHarness public product')
-    print('SELFTEST OK: actor/legal-field/compatibility/binary positive and negative controls')
+    folder = 'SA' + 'S'
+    for drive in 'EGeg':
+        for slash in ('\\', '/'):
+            assert (1, 'private drive') in scan_text('cwd ' + drive + ':' + slash + folder + slash + 'x'), drive + slash
+    assert not scan_text('cwd D:' + '\\' + folder + 'SY\\x') and not scan_text('see PG:/' + folder + '/x')
+    print('SELFTEST OK: actor/legal-field/compatibility/binary/private-drive positive and negative controls')
     return 0
 
 
