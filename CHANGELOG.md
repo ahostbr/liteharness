@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10] — 2026-11-14
+
+Three changes since 0.4.9. None has been checked end to end by the maintainer.
+
+### Changed
+- The shipped `ls-liteharness` skill carries the current fleet doctrine, the same text the
+  Claude Code plugin ships: fleet builders, scouts and critics launch as visible named
+  `--split` seats; native `Agent()` subagents are for in-session helpers; headless `--pty`
+  is for approved overnight work only. The catalog copy still said "default is always
+  headless PTY mode".
+- `ls-tts`: versions are spoken as "point" (Kokoro stuttered on dotted numbers).
+
+### Fixed
+- A pattern recorded with outcome `stuck`, `unknown` or `blocked` keeps that word: the row
+  carries `outcome_given` beside `outcome: failure`, the reason line says "Outcome was
+  <word>", and the receipt says the row was stored as failure. A plain success or failure
+  is unchanged.
+
 ### Removed
 - The rule "close a terminal only when the human asks" is dropped from the shipped skills
   (`ls-liteharness`, `ls-init-liteharness`, `ls-sentinel`). `liteharness pty-kill` and

@@ -1,11 +1,11 @@
 ---
 name: ls-liteharness
-description: LiteHarness agent orchestration — spawn, name, message, and control Claude Code sessions. Headless (ConPTY) and headed (UIAutomation) modes. Use when spawning agents, checking inbox, sending messages, discovering agents, controlling terminals, or when hooks fail. Triggers on 'liteharness', 'spawn', 'check inbox', 'send a message to', 'discover agents', 'who is online', 'watch inbox', 'start liteharness', 'send-input', 'read-output'.
+description: LiteHarness agent orchestration — spawn, name, message, and control Claude Code sessions. Visible named Fleet splits; explicit background/legacy diagnostic modes. Use when spawning agents, checking inbox, sending messages, discovering agents, controlling terminals, or when hooks fail. Triggers on 'liteharness', 'spawn', 'check inbox', 'send a message to', 'discover agents', 'who is online', 'watch inbox', 'start liteharness', 'send-input', 'read-output'.
 ---
 
 # LiteHarness — Agent Orchestration
 
-Spawn, name, message, and programmatically control Claude Code CLI sessions. Two control modes: **headless** (ConPTY daemon) and **headed** (UIAutomation on visible terminals). All commands use `python -m liteharness.cli` or the `liteharness` console script.
+Spawn, name, message, and control Claude Code CLI sessions. The fleet path is a **visible named `--split` seat**. Explicit overnight/background PTYs and legacy UIAutomation diagnostics are separate exceptions, never a substitute for fleet visibility. All commands use `python -m liteharness.cli` or the `liteharness` console script.
 
 ## Orchestrator Post-Compaction Protocol (MANDATORY)
 
@@ -137,9 +137,30 @@ Integrate canonical source before running python -m liteharness.cli update-scrip
 
 ## Spawning Agents
 
-Spawn new Claude Code sessions. **Default is always headless PTY mode** — only use headed/terminal mode if the user explicitly asks for a visible terminal.
+**Fleet builders, scouts and critics always launch as visible named `--split` seats.**
+Native `Agent()` subagents are for in-session helpers (including Explore). Any model runs
+(the host passes `sonnet`, `opus`, `haiku`, `fable` or nothing) and no `Agent-Tier` line is needed.
+The cwd must be the session's own directory or inside it (an `isolation: "worktree"` lives
+under the repo); any other path is refused. A tier seat is never an `Agent()` call.
+Use the fleet launcher for tier seats (PowerShell; replace the task/name/brief/worktree placeholders):
 
-### PTY Mode (DEFAULT) — headless, full programmatic control
+```powershell
+liteharness spawn --split --cli claude --tier scout --model 'claude-sonnet-5-5[1m]' --cwd '<absolute-owned-worktree>' --name '<fresh-task-seat>' --cognitive feynman --prompt 'I am here to <purpose>. Task-id: <card>. Read-only scout: <brief>'
+```
+
+Scouts and critics use Sonnet 5.5 (`--tier scout` or `--tier critic`);
+grunt builders use `--tier builder --model 'claude-haiku-5-5[1m]'`.
+Choose a task-appropriate cognitive method rather than copying the scout's method
+for every role. Follow any explicit task-specific orchestrator model selection.
+Reuse the existing Fleet pane (`--pane <fleet-pane-id>` when known); never create
+an empty terminal as a placeholder. Follow-up work messages/resumes the same named
+seat, not a replacement. These are real fleet seats with inbox/kanban discipline.
+
+### Explicit overnight/background PTY mode — not a visible fleet substitute
+
+Only use headless `--pty` for explicitly approved overnight/background work that
+nobody is watching. The legacy terminal/UIAutomation modes below are diagnostics,
+not the launch path for the visible Fleet panel.
 
 ```bash
 liteharness pty-daemon                              # start daemon first (port 7460)
@@ -371,16 +392,12 @@ If hooks aren't firing, use this skill's manual commands as fallback.
 
 **All read-only agents (scouts, investigators, researchers) MUST be spawned as polymathic agents.** Include a cognitive architecture prompt to ensure full coherence with the 5-tier harness system.
 
-### For Agent() sub-agents (ephemeral):
+### For visible named fleet seats (persistent):
 
-```
-Agent({ subagent_type: "polymathic-feynman", prompt: "Investigate X..." })
-Agent({ subagent_type: "polymathic-carmack", prompt: "Trace the system path for Y..." })
-```
-
-### For terminal spawns (persistent):
-
-Include the polymathic cognitive architecture in the `--prompt` flag. Match the polymath to the task:
+A persistent tier seat is never a native `Agent()` call. Use the `--split`
+command above and set `--cognitive <method>` so the harness injects the architecture.
+Require a purpose declaration and method-adoption ACK before accepting findings.
+Match the polymath to the task:
 
 | Task Type                     | Polymath              | Why                                                   |
 | ----------------------------- | --------------------- | ----------------------------------------------------- |
@@ -399,7 +416,7 @@ Include the polymathic cognitive architecture in the `--prompt` flag. Match the 
 | "check inbox" / "any messages?"     | `python -m liteharness.hooks check`                                                                            |
 | "send X to agent Y"                 | `python -m liteharness.cli send <id> "X" --from <YOUR-ID>`                                                     |
 | "who is online" / "discover agents" | `python -m liteharness.cli discover`                                                                           |
-| "spawn an agent"                    | `liteharness spawn --pty --model <model> --name <name> --prompt <task>` (ALWAYS headless PTY by default)       |
+| "spawn an agent"                    | Use the visible `liteharness spawn --split --cli claude --tier <role> --model <full-id> --cwd <owned-worktree> --name <fresh-task-seat> --cognitive <method> --prompt <brief>` command above. |
 | "send /compact to Recon"            | `liteharness send-input <id> "/compact"` (PTY) or `--headed` (UIAutomation)                                    |
 | "what's Recon doing?"               | `liteharness read-output <id>` (PTY) or `--headed <handle:pane>`                                               |
 | "follow up with that agent" | Inbox the same live named seat with `liteharness send <agent-id> "<follow-up task>" --from <your-agent-id>`; resume only after its process is gone |

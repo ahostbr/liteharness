@@ -19,11 +19,11 @@
     "hooks"
   ],
   "file_count": 417,
-  "hash": "814dff175ede",
+  "hash": "55ff16662cd9",
   "upstream_provenance_status": "historical: source_repo/source_commit/source_path/synced_at record the prior upstream baseline; this reconciled tree was not synced to that commit",
   "reconciliation": {
     "task_id": "T0335-H",
-    "package_version": "0.4.9",
+    "package_version": "0.4.10",
     "published_restoration_baseline": "fba17c7c40a83584283418c6499467a1a8805196",
     "initial_target_commit": "4e57b5f3e851446965f5798431d23f77005bd778",
     "method": "public-descendant; selected retirement revert, owned launch, startup lock, registration, sender checks, Theater and speech guidance; no wholesale tree sync",
@@ -494,7 +494,7 @@
       "skills/ls-youtube/evals/evals.json"
     ],
     "payload_file_count": 418,
-    "payload_sha256": "b4e655e5b63381801f581bb270cdeaabc18a6633eee81eb6479f607aaee84aaa",
+    "payload_sha256": "2c8235d4d92cae493608ab36aaeb94336fd6964720fd46aae61418bc407a726a",
     "payload_hash_scope": "all projected catalog files including __init__.py; excludes only top-level PROVENANCE.json and runtime families",
     "candidate_commit_binding": "final immutable candidate commit recorded externally; no self-referential commit SHA",
     "artifact_verification": "pending separate wheel/sdist payload comparison; recalculated source stamp alone is not artifact proof",
