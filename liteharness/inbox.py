@@ -31,6 +31,34 @@ def ensure_dirs() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
 
+def message_body(msg: dict) -> str:
+    """The text of a message, whichever producer wrote it.
+
+    The Python CLI writes top-level `body`; LiteSuite's GlobalInbox (seat-message,
+    e.g. the image editor's "Send to agent") nests it as `payload.text`.
+    """
+    body = msg.get("body") or ""
+    if not body:
+        payload = msg.get("payload") or {}
+        if isinstance(payload, dict):
+            body = payload.get("text") or payload.get("body") or ""
+    return body if isinstance(body, str) else str(body)
+
+
+def message_time(msg: dict) -> str:
+    """ISO-8601 UTC time of a message: top-level `timestamp`, else GlobalInbox's epoch-ms `ts`."""
+    stamp = msg.get("timestamp")
+    if isinstance(stamp, str) and stamp:
+        return stamp
+    ts = msg.get("ts")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        try:
+            return datetime.fromtimestamp(ts / 1000, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            pass
+    return ""
+
+
 def make_filename(priority: str = "normal") -> str:
     """Generate a message filename: <timestamp>__<priority>__<uuid>.json"""
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

@@ -872,7 +872,7 @@ def check_inbox() -> None:
         sender = msg.get("from", "unknown")
         priority = msg.get("priority", "normal")
         msg_type = msg.get("type", "notification")
-        body = msg.get("body", "")
+        body = inbox.message_body(msg)
         thread = msg.get("thread_id")
         msg_id = msg.get("id", "")
         project = msg.get("project")
@@ -3400,11 +3400,7 @@ def watch_inbox(
                 # top-level {body}; the desktop GlobalInbox (e.g. the seat's
                 # Orchestrator Chat relay) nests {payload:{text}}. the user's first
                 # live seat-message notified with an EMPTY body (2026-08-06).
-                body = msg.get("body", "")
-                if not body:
-                    payload = msg.get("payload") or {}
-                    if isinstance(payload, dict):
-                        body = payload.get("text") or payload.get("body") or ""
+                body = inbox.message_body(msg)
                 thread = msg.get("thread_id")
                 project = msg.get("project")
 

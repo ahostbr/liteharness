@@ -1375,8 +1375,8 @@ def cmd_list() -> None:
     for msg in messages:
         sender = msg.get("from", "?")
         priority = msg.get("priority", "normal")
-        body = msg.get("body", "")[:80]
-        ts = msg.get("timestamp", "")[:19]
+        body = inbox.message_body(msg)[:80]
+        ts = inbox.message_time(msg)[:19]
         prefix = "[!] " if priority == "urgent" else "    "
         print(f"{prefix}{ts} from {sender}: {body}")
 
@@ -1403,7 +1403,7 @@ def cmd_inbox(count: int = 10, agent: str | None = None, all_agents: bool = Fals
             if not all_agents:
                 if me not in (msg.get("to"), msg.get("from")) and msg.get("to") != "broadcast":
                     continue
-            sort_key = msg.get("timestamp") or ""
+            sort_key = inbox.message_time(msg)
             if not sort_key:
                 try:
                     sort_key = datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat()
@@ -1420,8 +1420,8 @@ def cmd_inbox(count: int = 10, agent: str | None = None, all_agents: bool = Fals
         pr = "[!] " if msg.get("priority") == "urgent" else ""
         thread = f" (thread {msg.get('thread_id')})" if msg.get("thread_id") else ""
         out.append("")
-        out.append(f"--- {pr}{(msg.get('timestamp') or '')[:19]} [{dirname}] {msg.get('from', '?')} -> {msg.get('to', '?')}{thread}")
-        out.append(msg.get("body", ""))
+        out.append(f"--- {pr}{inbox.message_time(msg)[:19]} [{dirname}] {msg.get('from', '?')} -> {msg.get('to', '?')}{thread}")
+        out.append(inbox.message_body(msg))
     text = "\n".join(out)
     try:
         print(text)
