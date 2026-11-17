@@ -1,4 +1,4 @@
-import { FLEET_PANE, fleetSnapshot, spawnDenial } from './mods/fleet.mjs'
+import { FLEET_PANE, fleetSnapshot } from './mods/fleet.mjs'
 import { POLL_MS, validSessionId, restoredRequest, snapshot, bandText, cacheEstimate } from './mods/usage-schema.mjs'
 import { PASTE_PANE, PASTE_PAGE_SIZE, MANIFEST_BYTES, absolutePath, within, historyEntries, imageGeometry } from './mods/paste-schema.mjs'
 
@@ -699,13 +699,6 @@ export function register(on, options) {
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) fleetWorking = false
     return next(e)
-  })
-
-  on('agent.spawn', async ($, e, next) => {
-    let cwd = null
-    try { cwd = await $.session.cwd() } catch { /* spawnDenial refuses a call whose owned cwd is unreadable. */ }
-    const denial = spawnDenial(e, cwd)
-    return denial ? { deny: denial } : next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: 'liteharness-fleet' }, async ($, e, next) => {

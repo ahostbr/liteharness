@@ -1,16 +1,10 @@
-"""T2: commits carry `Agent-Role:`; the history scanner and the fleet brief accept it OR
+"""T2: commits carry `Agent-Role:`; the history scanner accepts it OR
 the older `Agent-Tier:` so every commit already in a repo stays readable."""
-import json
-import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
 from liteharness.rag.scanners.git_scanner import GitScanner
-
-ROOT = Path(__file__).resolve().parents[1]
-FLEET = ROOT / "liteharness" / "catalog" / "hooks" / "mods" / "fleet.mjs"
 
 
 def _git(repo, *args):
@@ -81,39 +75,3 @@ def test_an_unknown_trailer_value_is_kept_not_dropped(tmp_path):
     _commit(tmp_path, "odd", ["Agent-Name: Alpha", "Agent-Tier: librarian"])
     (content,) = [c["content"] for c in GitScanner(str(tmp_path)).parse_file("__git_log__")]
     assert "Role: librarian" in content
-
-
-needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-
-
-def _denial(prompt):
-    script = (
-        "import {spawnDenial} from %s;"
-        "const e={prompt:%s,model:'claude-opus-5-5[1m]',cwd:'/w',fork:false};"
-        "console.log(JSON.stringify(spawnDenial(e,'/w')))"
-    ) % (json.dumps(FLEET.as_uri()), json.dumps(prompt))
-    out = subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True,
-                         text=True, check=True).stdout
-    return json.loads(out)
-
-
-@needs_node
-@pytest.mark.parametrize("line", [
-    "Agent-Role: owner", "Agent-Role: orchestrator", "Agent-Tier: leader", "Agent-Tier: worker",
-    "Agent-Role: builder", "Agent-Tier: reviewer"])
-def test_fleet_brief_accepts_either_trailer(line):
-    assert _denial("go\n" + line + "\nmore") is None
-
-
-@needs_node
-@pytest.mark.parametrize("prompt", [
-    "no line at all",
-    "Agent-Role: janitor",
-    "Agent-Role: owner\nAgent-Tier: leader",
-    "Agent-Role: owner\nAgent-Role: scout",
-])
-def test_fleet_brief_no_longer_requires_a_role_line(prompt):
-    """367a49f dropped the role-line requirement on purpose ("Agent() subagents run; accept the
-    host's model values, drop the role-line requirement"): an in-session helper is not a fleet seat
-    and carries no role. This test used to assert the refusal that commit removed."""
-    assert _denial(prompt) is None

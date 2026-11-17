@@ -19,27 +19,3 @@ export function fleetSnapshot(text) {
       id: clean(t.id), title: clean(t.title), status: clean(t.status), assignee: clean(t.assignee), tier: clean(t.tier),
     })), warnings: row.warnings.slice(0, 10).map(clean) }
 }
-
-export function normalizedCwd(value) {
-  if (typeof value !== 'string' || !value || /[\x00-\x1f]/.test(value)) return null
-  const windows = /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value)
-  if (!windows && !/^\/(?!\/)/.test(value)) return null
-  const path = windows ? value.replace(/\\/g, '/').toLowerCase() : value
-  if (path.split('/').some(part => part === '.' || part === '..')) return null
-  return path.replace(/\/+$/, '') || '/'
-}
-
-// Returns the refusal text, or null when the Agent() call may run. Any model runs: the host's Agent tool
-// passes only its own enum (or nothing), and which model a subagent uses is never this guard's call.
-export function spawnDenial(e, ownedCwd) {
-  // The host's Agent tool sets no cwd for an ordinary call, which then runs in the session's own directory.
-  // isolation:"worktree" runs under the session's repo, so a cwd equal to the session's directory or inside it
-  // passes; a sibling that merely shares the prefix (C:/repo-evil beside C:/repo) does not. Never echo the requested cwd.
-  const owned = normalizedCwd(ownedCwd)
-  const cwd = normalizedCwd(e?.cwd || ownedCwd)
-  const prefix = owned && (owned.endsWith('/') ? owned : owned + '/')
-  if (!owned || !cwd || (cwd !== owned && !cwd.startsWith(prefix))) {
-    return "Agent() cwd must be the session's own directory or inside it; a foreign or unreadable cwd is refused."
-  }
-  return null
-}
