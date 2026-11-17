@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.11] — 2026-11-17
+
+Two changes since 0.4.10. Neither has been checked end to end by the maintainer.
+
+### Removed
+- The shipped plugin hooks no longer register an `agent.spawn` handler (`spawnDenial`, a cwd
+  check on native `Agent()` calls). Claude Code refuses Code Mode while a plugin registers
+  `agent.spawn`, and the check was never meant to gate subagents. Same change as the Claude
+  Code plugin 1.0.26.
+
+### Fixed
+- Messages written by LiteSuite's inbox (`payload.text`, epoch-ms `ts`, no top-level `body` or
+  `timestamp`), such as a seat-message from the image editor, now show their text and time in
+  the hook's "message(s) received" block, `liteharness inbox` and `liteharness list`. They were
+  shown blank.
+
 ## [0.4.10] — 2026-11-14
 
 Three changes since 0.4.9. None has been checked end to end by the maintainer.
