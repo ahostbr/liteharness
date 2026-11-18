@@ -2175,6 +2175,14 @@ def register_presence() -> None:
     canvas_session = os.environ.get("LITESUITE_CANVAS_SESSION", "").strip()
     if canvas_session and not presence.get("canvas_session_id"):
         presence["canvas_session_id"] = canvas_session
+    # T1350: the process tree is proof where the env and the stored value are not.
+    # When this seat's CLI provably runs in one bridge PTY, the row names that PTY,
+    # even over a stored value (a stored id outlives its PTY: a seat relaunched by
+    # anything but `spawn --resume` kept a dead session id for good). Not proven
+    # changes nothing above.
+    proven_session = _proven_canvas_session(agent_id, session_pid)
+    if proven_session:
+        presence["canvas_session_id"] = proven_session
 
     # Store WT session ID for terminal targeting via `wt -w <name> send-input`
     wt_session = os.environ.get("WT_SESSION") or existing.get("wt_session")
@@ -2526,6 +2534,26 @@ def _bridge_listening() -> bool:
     except Exception:
         s.close()
         return False
+
+
+def _proven_canvas_session(agent_id: str, session_pid: int | None) -> str | None:
+    """The bridge PTY this seat's CLI provably runs in, or None (T1350; rules in canvas_proof).
+
+    This runs at every seat's SessionStart, so it costs nothing outside LiteSuite (no bridge
+    token in the env: no call), at most the 50 ms port check when the bridge is down, and one
+    2 s-bounded GET otherwise. Every failure is "not proven": it never raises into registration.
+    """
+    token = os.environ.get("LITESUITE_BRIDGE_TOKEN", "").strip()
+    if not token or not session_pid:
+        return None
+    try:
+        from . import canvas_proof
+
+        return canvas_proof.proven_session(
+            agent_id, session_pid,
+            lambda: canvas_proof.pty_sessions(_bridge_url(), token) if _bridge_listening() else None)
+    except Exception:
+        return None
 
 
 _OBS_SLIM_MAX_STRING = 1024
