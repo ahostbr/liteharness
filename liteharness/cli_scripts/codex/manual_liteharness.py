@@ -360,15 +360,11 @@ def stop_monitor_pid(pid: object) -> None:
     if not isinstance(pid, int) or pid <= 0 or not pid_is_alive(pid):
         return
     if os.name == "nt":
+        # Not `taskkill /T`: pid reuse makes it reach unrelated older processes (T1337).
+        from liteharness.proctree import kill_true_tree
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except OSError:
+            kill_true_tree(pid)
+        except Exception:
             return
         return
     try:

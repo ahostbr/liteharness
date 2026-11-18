@@ -5885,11 +5885,12 @@ def _live_owner_pid(presence: dict) -> int | None:
 
 
 def _kill_pid_tree(pid: int) -> bool:
-    import subprocess as _sp
     try:
         if sys.platform == "win32":
-            return _sp.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, timeout=15).returncode == 0
+            # Not `taskkill /T`: it follows stale ParentProcessIds through pid
+            # reuse and can reach the PTY daemon (T1337, proctree.py).
+            from .proctree import kill_true_tree
+            return kill_true_tree(pid)
         os.kill(pid, 15)
         return True
     except Exception:
